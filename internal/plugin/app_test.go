@@ -140,6 +140,28 @@ keys:
 	if routeResp.Handled {
 		t.Fatalf("route response = %+v, want host-native routing", routeResp)
 	}
+
+	schedulerReq, _ := json.Marshal(SchedulerPickRequest{
+		Model: "gpt-6-astra",
+		Options: SchedulerPickOptions{
+			Headers: map[string][]string{"Authorization": {"Bearer " + plain}},
+		},
+		Candidates: []SchedulerAuthCandidate{{ID: "codex-auth", Provider: "codex"}},
+	})
+	raw, err = app.HandleMethod(MethodSchedulerPick, schedulerReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	var schedulerResp SchedulerPickResponse
+	if err := json.Unmarshal(env.Result, &schedulerResp); err != nil {
+		t.Fatal(err)
+	}
+	if schedulerResp.Handled {
+		t.Fatalf("scheduler response = %+v, want host-native scheduling", schedulerResp)
+	}
 }
 
 func TestAppModelsEndpointDenied(t *testing.T) {

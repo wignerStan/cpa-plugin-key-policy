@@ -290,6 +290,13 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
+	// A native route delegates both provider and credential selection to CPA.
+	// Resolve it again from the scheduler payload because some host versions do
+	// not propagate frontend-auth metadata into SchedulerPickOptions.Metadata.
+	if rule, _, ok := a.store.Route(http.Header(req.Options.Headers), nil, req.Model); ok &&
+		strings.EqualFold(strings.TrimSpace(rule.Provider), "native") {
+		return OKEnvelope(SchedulerPickResponse{Handled: false})
+	}
 	group := schedulerGroupFromMetadata(req.Options.Metadata)
 	globalMode := a.store.GlobalWeightedRoundRobin()
 	if globalMode {
