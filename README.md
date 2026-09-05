@@ -42,13 +42,18 @@ A reusable name like `fast` that expands to one or more **targets**:
 
 | Field | Meaning |
 |--------|---------|
-| `provider` | CPA provider id (`codex`, `claude`, or an openai-compatibility **name** such as `cerebras`) |
+| `provider` | CPA provider id (`codex`, `claude`, or an openai-compatibility **name** such as `cerebras`), or `native` to use CPA's normal mixed routing |
 | `target_model` | Real upstream model id |
 | `group` | Optional credential filter (see [Credential groups](#credential-groups-tiers--classify)) |
 | `dispatch` | `priority` (always first usable target) or `round-robin` |
 | billing | `tokens` (per-million prices) or `per_call` (fixed USD) |
 
 Keys can **reference** aliases instead of duplicating targets. Multi-target aliases expand to several rules with the same alias name; auth and routing share one pick per request so the `group` filter matches the chosen target.
+
+For `provider: native`, keep `alias` and `target_model` equal to a model ID
+that CPA can already route. The plugin still authenticates and authorizes the
+request, while CPA selects among its available native and compatibility
+providers.
 
 ### Credential groups (tiers + classify)
 

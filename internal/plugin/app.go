@@ -183,6 +183,13 @@ func (a *App) routeModel(raw []byte) ([]byte, error) {
 	if !ok {
 		return OKEnvelope(ModelRouteResponse{Handled: false})
 	}
+	// "native" authorizes the model for this plugin key but deliberately
+	// leaves provider selection to CPA. This is useful when the same model is
+	// available from multiple native/compatibility providers and CPA's mixed
+	// router should choose among them.
+	if strings.EqualFold(strings.TrimSpace(rule.Provider), "native") {
+		return OKEnvelope(ModelRouteResponse{Handled: false})
+	}
 	return OKEnvelope(ModelRouteResponse{
 		Handled:     true,
 		TargetKind:  "provider",

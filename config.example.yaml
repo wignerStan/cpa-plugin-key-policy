@@ -52,6 +52,11 @@ plugins:
               provider: "codex"
               target_model: "gpt-5.4-mini"
               group: "free" # built-in tier; custom groups use classify:name
+            # Preserve CPA's normal mixed-provider selection for a native
+            # model ID while still enforcing this key's allow-list.
+            - alias: "gpt-6-astra"
+              provider: "native"
+              target_model: "gpt-6-astra"
             - alias: "compat-demo"
               provider: "cerebras" # openai-compatibility channel name
               target_model: "gpt-oss-120b"
