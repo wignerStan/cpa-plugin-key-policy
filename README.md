@@ -20,7 +20,8 @@ In plain words: you issue your own `cpa_…` keys to clients. Each key only sees
 3. **Limit** — per-key RPM, optional daily/weekly USD caps, token or per-call billing.
 4. **Isolate credentials (tiers / groups)** — pin a request to Codex free/team/… or to a **custom classify group** so it never lands on the wrong auth file.
 5. **Multi-target aliases** — one alias can point at several backends (priority or round-robin).
-6. **Web UI** — manage keys, global aliases, and credential classification inside CPA.
+6. **Model catalog policy** — reusable `/v1/models` groups can expose only selected aliases and patch advertised metadata such as context/output limits.
+7. **Web UI** — manage keys, global aliases, and credential classification inside CPA.
 
 ---
 
@@ -93,7 +94,7 @@ Channels under CPA `openai-compatibility` (e.g. a named proxy) use the **channel
 | Frontend auth | Know plugin keys; enforce alias allow-list, RPM, budget; stamp route + group metadata |
 | Model router | Alias → provider + target model |
 | Scheduler | Optionally filter candidates by `group`, then smooth-weight them within the highest Priority tier |
-| Response interceptor | Non-stream JSON: rewrite top-level `model` back to the alias |
+| Response interceptor | Non-stream JSON: rewrite top-level `model` back to the alias; on patched CPA hosts, filter and patch `/v1/models` catalogs |
 | Usage | Token / per-call billing into the state file |
 | Management API + embedded Web UI | Keys, aliases, classify rules, status |
 
@@ -134,9 +135,38 @@ plugins:
       global_weighted_round_robin: true
 ```
 
+`catalog_groups` are operator-owned plugin config. Each group matches one or more downstream **key IDs** (exact IDs, shell-style globs, or `*`) and defines the catalog those keys see. A catalog model clones metadata from `source`, changes its downstream id to `id`, deep-merges `patch`, then removes top-level fields listed in `remove`.
+
+```yaml
+catalog_groups:
+  - name: pi-coding
+    keys: ["team-*", "dev"]
+    models:
+      # Pi sees model "fast", but routing can still map "fast" to the real
+      # gemini-3.8-flash-high target through the normal alias table.
+      - id: fast
+        source: gemini-3.8-flash-high
+        patch:
+          context_window: 262144
+          max_context_window: 262144
+          max_tokens: 32768
+
+      # source defaults to id when omitted. Any JSON-compatible metadata can
+      # be patched; nested objects are merged recursively.
+      - id: gpt-5.4
+        patch:
+          display_name: "GPT 5.4 (Team)"
+        remove:
+          - upgrade
+```
+
 Notes:
 
-- If `state_file` exists, it is the source of truth for keys / aliases / classify rules / usage.
+- If `state_file` exists, it is the source of truth for keys / aliases / classify rules / usage. `catalog_groups` remain in plugin config so state persistence cannot erase operator-owned catalog policy.
+- `allow_models_endpoint` is still the security gate. A catalog group never grants access to `/v1/models`; the key must already have `allow_models_endpoint: true`.
+- When at least one `catalog_groups` entry exists, a plugin key matching no catalog group receives an empty model list. Native CPA keys and other auth providers are left untouched.
+- A catalog item whose `source` is absent from CPA's generated catalog is omitted rather than synthesized with guessed capabilities.
+- Catalog filtering requires a CPA host that exposes `GET /v1/models` through the existing `response.intercept_after` plugin hook. Without that host patch, the old binary behavior remains.
 - `global_weighted_round_robin: true` ignores the selected alias target group and places every current provider/model candidate in one global pool. Distribution then follows the Weight values on CPA's credential page. The default is `false`.
 - With this option enabled, alias-level group rotation no longer restricts the final credential. Native CPA keys remain unaffected.
 - Prefer creating keys and aliases in the **Web UI** or Management API; seed YAML `keys` is mainly for first boot.
@@ -245,8 +275,17 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 
 ### `/v1/models` on CPA main port
 
-Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. CPA cannot filter that list per plugin key on the main port.
+`allow_models_endpoint` remains a per-key deny/allow gate. On a CPA build with the model-list response-interceptor patch, allowed plugin keys are additionally filtered through `catalog_groups`:
 
+- matching groups are combined in config order;
+- duplicate exposed `id` values keep the first entry;
+- `source` metadata is cloned from CPA's real generated catalog;
+- `patch` can lower `context_window`, `max_context_window`, `max_tokens`, or change other JSON-compatible metadata;
+- `remove` deletes selected top-level fields;
+- unmatched plugin keys get an empty catalog when catalog groups are configured;
+- native CPA keys are not filtered by this plugin.
+
+For Pi/Codex clients (`/v1/models?client_version=...`) the plugin preserves the rich catalog shape and changes the cloned model's `slug` to the downstream `id`. For ordinary OpenAI clients it changes `id`.
 
 ---
 
@@ -269,4 +308,3 @@ Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. 
 go test ./...
 cd web && npm test && npm run build
 ```
-
