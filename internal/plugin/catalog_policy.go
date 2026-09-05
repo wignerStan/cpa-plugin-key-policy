@@ -171,9 +171,10 @@ func (a *App) rewriteModelCatalog(req ResponseInterceptRequest) ([]byte, bool) {
 	models := catalogModelsForKey(policy.Groups, keyID)
 	body, err := rewriteCatalogBody(req.Body, models)
 	if err != nil {
-		// Fail open on malformed/unexpected host catalog payloads. The host has
-		// already authenticated the request; catalog policy must not break CPA.
-		return nil, false
+		// Catalog groups are an allow-list. If a patched host ever changes the
+		// response shape unexpectedly, fail closed to an empty valid catalog
+		// rather than leaking the global list to a restricted plugin key.
+		return emptyCatalogBody(req), true
 	}
 	return body, !bytes.Equal(body, req.Body)
 }
@@ -181,6 +182,14 @@ func (a *App) rewriteModelCatalog(req ResponseInterceptRequest) ([]byte, bool) {
 func catalogKeyID(metadata map[string]any) string {
 	if len(metadata) == 0 {
 		return ""
+	}
+	// The CPA model-list middleware stamps the frontend auth provider. Do not
+	// consume another auth plugin's metadata merely because it also has key_id.
+	if rawProvider, exists := metadata["access_provider"]; exists {
+		provider := strings.TrimSpace(fmt.Sprint(rawProvider))
+		if provider != "" && !strings.EqualFold(provider, PluginID) {
+			return ""
+		}
 	}
 	if direct, ok := metadata["key_id"]; ok {
 		if key := strings.TrimSpace(fmt.Sprint(direct)); key != "" {
@@ -261,6 +270,18 @@ func rewriteCatalogBody(body []byte, requested []CatalogModel) ([]byte, error) {
 		return json.Marshal(root)
 	}
 	return nil, fmt.Errorf("unrecognized model catalog shape")
+}
+
+func emptyCatalogBody(req ResponseInterceptRequest) []byte {
+	if strings.EqualFold(strings.TrimSpace(req.SourceFormat), modelCatalogSourceCodex) {
+		return []byte(`{"models":[]}`)
+	}
+	if req.Metadata != nil {
+		if _, exists := req.Metadata["client_version"]; exists {
+			return []byte(`{"models":[]}`)
+		}
+	}
+	return []byte(`{"object":"list","data":[]}`)
 }
 
 func selectCatalogModels(source []any, requested []CatalogModel, codex bool) []any {

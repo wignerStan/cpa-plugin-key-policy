@@ -138,6 +138,7 @@ func TestRewriteModelCatalogUsesAuthenticatedKeyMetadata(t *testing.T) {
 		SourceFormat: modelCatalogSourceCodex,
 		Body:         []byte(`{"models":[{"slug":"gemini-3.8-flash-high","context_window":1048576}]}`),
 		Metadata: map[string]any{
+			"access_provider": PluginID,
 			"access_metadata": map[string]any{"key_id": "team-a"},
 		},
 	}
@@ -164,6 +165,7 @@ func TestRewriteModelCatalogUnmatchedPluginKeyGetsEmptyCatalog(t *testing.T) {
 		SourceFormat: modelCatalogSourceCodex,
 		Body:         []byte(`{"models":[{"slug":"fast"}]}`),
 		Metadata: map[string]any{
+			"access_provider": PluginID,
 			"access_metadata": map[string]any{"key_id": "other"},
 		},
 	})
@@ -188,6 +190,43 @@ func TestRewriteModelCatalogLeavesNativeKeysUntouched(t *testing.T) {
 	}
 }
 
+func TestRewriteModelCatalogLeavesOtherAuthProviderUntouched(t *testing.T) {
+	app := NewApp()
+	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast"}}}}})
+
+	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
+		SourceFormat: modelCatalogSourceCodex,
+		Body:         []byte(`{"models":[{"slug":"fast"}]}`),
+		Metadata: map[string]any{
+			"access_provider": "some-other-auth-plugin",
+			"access_metadata": map[string]any{"key_id": "team-a"},
+		},
+	})
+	if changed || body != nil {
+		t.Fatalf("other auth provider catalog unexpectedly changed: changed=%v body=%s", changed, body)
+	}
+}
+
+func TestRewriteModelCatalogFailsClosedOnUnexpectedHostShape(t *testing.T) {
+	app := NewApp()
+	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast"}}}}})
+
+	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
+		SourceFormat: modelCatalogSourceCodex,
+		Body:         []byte(`{"unexpected":[{"slug":"fast"}]}`),
+		Metadata: map[string]any{
+			"access_provider": PluginID,
+			"access_metadata": map[string]any{"key_id": "team-a"},
+		},
+	})
+	if !changed {
+		t.Fatal("expected restricted catalog to fail closed")
+	}
+	if string(body) != `{"models":[]}` {
+		t.Fatalf("body = %s, want empty Codex catalog", body)
+	}
+}
+
 func TestInterceptResponseFiltersModelCatalogBeforeAliasRewrite(t *testing.T) {
 	app := NewApp()
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{
@@ -202,6 +241,7 @@ func TestInterceptResponseFiltersModelCatalogBeforeAliasRewrite(t *testing.T) {
 		SourceFormat: modelCatalogSourceCodex,
 		Body:         []byte(`{"models":[{"slug":"gemini-3.8-flash-high","context_window":1048576}]}`),
 		Metadata: map[string]any{
+			"access_provider": PluginID,
 			"access_metadata": map[string]any{"key_id": "team-a"},
 		},
 	})
