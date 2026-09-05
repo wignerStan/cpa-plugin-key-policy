@@ -19,6 +19,9 @@ plugins:
       catalog_groups:
         - name: "pi-coding"
           keys: ["team-*", "dev"]
+          # Keep models that are not listed below. This is useful when the
+          # group only overrides metadata and should follow CPA catalog updates.
+          include_unlisted: true
           models:
             # Clone the real source metadata, expose it as "fast", then only
             # override the advertised limits that should be smaller for clients.

@@ -141,6 +141,8 @@ plugins:
 catalog_groups:
   - name: pi-coding
     keys: ["team-*", "dev"]
+    # Keep every other CPA model while applying the overrides below.
+    include_unlisted: true
     models:
       # Pi sees model "fast", but routing can still map "fast" to the real
       # gemini-3.8-flash-high target through the normal alias table.
@@ -163,6 +165,7 @@ catalog_groups:
 Notes:
 
 - If `state_file` exists, it is the source of truth for keys / aliases / classify rules / usage. `catalog_groups` remain in plugin config so state persistence cannot erase operator-owned catalog policy.
+- `include_unlisted: true` keeps catalog entries that are not named by the group. Use it for metadata-only overrides so newly added CPA models appear automatically. The default remains `false` for strict per-key allow-lists.
 - `allow_models_endpoint` is still the security gate. A catalog group never grants access to `/v1/models`; the key must already have `allow_models_endpoint: true`.
 - When at least one `catalog_groups` entry exists, a plugin key matching no catalog group receives an empty model list. Native CPA keys and other auth providers are left untouched.
 - A catalog item whose `source` is absent from CPA's generated catalog is omitted rather than synthesized with guessed capabilities.
@@ -282,6 +285,7 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 - `source` metadata is cloned from CPA's real generated catalog;
 - `patch` can lower `context_window`, `max_context_window`, `max_tokens`, or change other JSON-compatible metadata;
 - `remove` deletes selected top-level fields;
+- `include_unlisted: true` preserves every source model not selected for patching, so metadata-only policies follow upstream catalog additions automatically;
 - unmatched plugin keys get an empty catalog when catalog groups are configured;
 - native CPA keys are not filtered by this plugin.
 

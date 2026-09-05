@@ -18,9 +18,10 @@ const (
 // CatalogGroup is a reusable downstream model catalog assigned to one or more
 // key IDs. Key entries support exact IDs, shell-style globs, and "*".
 type CatalogGroup struct {
-	Name   string         `yaml:"name" json:"name"`
-	Keys   []string       `yaml:"keys" json:"keys"`
-	Models []CatalogModel `yaml:"models" json:"models"`
+	Name            string         `yaml:"name" json:"name"`
+	Keys            []string       `yaml:"keys" json:"keys"`
+	IncludeUnlisted bool           `yaml:"include_unlisted,omitempty" json:"include_unlisted,omitempty"`
+	Models          []CatalogModel `yaml:"models" json:"models"`
 }
 
 // CatalogModel clones one source entry from CPA's generated model catalog,
@@ -165,8 +166,8 @@ func (a *App) rewriteModelCatalog(req ResponseInterceptRequest) ([]byte, bool) {
 		return nil, false
 	}
 
-	models := catalogModelsForKey(policy.Groups, keyID)
-	body, err := rewriteCatalogBody(req.Body, models)
+	models, includeUnlisted := catalogModelsForKey(policy.Groups, keyID)
+	body, err := rewriteCatalogBody(req.Body, models, includeUnlisted)
 	if err != nil {
 		// Catalog groups are an allow-list. If a patched host ever changes the
 		// response shape unexpectedly, fail closed to an empty valid catalog
@@ -219,17 +220,19 @@ func catalogProviderMatchesPlugin(provider string) bool {
 		strings.EqualFold(strings.TrimSpace(parts[1]), PluginID)
 }
 
-func catalogModelsForKey(groups []CatalogGroup, keyID string) []CatalogModel {
+func catalogModelsForKey(groups []CatalogGroup, keyID string) ([]CatalogModel, bool) {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
-		return nil
+		return nil, false
 	}
 	seen := make(map[string]struct{})
 	out := make([]CatalogModel, 0)
+	includeUnlisted := false
 	for _, group := range groups {
 		if !catalogGroupMatchesKey(group, keyID) {
 			continue
 		}
+		includeUnlisted = includeUnlisted || group.IncludeUnlisted
 		for _, model := range group.Models {
 			lm := strings.ToLower(model.ID)
 			if _, exists := seen[lm]; exists {
@@ -239,7 +242,7 @@ func catalogModelsForKey(groups []CatalogGroup, keyID string) []CatalogModel {
 			out = append(out, model)
 		}
 	}
-	return out
+	return out, includeUnlisted
 }
 
 func catalogGroupMatchesKey(group CatalogGroup, keyID string) bool {
@@ -256,7 +259,7 @@ func catalogGroupMatchesKey(group CatalogGroup, keyID string) bool {
 	return false
 }
 
-func rewriteCatalogBody(body []byte, requested []CatalogModel) ([]byte, error) {
+func rewriteCatalogBody(body []byte, requested []CatalogModel, includeUnlisted bool) ([]byte, error) {
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil, err
@@ -266,7 +269,7 @@ func rewriteCatalogBody(body []byte, requested []CatalogModel) ([]byte, error) {
 		if !ok {
 			return nil, fmt.Errorf("models catalog field is not an array")
 		}
-		root["models"] = selectCatalogModels(models, requested, true)
+		root["models"] = selectCatalogModels(models, requested, true, includeUnlisted)
 		return json.Marshal(root)
 	}
 	if raw, ok := root["data"]; ok {
@@ -274,7 +277,7 @@ func rewriteCatalogBody(body []byte, requested []CatalogModel) ([]byte, error) {
 		if !ok {
 			return nil, fmt.Errorf("data catalog field is not an array")
 		}
-		root["data"] = selectCatalogModels(models, requested, false)
+		root["data"] = selectCatalogModels(models, requested, false, includeUnlisted)
 		return json.Marshal(root)
 	}
 	return nil, fmt.Errorf("unrecognized model catalog shape")
@@ -292,7 +295,7 @@ func emptyCatalogBody(req ResponseInterceptRequest) []byte {
 	return []byte(`{"object":"list","data":[]}`)
 }
 
-func selectCatalogModels(source []any, requested []CatalogModel, codex bool) []any {
+func selectCatalogModels(source []any, requested []CatalogModel, codex, includeUnlisted bool) []any {
 	byID := make(map[string]map[string]any, len(source))
 	for _, raw := range source {
 		entry, ok := raw.(map[string]any)
@@ -310,8 +313,15 @@ func selectCatalogModels(source []any, requested []CatalogModel, codex bool) []a
 		}
 	}
 
-	out := make([]any, 0, len(requested))
+	capacity := len(requested)
+	if includeUnlisted {
+		capacity += len(source)
+	}
+	out := make([]any, 0, capacity)
+	replaced := make(map[string]struct{}, len(requested)*2)
 	for _, spec := range requested {
+		replaced[strings.ToLower(spec.Source)] = struct{}{}
+		replaced[strings.ToLower(spec.ID)] = struct{}{}
 		sourceEntry := byID[strings.ToLower(spec.Source)]
 		if sourceEntry == nil {
 			continue
@@ -330,6 +340,24 @@ func selectCatalogModels(source []any, requested []CatalogModel, codex bool) []a
 			entry["id"] = spec.ID
 		}
 		out = append(out, entry)
+	}
+	if includeUnlisted {
+		for _, raw := range source {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			skip := false
+			for _, id := range catalogEntryIDs(entry, codex) {
+				if _, exists := replaced[strings.ToLower(id)]; exists {
+					skip = true
+					break
+				}
+			}
+			if !skip {
+				out = append(out, cloneJSONMap(entry))
+			}
+		}
 	}
 	return out
 }

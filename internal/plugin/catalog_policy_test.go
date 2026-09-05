@@ -10,6 +10,7 @@ func TestDecodeCatalogPolicyValidatesAndDefaultsSource(t *testing.T) {
 catalog_groups:
   - name: pi
     keys: ["team-*", "dev"]
+    include_unlisted: true
     models:
       - id: fast
         patch:
@@ -25,6 +26,9 @@ catalog_groups:
 	}
 	if got := policy.Groups[0].Models[0].Source; got != "fast" {
 		t.Fatalf("default source = %q, want fast", got)
+	}
+	if !policy.Groups[0].IncludeUnlisted {
+		t.Fatal("include_unlisted was not decoded")
 	}
 	if !catalogGroupMatchesKey(policy.Groups[0], "team-a") {
 		t.Fatal("team-* did not match team-a")
@@ -73,7 +77,7 @@ func TestRewriteCatalogBodyCodexAliasesAndPatches(t *testing.T) {
 			},
 			Remove: []string{"display_name"},
 		},
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +111,7 @@ func TestRewriteCatalogBodyCodexAliasesAndPatches(t *testing.T) {
 
 func TestRewriteCatalogBodyOpenAI(t *testing.T) {
 	body := []byte(`{"object":"list","data":[{"id":"gpt-5.4","object":"model"},{"id":"blocked","object":"model"}]}`)
-	patched, err := rewriteCatalogBody(body, []CatalogModel{{ID: "coding", Source: "gpt-5.4"}})
+	patched, err := rewriteCatalogBody(body, []CatalogModel{{ID: "coding", Source: "gpt-5.4"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +123,35 @@ func TestRewriteCatalogBodyOpenAI(t *testing.T) {
 	}
 	if len(out.Data) != 1 || out.Data[0]["id"] != "coding" {
 		t.Fatalf("unexpected data: %+v", out.Data)
+	}
+}
+
+func TestRewriteCatalogBodyPatchesSelectedAndKeepsUnlisted(t *testing.T) {
+	body := []byte(`{"models":[{"slug":"gpt-6-astra","context_window":272000},{"slug":"gpt-5.6-sol","context_window":272000},{"slug":"gpt-5.6-terra","context_window":272000}]}`)
+	patched, err := rewriteCatalogBody(body, []CatalogModel{
+		{ID: "gpt-6-astra", Source: "gpt-6-astra", Patch: map[string]any{"context_window": 600000}},
+		{ID: "gpt-5.6-sol", Source: "gpt-5.6-sol", Patch: map[string]any{"context_window": 372000}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(patched, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Models) != 3 {
+		t.Fatalf("models = %+v, want patched pair plus unlisted model", out.Models)
+	}
+	if out.Models[0]["slug"] != "gpt-6-astra" || out.Models[0]["context_window"] != float64(600000) {
+		t.Fatalf("astra patch missing: %+v", out.Models[0])
+	}
+	if out.Models[1]["slug"] != "gpt-5.6-sol" || out.Models[1]["context_window"] != float64(372000) {
+		t.Fatalf("sol patch missing: %+v", out.Models[1])
+	}
+	if out.Models[2]["slug"] != "gpt-5.6-terra" || out.Models[2]["context_window"] != float64(272000) {
+		t.Fatalf("unlisted model changed: %+v", out.Models[2])
 	}
 }
 
