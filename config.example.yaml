@@ -13,6 +13,27 @@ plugins:
       # 开启后忽略别名目标的 group，使用 CPA 凭证权重进行全局加权轮询。
       global_weighted_round_robin: false
 
+      # Optional per-key /v1/models catalogs. Requires a CPA host that exposes
+      # GET /v1/models through the response.intercept_after plugin hook.
+      # Key patterns match policy key IDs, not the plaintext cpa_... secret.
+      catalog_groups:
+        - name: "pi-coding"
+          keys: ["team-*", "dev"]
+          # Keep models that are not listed below. This is useful when the
+          # group only overrides metadata and should follow CPA catalog updates.
+          include_unlisted: true
+          models:
+            # Clone the real source metadata, expose it as "fast", then only
+            # override the advertised limits that should be smaller for clients.
+            - id: "fast"
+              source: "gemini-3.8-flash-high"
+              patch:
+                context_window: 262144
+                max_context_window: 262144
+                max_tokens: 32768
+            # source defaults to id when omitted.
+            - id: "gpt-5.4"
+
       # Prefer creating keys/aliases/classify rules via Web UI or Management API.
       # Seed keys below are mainly for first boot when state_file does not exist.
       keys:
@@ -22,12 +43,20 @@ plugins:
           key_hash: "sha256:replace-with-hash"
           key_preview: "cpa_abc...xyz"
           rpm: 60
+          # Required before this key may call GET /v1/models. catalog_groups
+          # filter the response after this coarse access gate succeeds.
+          allow_models_endpoint: true
           # Either bind models directly…
           models:
             - alias: "fast"
               provider: "codex"
               target_model: "gpt-5.4-mini"
               group: "free" # built-in tier; custom groups use classify:name
+            # Preserve CPA's normal mixed-provider selection for a native
+            # model ID while still enforcing this key's allow-list.
+            - alias: "gpt-6-astra"
+              provider: "native"
+              target_model: "gpt-6-astra"
             - alias: "compat-demo"
               provider: "cerebras" # openai-compatibility channel name
               target_model: "gpt-oss-120b"
