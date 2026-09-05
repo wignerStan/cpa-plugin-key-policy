@@ -19,6 +19,8 @@ type App struct {
 	classifyCache map[string][]string
 	schedulerMu   sync.Mutex
 	schedulerRR   map[string]*smoothWeightedState
+	catalogMu     sync.RWMutex
+	catalog       catalogPolicy
 }
 
 const classifyCacheCapacity = 4096

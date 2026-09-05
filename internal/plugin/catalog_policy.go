@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,25 +37,23 @@ type catalogPolicy struct {
 	Groups []CatalogGroup
 }
 
-var catalogPolicies sync.Map // map[*App]catalogPolicy
-
 func (a *App) setCatalogPolicy(policy catalogPolicy) {
 	if a == nil {
 		return
 	}
-	catalogPolicies.Store(a, policy)
+	a.catalogMu.Lock()
+	a.catalog = policy
+	a.catalogMu.Unlock()
 }
 
 func (a *App) catalogPolicySnapshot() catalogPolicy {
 	if a == nil {
 		return catalogPolicy{}
 	}
-	if raw, ok := catalogPolicies.Load(a); ok {
-		if policy, ok := raw.(catalogPolicy); ok {
-			return policy
-		}
-	}
-	return catalogPolicy{}
+	a.catalogMu.RLock()
+	policy := a.catalog
+	a.catalogMu.RUnlock()
+	return policy
 }
 
 type catalogConfigDocument struct {
@@ -187,7 +184,7 @@ func catalogKeyID(metadata map[string]any) string {
 	// consume another auth plugin's metadata merely because it also has key_id.
 	if rawProvider, exists := metadata["access_provider"]; exists {
 		provider := strings.TrimSpace(fmt.Sprint(rawProvider))
-		if provider != "" && !strings.EqualFold(provider, PluginID) {
+		if provider != "" && !catalogProviderMatchesPlugin(provider) {
 			return ""
 		}
 	}
@@ -209,6 +206,17 @@ func catalogKeyID(metadata map[string]any) string {
 		return strings.TrimSpace(meta["key_id"])
 	}
 	return ""
+}
+
+func catalogProviderMatchesPlugin(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if strings.EqualFold(provider, PluginID) {
+		return true
+	}
+	parts := strings.Split(provider, ":")
+	return len(parts) == 3 &&
+		strings.EqualFold(strings.TrimSpace(parts[0]), "plugin") &&
+		strings.EqualFold(strings.TrimSpace(parts[1]), PluginID)
 }
 
 func catalogModelsForKey(groups []CatalogGroup, keyID string) []CatalogModel {

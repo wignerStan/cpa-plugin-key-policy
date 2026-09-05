@@ -138,7 +138,7 @@ func TestRewriteModelCatalogUsesAuthenticatedKeyMetadata(t *testing.T) {
 		SourceFormat: modelCatalogSourceCodex,
 		Body:         []byte(`{"models":[{"slug":"gemini-3.8-flash-high","context_window":1048576}]}`),
 		Metadata: map[string]any{
-			"access_provider": PluginID,
+			"access_provider": "plugin:cpa-key-policy:cpa-key-policy",
 			"access_metadata": map[string]any{"key_id": "team-a"},
 		},
 	}
@@ -154,6 +154,26 @@ func TestRewriteModelCatalogUsesAuthenticatedKeyMetadata(t *testing.T) {
 	}
 	if len(out.Models) != 1 || out.Models[0]["slug"] != "fast" || out.Models[0]["context_window"] != float64(262144) {
 		t.Fatalf("unexpected rewritten catalog: %+v", out.Models)
+	}
+}
+
+func TestCatalogProviderMatchesPlugin(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     bool
+	}{
+		{provider: PluginID, want: true},
+		{provider: "plugin:cpa-key-policy:cpa-key-policy", want: true},
+		{provider: "plugin:CPA-KEY-POLICY:frontend", want: true},
+		{provider: "plugin:other:cpa-key-policy", want: false},
+		{provider: "some-other-auth-plugin", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := catalogProviderMatchesPlugin(tt.provider); got != tt.want {
+				t.Fatalf("catalogProviderMatchesPlugin(%q) = %v, want %v", tt.provider, got, tt.want)
+			}
+		})
 	}
 }
 
