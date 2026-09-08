@@ -651,6 +651,8 @@ type keyWriteRequest struct {
 	RPM                 *int                 `json:"rpm,omitempty"`
 	Models              []policy.ModelRule   `json:"models,omitempty"`
 	Aliases             []policy.KeyAliasRef `json:"aliases,omitempty"`
+	IncludeModels       *[]string            `json:"include_models,omitempty"`
+	ExcludeModels       *[]string            `json:"exclude_models,omitempty"`
 	DailyLimitUSD       *float64             `json:"daily_limit_usd,omitempty"`
 	WeeklyLimitUSD      *float64             `json:"weekly_limit_usd,omitempty"`
 	AllowModelsEndpoint *bool                `json:"allow_models_endpoint,omitempty"`
@@ -663,6 +665,8 @@ type publicKey struct {
 	RPM                 int                  `json:"rpm"`
 	Models              []policy.ModelRule   `json:"models"`
 	Aliases             []policy.KeyAliasRef `json:"aliases"`
+	IncludeModels       []string             `json:"include_models"`
+	ExcludeModels       []string             `json:"exclude_models"`
 	DailyLimitUSD       float64              `json:"daily_limit_usd"`
 	WeeklyLimitUSD      float64              `json:"weekly_limit_usd"`
 	AllowModelsEndpoint bool                 `json:"allow_models_endpoint,omitempty"`
@@ -714,6 +718,8 @@ func (a *App) createKey(body []byte) ManagementResponse {
 		RPM:                 rpm,
 		Models:              req.Models,
 		Aliases:             req.Aliases,
+		IncludeModels:       applyStringSlice(req.IncludeModels),
+		ExcludeModels:       applyStringSlice(req.ExcludeModels),
 		DailyLimitUSD:       applyFloat64(req.DailyLimitUSD, 0),
 		WeeklyLimitUSD:      applyFloat64(req.WeeklyLimitUSD, 0),
 		AllowModelsEndpoint: applyBool(req.AllowModelsEndpoint, false),
@@ -721,8 +727,15 @@ func (a *App) createKey(body []byte) ManagementResponse {
 	if err := a.store.UpsertKey(item, true); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
 	}
+	stored := item
+	for _, candidate := range a.store.Keys() {
+		if candidate.ID == item.ID {
+			stored = candidate
+			break
+		}
+	}
 	bodyMap := map[string]any{
-		"key":       a.publicKeyFromConfig(item),
+		"key":       a.publicKeyFromConfig(stored),
 		"plain_key": plain,
 		"generated": generated,
 	}
@@ -774,6 +787,12 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 	if req.Aliases != nil {
 		current.Aliases = req.Aliases
 	}
+	if req.IncludeModels != nil {
+		current.IncludeModels = append([]string(nil), (*req.IncludeModels)...)
+	}
+	if req.ExcludeModels != nil {
+		current.ExcludeModels = append([]string(nil), (*req.ExcludeModels)...)
+	}
 	if strings.TrimSpace(req.Key) != "" {
 		hash, err := policy.HashKey(req.Key)
 		if err != nil {
@@ -784,7 +803,14 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 	if err := a.store.UpsertKey(*current, true); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
 	}
-	return jsonResponse(http.StatusOK, map[string]any{"key": a.publicKeyFromConfig(*current)})
+	stored := *current
+	for _, candidate := range a.store.Keys() {
+		if candidate.ID == current.ID {
+			stored = candidate
+			break
+		}
+	}
+	return jsonResponse(http.StatusOK, map[string]any{"key": a.publicKeyFromConfig(stored)})
 }
 
 func (a *App) deleteKey(id string) ManagementResponse {
@@ -882,6 +908,8 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		// Aliases is the canonical source.
 		Models:              append([]policy.ModelRule{}, key.Models...),
 		Aliases:             append([]policy.KeyAliasRef{}, key.Aliases...),
+		IncludeModels:       append([]string{}, key.IncludeModels...),
+		ExcludeModels:       append([]string{}, key.ExcludeModels...),
 		DailyLimitUSD:       key.DailyLimitUSD,
 		WeeklyLimitUSD:      key.WeeklyLimitUSD,
 		AllowModelsEndpoint: key.AllowModelsEndpoint,
@@ -894,6 +922,13 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		out.UpdatedAt = key.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	return out
+}
+
+func applyStringSlice(v *[]string) []string {
+	if v == nil {
+		return nil
+	}
+	return append([]string(nil), (*v)...)
 }
 
 func applyFloat64(v *float64, def float64) float64 {

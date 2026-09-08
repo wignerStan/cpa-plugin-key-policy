@@ -118,7 +118,11 @@
       "sectionAccess": "Access",
       "sectionModels": "Models & pricing"
     },
-    "existingAliases": "Existing Aliases (quick reference)"
+    "existingAliases": "Existing Aliases (quick reference)",
+    "includeModelsLabel": "Include models",
+    "excludeModelsLabel": "Exclude models",
+    "modelPatternPlaceholder": "One per line, e.g. gpt-5-* or claude-sonnet-4",
+    "modelPatternHint": "Exact names match one model/alias; a trailing * matches a prefix. Explicit mapped aliases stay allowed unless excluded. Include-only native models use CPA's normal routing and have no per-alias price; exclusions win."
   },
   "picker": {
     "title": "Select models",

@@ -60,6 +60,10 @@ plugins:
           # Required before this key may call GET /v1/models. catalog_groups
           # filter the response after this coarse access gate succeeds.
           allow_models_endpoint: true
+          # Optional model selectors. Exact names match one model/alias; a
+          # single trailing * matches a prefix. Exclusions always win.
+          # include_models: ["gpt-5-*", "claude-sonnet-4"]
+          # exclude_models: ["gpt-5-codex-*"]
           # Either bind models directly…
           models:
             - alias: "fast"
