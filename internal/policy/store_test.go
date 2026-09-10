@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,12 +22,11 @@ func newTestStore(t *testing.T) (*Store, string) {
 		StateFile: filepath.Join(t.TempDir(), "state.json"),
 		Keys: []KeyConfig{
 			{
-				ID:         "team-a",
-				Name:       "Team A",
-				Enabled:    true,
-				KeyHash:    hash,
-				KeyPreview: PreviewKey(plain),
-				RPM:        1,
+				ID:      "team-a",
+				Name:    "Team A",
+				Enabled: true,
+				KeyHash: hash,
+				RPM:     1,
 				Models: []ModelRule{
 					{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"},
 				},
@@ -37,6 +37,38 @@ func newTestStore(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	return store, plain
+}
+
+func TestStoreConfigKeyHashesAndPersistsWithoutPlaintext(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	const plain = "cpa_config_seed"
+	store := NewStore()
+	if err := store.Configure(Config{
+		Enabled:   true,
+		StateFile: statePath,
+		Keys: []KeyConfig{{
+			ID:      "config-seed",
+			Name:    "Config seed",
+			Enabled: true,
+			Key:     plain,
+			Models:  []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if store.FindByAPIKey(plain) == nil {
+		t.Fatal("plaintext config key did not authenticate after hashing")
+	}
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), plain) || strings.Contains(string(raw), `"key"`) {
+		t.Fatalf("state persisted plaintext config key: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"key_hash": "sha256:`) {
+		t.Fatalf("state did not persist key_hash: %s", raw)
+	}
 }
 
 func TestStoreAuthenticateUnknownKeyFallsThrough(t *testing.T) {

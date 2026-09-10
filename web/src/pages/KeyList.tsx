@@ -214,7 +214,6 @@ function KeyCard({
         <span className="kc-name">{k.name || k.id}</span>
         <span className="kc-chevron">›</span>
       </div>
-      <div className="kc-preview">{k.key_preview}</div>
       {limit > 0 && (
         <>
           <div className="kc-bar"><span style={{ width: pct + "%" }} /></div>

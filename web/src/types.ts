@@ -50,7 +50,6 @@ export interface KeyPublic {
   id: string;
   name: string;
   enabled: boolean;
-  key_preview: string;
   rpm: number;
   models: ModelRule[];
   aliases?: KeyAliasRef[];

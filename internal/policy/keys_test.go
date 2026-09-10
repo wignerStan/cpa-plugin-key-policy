@@ -49,9 +49,3 @@ func TestExtractAPIKey(t *testing.T) {
 		})
 	}
 }
-
-func TestPreviewKey(t *testing.T) {
-	if got := PreviewKey("cpa_abcdefghijklmnopqrstuvwxyz"); got != "cpa_abc...vwxyz" {
-		t.Fatalf("PreviewKey() = %q", got)
-	}
-}

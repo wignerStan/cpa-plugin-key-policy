@@ -240,7 +240,9 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 ## 上手清单
 
 1. 编译/安装 `.so` 到 CPA `plugins.dir`。  
-2. 启用 `plugins` 与 `cpa-key-policy`，配置 `state_file`。  
+2. 启用 `plugins` 与 `cpa-key-policy`，配置 `state_file`。YAML 种子 key 只写一个
+   `key: "cpa_…"`；插件启动时自动计算 hash，状态 JSON 只保存 `key_hash`，明文和
+   `key_preview` 都不会写入状态文件。已有的 `key_hash` 状态仍然兼容。
 3. 用管理密钥打开网页 UI。  
 4. （可选）配置**凭证归类**规则。  
 5. 建**别名**（多目标/定价）和/或给 key 勾选模型（含档位或「自定义 · …」）。  
@@ -256,4 +258,3 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 go test ./...
 cd web && npm test && npm run build
 ```
-

@@ -30,13 +30,16 @@ type Config struct {
 }
 
 type KeyConfig struct {
-	ID         string      `yaml:"id" json:"id"`
-	Name       string      `yaml:"name" json:"name"`
-	Enabled    bool        `yaml:"enabled" json:"enabled"`
-	KeyHash    string      `yaml:"key_hash" json:"key_hash"`
-	KeyPreview string      `yaml:"key_preview" json:"key_preview"`
-	RPM        int         `yaml:"rpm" json:"rpm"`
-	Models     []ModelRule `yaml:"models" json:"models"`
+	ID      string `yaml:"id" json:"id"`
+	Name    string `yaml:"name" json:"name"`
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	// Key is the single user-facing seed value. It may be a plaintext cpa_…
+	// key or an existing sha256:… hash. It is never serialized to state JSON;
+	// normalizeConfig stores the resulting hash in KeyHash.
+	Key     string      `yaml:"key,omitempty" json:"-"`
+	KeyHash string      `yaml:"key_hash,omitempty" json:"key_hash"`
+	RPM     int         `yaml:"rpm" json:"rpm"`
+	Models  []ModelRule `yaml:"models" json:"models"`
 	// Aliases references global alias mappings by name. When non-empty, the key
 	// uses these aliases for routing and billing. Per-key price overrides are
 	// optional (nil = use global alias pricing). This field coexists with
@@ -435,8 +438,19 @@ func normalizeConfig(cfg *Config) error {
 		key := &cfg.Keys[i]
 		key.ID = strings.TrimSpace(key.ID)
 		key.Name = strings.TrimSpace(key.Name)
+		key.Key = strings.TrimSpace(key.Key)
 		key.KeyHash = strings.TrimSpace(key.KeyHash)
-		key.KeyPreview = strings.TrimSpace(key.KeyPreview)
+		if key.Key != "" {
+			if strings.HasPrefix(key.Key, HashPrefix) {
+				key.KeyHash = key.Key
+			} else {
+				hash, err := HashKey(key.Key)
+				if err != nil {
+					return fmt.Errorf("key %q key is invalid: %w", key.ID, err)
+				}
+				key.KeyHash = hash
+			}
+		}
 		if key.ID == "" {
 			return errors.New("key id is required")
 		}
