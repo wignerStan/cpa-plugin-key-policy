@@ -107,6 +107,8 @@ export default function KeyEdit() {
             enabled: v.enabled,
             rpm: v.rpm,
             models: v.models,
+            include_models: v.include_models,
+            exclude_models: v.exclude_models,
             daily_limit_usd: v.daily_limit_usd,
             weekly_limit_usd: v.weekly_limit_usd,
             allow_models_endpoint: v.allow_models_endpoint,

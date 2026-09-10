@@ -112,7 +112,11 @@
       "sectionLimits": "用量上限",
       "sectionAccess": "存取",
       "sectionModels": "模型與計價"
-    }
+    },
+    "includeModelsLabel": "包含模型",
+    "excludeModelsLabel": "排除模型",
+    "modelPatternPlaceholder": "每行一個，例如 gpt-5-* 或 claude-sonnet-4",
+    "modelPatternHint": "精確名稱只匹配一個模型/別名；結尾 * 表示前綴。已明確映射的別名預設仍可用，除非被排除。僅靠包含規則放行的原生模型走 CPA 一般路由，不使用別名單價；排除優先。"
   },
   "picker": {
     "loading": "載入可用模型…",

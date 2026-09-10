@@ -31,10 +31,37 @@ In plain words: you issue your own `cpa_…` keys to clients. Each key only sees
 
 A plugin-owned secret (`cpa_…`). Authenticated only by this plugin. Holds:
 
-- allowed **models** and/or **aliases**
+- explicit **models** and/or **aliases**
+- optional `include_models` / `exclude_models` selectors for large model sets
 - RPM
 - optional daily / weekly dollar limits
 - optional `allow_models_endpoint` (see below)
+
+### Model include / exclude selectors
+
+Each downstream key may add model selectors without enumerating every model:
+
+```yaml
+include_models:
+  - "gpt-5-*"          # trailing * = prefix
+  - "claude-sonnet-4"  # exact
+exclude_models:
+  - "gpt-5-codex-*"
+```
+
+Selectors match the client-requested model or alias case-insensitively. Exact
+entries match one name; the only wildcard form is a single trailing `*`.
+`exclude_models` always wins. Explicit mapped aliases remain allowed unless
+excluded; a target excluded by real `target_model` is removed before
+multi-target dispatch.
+
+A model admitted only through `include_models` is intentionally left to CPA's
+native model routing. Because it has no explicit alias pricing row, it is not
+charged into this plugin's USD budget; RPM still applies. Use explicit mapped
+models/aliases when per-model routing, groups, or billing are required.
+
+Both fields support independent key PATCH updates. Omit a field to preserve it,
+or send `[]` to clear that field.
 
 ### Alias (global mapping table)
 
@@ -230,6 +257,7 @@ Exact paths (no path templates). Auth: CPA management bearer token.
 **Keys**
 
 - `GET/POST/PATCH/DELETE …/keys` (`id` in query or body for mutate)
+- key `PATCH` may independently update `include_models` and `exclude_models`; `[]` clears only that list
 - `POST …/keys/rotate?id=…`
 - `POST …/keys/reset-rpm?id=…`
 - `GET …/keys/usage?id=…`

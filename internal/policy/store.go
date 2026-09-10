@@ -338,16 +338,32 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 	requested := ExtractRequestedModel(path, query, body)
 	decision.Requested = requested
 	if requested != "" {
+		// Exclusions apply to the client-facing name first, so an explicitly
+		// configured alias can still be revoked with exclude_models.
+		if key.ModelExcluded(requested) {
+			decision.Reason = "model_excluded"
+			return decision
+		}
 		// Must use the same multi-target selection as Route (priority /
 		// round-robin), not ModelForAlias which always returns the first
-		// match. Otherwise metadata["group"] can pin the wrong tier while
-		// model.route forwards a different target.
+		// match. resolveRuleForAlias also removes targets denied by
+		// exclude_models before dispatch.
+		_, explicitlyMapped := key.ModelForAlias(requested)
 		rule, ok := s.resolveRuleForAlias(key, requested)
-		if !ok {
+		if ok {
+			decision.Rule = rule
+		} else if explicitlyMapped {
+			// Never reinterpret an explicit alias as a native model when
+			// all of its targets were removed by exclude_models.
+			decision.Reason = "model_excluded"
+			return decision
+		} else if !key.ModelIncluded(requested) {
 			decision.Reason = "model_not_allowed"
 			return decision
 		}
-		decision.Rule = rule
+		// A matching include_models selector with no explicit rule is a native
+		// pass-through: authentication succeeds and model.route deliberately
+		// returns Handled=false so CPA resolves the real model normally.
 	}
 	limiter, usageLedger := s.runtimeComponents()
 	if limiter != nil && !limiter.Allow(key.ID, key.RPM) {
@@ -372,7 +388,7 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 	// Remember this request's selected target so Route reuses it (same group /
 	// provider / model). Only stash when the request is actually allowed — a
 	// rate/cost-limited request never reaches model.route.
-	if requested != "" {
+	if requested != "" && decision.Rule.Alias != "" {
 		s.rememberPick(key.ID, requested, decision.Rule)
 	}
 
@@ -431,7 +447,7 @@ func (s *Store) resolveRuleForAlias(key *KeyConfig, requested string) (ModelRule
 	// to multiple rules with the same alias but different provider/model/group).
 	var matches []ModelRule
 	for _, rule := range key.Models {
-		if strings.EqualFold(rule.Alias, requested) {
+		if strings.EqualFold(rule.Alias, requested) && !key.ModelExcluded(rule.TargetModel) {
 			matches = append(matches, rule)
 		}
 	}
@@ -775,6 +791,8 @@ func (s *Store) findBySecret(raw string) *KeyConfig {
 	copy := *key
 	copy.Models = append([]ModelRule(nil), key.Models...)
 	copy.Aliases = append([]KeyAliasRef(nil), key.Aliases...)
+	copy.IncludeModels = append([]string(nil), key.IncludeModels...)
+	copy.ExcludeModels = append([]string(nil), key.ExcludeModels...)
 	return &copy
 }
 
@@ -802,6 +820,8 @@ func (s *Store) findBySecretWhenEnabled(raw string) (*KeyConfig, bool) {
 	copy := *key
 	copy.Models = append([]ModelRule(nil), key.Models...)
 	copy.Aliases = append([]KeyAliasRef(nil), key.Aliases...)
+	copy.IncludeModels = append([]string(nil), key.IncludeModels...)
+	copy.ExcludeModels = append([]string(nil), key.ExcludeModels...)
 	return &copy, true
 }
 
@@ -833,6 +853,8 @@ func (s *Store) findByID(id string) *KeyConfig {
 	copy := *key
 	copy.Models = append([]ModelRule(nil), key.Models...)
 	copy.Aliases = append([]KeyAliasRef(nil), key.Aliases...)
+	copy.IncludeModels = append([]string(nil), key.IncludeModels...)
+	copy.ExcludeModels = append([]string(nil), key.ExcludeModels...)
 	return &copy
 }
 
@@ -931,6 +953,8 @@ func (s *Store) keysSnapshotLocked() []KeyConfig {
 		copy := *key
 		copy.Models = append([]ModelRule(nil), key.Models...)
 		copy.Aliases = append([]KeyAliasRef(nil), key.Aliases...)
+		copy.IncludeModels = append([]string(nil), key.IncludeModels...)
+		copy.ExcludeModels = append([]string(nil), key.ExcludeModels...)
 		keys = append(keys, copy)
 	}
 	// Bug 5 fix: stable order by ID so list APIs and frontend rendering are
@@ -1084,6 +1108,9 @@ func (s *Store) RotateKey(id string) (string, KeyConfig, error) {
 	key.UpdatedAt = time.Now().UTC()
 	copy := *key
 	copy.Models = append([]ModelRule(nil), key.Models...)
+	copy.Aliases = append([]KeyAliasRef(nil), key.Aliases...)
+	copy.IncludeModels = append([]string(nil), key.IncludeModels...)
+	copy.ExcludeModels = append([]string(nil), key.ExcludeModels...)
 	s.rebuildKeysByHashLocked()
 	s.clearPendingPicksForKeyLocked(id)
 	keys := s.keysSnapshotLocked()

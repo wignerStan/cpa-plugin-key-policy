@@ -118,7 +118,11 @@
       "sectionAccess": "访问",
       "sectionModels": "模型与计价"
     },
-    "existingAliases": "已有别名（快捷引用全局别名）"
+    "existingAliases": "已有别名（快捷引用全局别名）",
+    "includeModelsLabel": "包含模型",
+    "excludeModelsLabel": "排除模型",
+    "modelPatternPlaceholder": "每行一个，例如 gpt-5-* 或 claude-sonnet-4",
+    "modelPatternHint": "精确名称只匹配一个模型/别名；末尾 * 表示前缀。已显式映射的别名默认仍可用，除非被排除。仅靠包含规则放行的原生模型走 CPA 正常路由，不使用别名单价；排除优先。"
   },
   "picker": {
     "title": "选择模型",

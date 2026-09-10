@@ -40,6 +40,13 @@ type KeyConfig struct {
 	KeyHash string      `yaml:"key_hash,omitempty" json:"key_hash"`
 	RPM     int         `yaml:"rpm" json:"rpm"`
 	Models  []ModelRule `yaml:"models" json:"models"`
+	// IncludeModels and ExcludeModels are per-key client-facing model selectors.
+	// Entries are exact model/alias names, or prefix selectors ending in "*"
+	// (for example "gpt-5-*"). Explicit mapped aliases remain allowed unless
+	// excluded; include selectors additionally allow matching native CPA models.
+	// Exclusions always take precedence.
+	IncludeModels []string `yaml:"include_models,omitempty" json:"include_models,omitempty"`
+	ExcludeModels []string `yaml:"exclude_models,omitempty" json:"exclude_models,omitempty"`
 	// Aliases references global alias mappings by name. When non-empty, the key
 	// uses these aliases for routing and billing. Per-key price overrides are
 	// optional (nil = use global alias pricing). This field coexists with
@@ -460,6 +467,15 @@ func normalizeConfig(cfg *Config) error {
 		seen[key.ID] = struct{}{}
 		if key.Name == "" {
 			key.Name = key.ID
+		}
+		var err error
+		key.IncludeModels, err = normalizeModelPatterns(key.IncludeModels)
+		if err != nil {
+			return fmt.Errorf("key %q include_models: %w", key.ID, err)
+		}
+		key.ExcludeModels, err = normalizeModelPatterns(key.ExcludeModels)
+		if err != nil {
+			return fmt.Errorf("key %q exclude_models: %w", key.ID, err)
 		}
 		if key.RPM < 0 {
 			return fmt.Errorf("key %q rpm cannot be negative", key.ID)

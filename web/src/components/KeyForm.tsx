@@ -13,6 +13,8 @@ export interface KeyFormValues {
   enabled: boolean;
   rpm: number;
   models: ModelRule[];
+  include_models: string[];
+  exclude_models: string[];
   daily_limit_usd: number;
   weekly_limit_usd: number;
   // Per-key override for GET /v1/models. CPA cannot filter the model list per
@@ -68,6 +70,19 @@ function parseNum(value: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function parseModelPatternText(value: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of value.split(/[\n,]/)) {
+    const pattern = raw.trim();
+    const key = pattern.toLowerCase();
+    if (!pattern || seen.has(key)) continue;
+    seen.add(key);
+    out.push(pattern);
+  }
+  return out;
+}
+
 export default function KeyForm({
   initial,
   idReadOnly,
@@ -87,6 +102,8 @@ export default function KeyForm({
   const [dailyLimit, setDailyLimit] = useState(initial?.daily_limit_usd ?? 0);
   const [weeklyLimit, setWeeklyLimit] = useState(initial?.weekly_limit_usd ?? 0);
   const [allowModels, setAllowModels] = useState<boolean>(initial?.allow_models_endpoint ?? false);
+  const [includeModels, setIncludeModels] = useState((initial?.include_models ?? []).join("\n"));
+  const [excludeModels, setExcludeModels] = useState((initial?.exclude_models ?? []).join("\n"));
   const t = useT();
 
   // Pricing table keyed by alias (lowercased) so it survives picker re-emits.
@@ -282,6 +299,8 @@ export default function KeyForm({
         enabled,
         rpm,
         models: pricedModels,
+        include_models: parseModelPatternText(includeModels),
+        exclude_models: parseModelPatternText(excludeModels),
         daily_limit_usd: dailyLimit,
         weekly_limit_usd: weeklyLimit,
         allow_models_endpoint: allowModels,
@@ -592,6 +611,27 @@ export default function KeyForm({
               <span>{t("keyForm.allowModelsLabel")}</span>
             </label>
             <p className="muted kf-hint">{t("keyForm.allowModelsHint")}</p>
+            <div className="form-row">
+              <label>{t("keyForm.includeModelsLabel")}</label>
+              <textarea
+                className="input"
+                rows={3}
+                value={includeModels}
+                placeholder={t("keyForm.modelPatternPlaceholder")}
+                onChange={(e) => setIncludeModels(e.target.value)}
+              />
+            </div>
+            <div className="form-row">
+              <label>{t("keyForm.excludeModelsLabel")}</label>
+              <textarea
+                className="input"
+                rows={3}
+                value={excludeModels}
+                placeholder={t("keyForm.modelPatternPlaceholder")}
+                onChange={(e) => setExcludeModels(e.target.value)}
+              />
+            </div>
+            <p className="muted kf-hint">{t("keyForm.modelPatternHint")}</p>
           </>
         ))}
         <section className="kf-section mobile-only">
@@ -754,6 +794,32 @@ export default function KeyForm({
           {t("keyForm.allowModelsHint")}
         </span>
       </div>
+
+      <div className="row2">
+        <div className="form-row">
+          <label>{t("keyForm.includeModelsLabel")}</label>
+          <textarea
+            className="input"
+            rows={4}
+            value={includeModels}
+            placeholder={t("keyForm.modelPatternPlaceholder")}
+            onChange={(e) => setIncludeModels(e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label>{t("keyForm.excludeModelsLabel")}</label>
+          <textarea
+            className="input"
+            rows={4}
+            value={excludeModels}
+            placeholder={t("keyForm.modelPatternPlaceholder")}
+            onChange={(e) => setExcludeModels(e.target.value)}
+          />
+        </div>
+      </div>
+      <p className="muted" style={{ fontSize: "0.85em", marginTop: -8 }}>
+        {t("keyForm.modelPatternHint")}
+      </p>
 
       {globalAliases.length > 0 && (
         <div className="form-row kf-alias-pick">

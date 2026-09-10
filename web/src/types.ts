@@ -53,6 +53,8 @@ export interface KeyPublic {
   rpm: number;
   models: ModelRule[];
   aliases?: KeyAliasRef[];
+  include_models?: string[];
+  exclude_models?: string[];
   daily_limit_usd: number;
   weekly_limit_usd: number;
   // Per-key override for GET /v1/models (see KeyFormValues).
@@ -70,6 +72,8 @@ export interface KeyWriteRequest {
   rpm?: number;
   models?: ModelRule[];
   aliases?: KeyAliasRef[];
+  include_models?: string[];
+  exclude_models?: string[];
   daily_limit_usd?: number;
   weekly_limit_usd?: number;
   allow_models_endpoint?: boolean;
