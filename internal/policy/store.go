@@ -139,12 +139,11 @@ func (s *Store) Configure(cfg Config) error {
 		if state.GlobalWeightedRoundRobin != nil {
 			cfg.GlobalWeightedRoundRobin = *state.GlobalWeightedRoundRobin
 		}
-		// If config.yaml has no global alias table, fall back to the one
-		// persisted in state (so state-only reloads resolve key alias refs).
-		stateAliases := cfg.Aliases
-		if len(stateAliases) == 0 && len(state.Aliases) > 0 {
-			stateAliases = state.Aliases
-		}
+		// Config aliases take precedence, while state aliases fill gaps. This
+		// matters when a compact config keeps only provider-specific mappings:
+		// normalizeConfig may derive a few aliases from those models, but native
+		// aliases persisted by the management API must still resolve on reload.
+		stateAliases := mergeAliases(cfg.Aliases, state.Aliases)
 		stateRules := cfg.ClassifyRules
 		if len(stateRules) == 0 && len(state.ClassifyRules) > 0 {
 			stateRules = state.ClassifyRules
@@ -247,6 +246,29 @@ func (s *Store) Configure(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func mergeAliases(configAliases, stateAliases []AliasMapping) []AliasMapping {
+	if len(configAliases) == 0 {
+		return append([]AliasMapping(nil), stateAliases...)
+	}
+	merged := append([]AliasMapping(nil), configAliases...)
+	seen := make(map[string]struct{}, len(merged))
+	for _, alias := range merged {
+		seen[strings.ToLower(strings.TrimSpace(alias.Alias))] = struct{}{}
+	}
+	for _, alias := range stateAliases {
+		name := strings.ToLower(strings.TrimSpace(alias.Alias))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		merged = append(merged, alias)
+		seen[name] = struct{}{}
+	}
+	return merged
 }
 
 func (s *Store) Enabled() bool {
