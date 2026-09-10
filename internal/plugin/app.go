@@ -898,10 +898,10 @@ func (a *App) publicKeys(keys []policy.KeyConfig) []publicKey {
 
 func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 	out := publicKey{
-		ID:         key.ID,
-		Name:       key.Name,
-		Enabled:    key.Enabled,
-		RPM:        key.RPM,
+		ID:      key.ID,
+		Name:    key.Name,
+		Enabled: key.Enabled,
+		RPM:     key.RPM,
 		// Ensure models/aliases always serialize as [] (never null). A nil slice
 		// would marshal to JSON null, which the UI accesses as .length and
 		// crashes on. Models is derived (resolved from Aliases × global table);
