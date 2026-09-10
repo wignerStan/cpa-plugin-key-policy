@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 )
@@ -44,14 +43,6 @@ func MatchHash(key, hash string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(hash)) == 1
-}
-
-func PreviewKey(key string) string {
-	key = strings.TrimSpace(key)
-	if len(key) <= 12 {
-		return key
-	}
-	return fmt.Sprintf("%s...%s", key[:7], key[len(key)-5:])
 }
 
 func ExtractAPIKey(headers http.Header, query map[string][]string) string {

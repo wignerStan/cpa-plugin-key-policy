@@ -316,6 +316,9 @@ For Pi/Codex clients (`/v1/models?client_version=...`) the plugin preserves the 
 
 1. Build / install the `.so` into CPA `plugins.dir`.
 2. Enable `plugins` + `cpa-key-policy` in CPA config; set `state_file`.
+   Seed keys use one `key: "cpa_…"` value. The plugin hashes it at startup and
+   persists only `key_hash` in the state JSON; plaintext keys and `key_preview`
+   are never written there. Existing `key_hash` state entries remain valid.
 3. Open the Web UI with the management secret.
 4. (Optional) Define **classify rules** if you need custom credential buckets.
 5. Create **aliases** (multi-target / pricing) and/or pick models per key (with tier or Custom group).

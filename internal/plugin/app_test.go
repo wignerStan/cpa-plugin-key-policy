@@ -33,7 +33,6 @@ keys:
     name: Team A
     enabled: true
     key_hash: "` + hash + `"
-    key_preview: "cpa_plu..._test"
     rpm: 60
     models:
       - alias: fast
@@ -445,7 +444,6 @@ keys:
   - id: priced
     enabled: true
     key_hash: "` + hash + `"
-    key_preview: "cpa_pr...ced"
     rpm: 0
     daily_limit_usd: 1.00
     models:
@@ -616,7 +614,6 @@ keys:
   - id: percall
     enabled: true
     key_hash: "` + hash + `"
-    key_preview: "cpa_pe...app"
     daily_limit_usd: 1.00
     models:
       - alias: fast

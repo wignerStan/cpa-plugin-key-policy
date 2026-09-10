@@ -136,7 +136,6 @@ keys:
     name: Global Weighted
     enabled: true
     key_hash: "` + hash + `"
-    key_preview: "cpa_glo..._test"
     models:
       - alias: fast
         provider: codex

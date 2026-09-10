@@ -21,7 +21,6 @@ func newClockedStore(t *testing.T, now time.Time) (*Store, time.Time) {
 			{
 				ID: "team-a", Enabled: true,
 				KeyHash:    hashForUsageTest(t, "cpa_usage"),
-				KeyPreview: "cpa_us..._age",
 				Models: []ModelRule{
 					{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex",
 						InputPricePerMillion: 1, OutputPricePerMillion: 2},
@@ -262,7 +261,6 @@ func newCacheStore(t *testing.T, now time.Time, provider string) *Store {
 		Keys: []KeyConfig{{
 			ID: "cache-key", Enabled: true,
 			KeyHash:    hashForUsageTest(t, "cpa_cache"),
-			KeyPreview: "cpa_ca...che",
 			Models: []ModelRule{{
 				Alias: "fast", Provider: provider, TargetModel: "m",
 				InputPricePerMillion:     3,

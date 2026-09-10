@@ -53,8 +53,9 @@ plugins:
         - id: "team-a"
           name: "Team A"
           enabled: true
-          key_hash: "sha256:replace-with-hash"
-          key_preview: "cpa_abc...xyz"
+          # One plaintext key value is accepted here; the plugin hashes it and
+          # persists only key_hash in the state file.
+          key: "cpa_example"
           rpm: 60
           # Required before this key may call GET /v1/models. catalog_groups
           # filter the response after this coarse access gate succeeds.

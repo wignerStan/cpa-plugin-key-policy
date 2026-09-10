@@ -122,6 +122,19 @@ func (s *Store) Configure(cfg Config) error {
 	firstBoot := false
 	if state, errLoad := LoadState(statePath); errLoad == nil {
 		keys = state.Keys
+		// A key in the live YAML is an intentional key update. Apply it over the
+		// persisted state before normalizeConfig hashes it for state persistence.
+		keyByID := make(map[string]string, len(cfg.Keys))
+		for _, seed := range cfg.Keys {
+			if strings.TrimSpace(seed.Key) != "" {
+				keyByID[strings.TrimSpace(seed.ID)] = seed.Key
+			}
+		}
+		for i := range keys {
+			if key := keyByID[keys[i].ID]; key != "" {
+				keys[i].Key = key
+			}
+		}
 		loadedUsage = state.Usage
 		if state.GlobalWeightedRoundRobin != nil {
 			cfg.GlobalWeightedRoundRobin = *state.GlobalWeightedRoundRobin
@@ -1068,7 +1081,6 @@ func (s *Store) RotateKey(id string) (string, KeyConfig, error) {
 		return "", KeyConfig{}, ErrUnknownKey
 	}
 	key.KeyHash = hash
-	key.KeyPreview = PreviewKey(plain)
 	key.UpdatedAt = time.Now().UTC()
 	copy := *key
 	copy.Models = append([]ModelRule(nil), key.Models...)

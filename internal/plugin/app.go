@@ -660,7 +660,6 @@ type publicKey struct {
 	ID                  string               `json:"id"`
 	Name                string               `json:"name"`
 	Enabled             bool                 `json:"enabled"`
-	KeyPreview          string               `json:"key_preview"`
 	RPM                 int                  `json:"rpm"`
 	Models              []policy.ModelRule   `json:"models"`
 	Aliases             []policy.KeyAliasRef `json:"aliases"`
@@ -712,7 +711,6 @@ func (a *App) createKey(body []byte) ManagementResponse {
 		Name:                name,
 		Enabled:             enabled,
 		KeyHash:             hash,
-		KeyPreview:          policy.PreviewKey(plain),
 		RPM:                 rpm,
 		Models:              req.Models,
 		Aliases:             req.Aliases,
@@ -782,7 +780,6 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 			return jsonError(http.StatusBadRequest, "invalid_key", err.Error())
 		}
 		current.KeyHash = hash
-		current.KeyPreview = policy.PreviewKey(req.Key)
 	}
 	if err := a.store.UpsertKey(*current, true); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
@@ -878,7 +875,6 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		ID:         key.ID,
 		Name:       key.Name,
 		Enabled:    key.Enabled,
-		KeyPreview: key.KeyPreview,
 		RPM:        key.RPM,
 		// Ensure models/aliases always serialize as [] (never null). A nil slice
 		// would marshal to JSON null, which the UI accesses as .length and
