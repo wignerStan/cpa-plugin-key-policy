@@ -190,26 +190,6 @@ func TestRewriteModelCatalogUsesAuthenticatedKeyMetadata(t *testing.T) {
 	}
 }
 
-func TestCatalogProviderMatchesPlugin(t *testing.T) {
-	tests := []struct {
-		provider string
-		want     bool
-	}{
-		{provider: PluginID, want: true},
-		{provider: "plugin:cpa-key-policy:cpa-key-policy", want: true},
-		{provider: "plugin:CPA-KEY-POLICY:frontend", want: true},
-		{provider: "plugin:other:cpa-key-policy", want: false},
-		{provider: "some-other-auth-plugin", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.provider, func(t *testing.T) {
-			if got := catalogProviderMatchesPlugin(tt.provider); got != tt.want {
-				t.Fatalf("catalogProviderMatchesPlugin(%q) = %v, want %v", tt.provider, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRewriteModelCatalogUnmatchedPluginKeyGetsEmptyCatalog(t *testing.T) {
 	app := NewApp()
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "team", Keys: []string{"team-*"}, Models: []CatalogModel{{ID: "fast"}}}}})
@@ -243,20 +223,23 @@ func TestRewriteModelCatalogLeavesNativeKeysUntouched(t *testing.T) {
 	}
 }
 
-func TestRewriteModelCatalogLeavesOtherAuthProviderUntouched(t *testing.T) {
+func TestRewriteModelCatalogUsesKeyIDWithoutProviderGate(t *testing.T) {
 	app := NewApp()
-	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast"}}}}})
+	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast", Source: "fast"}}}}})
 
 	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
 		SourceFormat: modelCatalogSourceCodex,
-		Body:         []byte(`{"models":[{"slug":"fast"}]}`),
+		Body:         []byte(`{"models":[{"slug":"fast"},{"slug":"other"}]}`),
 		Metadata: map[string]any{
 			"access_provider": "some-other-auth-plugin",
 			"access_metadata": map[string]any{"key_id": "team-a"},
 		},
 	})
-	if changed || body != nil {
-		t.Fatalf("other auth provider catalog unexpectedly changed: changed=%v body=%s", changed, body)
+	if !changed {
+		t.Fatal("catalog was not filtered for a key from another frontend provider")
+	}
+	if string(body) != `{"models":[{"slug":"fast"}]}` {
+		t.Fatalf("body = %s, want unchanged allowed catalog", body)
 	}
 }
 
