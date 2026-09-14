@@ -118,10 +118,13 @@ func (s *Store) Configure(cfg Config) error {
 	s.StopUsageFlusher()
 
 	keys := cfg.Keys
+	configuredKeys := append([]KeyConfig(nil), cfg.Keys...)
 	var loadedUsage map[string]*UsageState
 	firstBoot := false
+	plainKeysChanged := false
 	if state, errLoad := LoadState(statePath); errLoad == nil {
 		keys = state.Keys
+		plainKeysChanged = applyPlainKeyOverrides(keys, configuredKeys)
 		// A key in the live YAML is an intentional key update. Apply it over the
 		// persisted state before normalizeConfig hashes it for state persistence.
 		keyByID := make(map[string]string, len(cfg.Keys))
@@ -175,6 +178,9 @@ func (s *Store) Configure(cfg Config) error {
 
 	for i := range keys {
 		item := keys[i]
+		// Key is only an input to normalization. Do not retain plaintext in the
+		// live state after deriving KeyHash.
+		item.Key = ""
 		if item.CreatedAt.IsZero() {
 			item.CreatedAt = now
 		}
@@ -234,19 +240,51 @@ func (s *Store) Configure(cfg Config) error {
 	var baseUsage map[string]*UsageState
 	var baseAliases []AliasMapping
 	var baseRules []ClassifyRule
-	if firstBoot {
+	if firstBoot || plainKeysChanged {
 		baseKeys = s.keysSnapshotLocked()
 		baseUsage = s.usageSnapshotLocked()
 		baseAliases = s.aliasesSnapshotLocked()
 		baseRules = s.classifyRulesSnapshotLocked()
 	}
 	s.mu.Unlock()
-	if firstBoot {
+	if firstBoot || plainKeysChanged {
 		if errSave := s.saveState(statePath, baseKeys, baseUsage, baseAliases, baseRules); errSave != nil {
-			return fmt.Errorf("seed state: %w", errSave)
+			if firstBoot {
+				return fmt.Errorf("seed state: %w", errSave)
+			}
+			return fmt.Errorf("persist plaintext key hash: %w", errSave)
 		}
 	}
 	return nil
+}
+
+// applyPlainKeyOverrides applies configured plaintext keys to a loaded state
+// snapshot and reports whether any persisted hash changed. The config parser
+// has already derived KeyHash, so this helper never needs to retain plaintext
+// in the state representation.
+func applyPlainKeyOverrides(keys []KeyConfig, configured []KeyConfig) bool {
+	configuredHashes := make(map[string]string)
+	for _, key := range configured {
+		id := strings.TrimSpace(key.ID)
+		plain := strings.TrimSpace(key.Key)
+		hash := strings.TrimSpace(key.KeyHash)
+		if id == "" || plain == "" || strings.HasPrefix(plain, HashPrefix) || hash == "" {
+			continue
+		}
+		configuredHashes[id] = hash
+	}
+	changed := false
+	for index := range keys {
+		hash, ok := configuredHashes[strings.TrimSpace(keys[index].ID)]
+		if !ok || keys[index].KeyHash == hash {
+			continue
+		}
+		keys[index].KeyHash = hash
+		keys[index].Key = ""
+		keys[index].UpdatedAt = time.Now().UTC()
+		changed = true
+	}
+	return changed
 }
 
 func (s *Store) Enabled() bool {

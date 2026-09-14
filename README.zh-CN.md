@@ -241,8 +241,9 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 
 1. 编译/安装 `.so` 到 CPA `plugins.dir`。  
 2. 启用 `plugins` 与 `cpa-key-policy`，配置 `state_file`。YAML 种子 key 只写一个
-   `key: "cpa_…"`；插件启动时自动计算 hash，状态 JSON 只保存 `key_hash`，明文和
-   `key_preview` 都不会写入状态文件。已有的 `key_hash` 状态仍然兼容。
+   `key: "cpa_…"`；插件首次生命周期调用时会由宿主传入配置路径，把该字段回写为
+   `key_hash: "sha256:…"`，内存和状态 JSON 只保留 hash。已有的 `key_hash` 状态仍然兼容；
+   对没有可写本地路径的 remote/home 配置则继续只在内存和状态文件中哈希，不影响启动。
 3. 用管理密钥打开网页 UI。  
 4. （可选）配置**凭证归类**规则。  
 5. 建**别名**（多目标/定价）和/或给 key 勾选模型（含档位或「自定义 · …」）。  

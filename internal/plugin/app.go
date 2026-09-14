@@ -94,6 +94,9 @@ func (a *App) configure(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := rewritePlainKeysInConfig(req.ConfigPath, cfg); err != nil {
+		return fmt.Errorf("rewrite plaintext key config: %w", err)
+	}
 	if err := a.store.Configure(cfg); err != nil {
 		return err
 	}

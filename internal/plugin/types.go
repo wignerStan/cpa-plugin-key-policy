@@ -61,6 +61,7 @@ type EnvelopeError struct {
 
 type LifecycleRequest struct {
 	ConfigYAML []byte `json:"config_yaml"`
+	ConfigPath string `json:"config_path,omitempty"`
 }
 
 type Registration struct {
