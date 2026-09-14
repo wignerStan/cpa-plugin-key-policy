@@ -184,7 +184,7 @@ Notes:
 - A group-level `patch` / `remove` applies to entries selected by `include_models` or `include_unlisted`, and is inherited by explicit `models`. A model-specific patch is merged afterward and wins on conflicts.
 - `include_unlisted: true` is equivalent to including every source model; group patch/remove and exclusions still apply. The default remains `false` for strict per-key allow-lists.
 - `allow_models_endpoint` is still the security gate. A catalog group never grants access to `/v1/models`; the key must already have `allow_models_endpoint: true`.
-- When at least one `catalog_groups` entry exists, a plugin key matching no catalog group receives an empty model list. Native CPA keys and other auth providers are left untouched.
+- When at least one `catalog_groups` entry exists, a key carrying a `key_id` that matches no catalog group receives an empty model list. Selection uses the key ID plus include/exclude model rules; frontend provider names are not used as a separate gate.
 - A catalog item whose `source` is absent from CPA's generated catalog is omitted rather than synthesized with guessed capabilities.
 - Catalog filtering requires a CPA host that exposes `GET /v1/models` through the existing `response.intercept_after` plugin hook. Without that host patch, the old binary behavior remains.
 - `global_weighted_round_robin: true` ignores the selected alias target group and places every current provider/model candidate in one global pool. Distribution then follows the Weight values on CPA's credential page. The default is `false`.

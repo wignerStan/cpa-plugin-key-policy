@@ -202,14 +202,6 @@ func catalogKeyID(metadata map[string]any) string {
 	if len(metadata) == 0 {
 		return ""
 	}
-	// The CPA model-list middleware stamps the frontend auth provider. Do not
-	// consume another auth plugin's metadata merely because it also has key_id.
-	if rawProvider, exists := metadata["access_provider"]; exists {
-		provider := strings.TrimSpace(fmt.Sprint(rawProvider))
-		if provider != "" && !catalogProviderMatchesPlugin(provider) {
-			return ""
-		}
-	}
 	if direct, ok := metadata["key_id"]; ok {
 		if key := strings.TrimSpace(fmt.Sprint(direct)); key != "" {
 			return key
@@ -228,17 +220,6 @@ func catalogKeyID(metadata map[string]any) string {
 		return strings.TrimSpace(meta["key_id"])
 	}
 	return ""
-}
-
-func catalogProviderMatchesPlugin(provider string) bool {
-	provider = strings.TrimSpace(provider)
-	if strings.EqualFold(provider, PluginID) {
-		return true
-	}
-	parts := strings.Split(provider, ":")
-	return len(parts) == 3 &&
-		strings.EqualFold(strings.TrimSpace(parts[0]), "plugin") &&
-		strings.EqualFold(strings.TrimSpace(parts[1]), PluginID)
 }
 
 func catalogSelectionForKey(groups []CatalogGroup, keyID string) catalogSelection {
