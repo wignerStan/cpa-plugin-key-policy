@@ -48,6 +48,8 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/cpa-key-policy.XXXXXX")"
 trap 'rm -rf "${work_dir}"' EXIT
 
 git init -q "${work_dir}"
+git -C "${work_dir}" config user.name "cpa-key-policy materializer"
+git -C "${work_dir}" config user.email "cpa-key-policy@localhost"
 git -C "${work_dir}" remote add upstream "${source_url}"
 git -C "${work_dir}" fetch --filter=blob:none --no-tags --depth=1 upstream "${source_commit}"
 git -C "${work_dir}" checkout -q --detach FETCH_HEAD
