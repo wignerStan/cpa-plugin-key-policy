@@ -12,6 +12,7 @@ permissions:
 
 env:
   PLUGIN_ID: cpa-key-policy
+  GOFLAGS: -mod=mod
 
 jobs:
   test:
@@ -24,8 +25,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
           cache: true
+
+      - name: Validate CLIProxyAPI materialization
+        run: bash scripts/check-cliproxyapi.sh
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -81,7 +85,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
           cache: true
 
       - name: Setup Node
@@ -133,7 +137,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
           cache: true
 
       - name: Setup Node
@@ -154,7 +158,7 @@ jobs:
         timeout-minutes: 45
         uses: go-cross/cgo-actions@v1
         env:
-          GOFLAGS: -trimpath -buildmode=c-shared
+          GOFLAGS: -mod=mod -trimpath -buildmode=c-shared
         with:
           dir: ./cmd/cpa-key-policy
           packages: .
@@ -175,12 +179,90 @@ jobs:
             ${{ env.ARCHIVE_NAME }}.sha256
           if-no-files-found: error
 
+  build-host:
+    name: Build patched CLIProxyAPI ${{ matrix.goos }}/${{ matrix.goarch }}
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+          - goos: darwin
+            goarch: arm64
+            runner: macos-15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Resolve host release metadata
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev"
+          fi
+          archive="cliproxyapi_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          echo "VERSION=${version}" >> "${GITHUB_ENV}"
+          echo "HOST_ARCHIVE=${archive}" >> "${GITHUB_ENV}"
+
+      - name: Materialize patched host
+        run: bash scripts/materialize-cliproxyapi.sh
+
+      - name: Build and package patched host
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          (
+            cd vendor/cliproxyapi
+            CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+              go build -trimpath -buildvcs=false \
+                -ldflags "-s -w -X main.Version=${VERSION} -X main.Commit=${GITHUB_SHA}" \
+                -o "${GITHUB_WORKSPACE}/dist/package/cliproxyapi" ./cmd/server/main.go
+            cp config.example.yaml "${GITHUB_WORKSPACE}/dist/package/cliproxyapi.example.yaml"
+          )
+          tar -C dist/package -czf "dist/${HOST_ARCHIVE}" cliproxyapi cliproxyapi.example.yaml
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${HOST_ARCHIVE}" > "dist/${HOST_ARCHIVE}.sha256"
+          else
+            shasum -a 256 "dist/${HOST_ARCHIVE}" > "dist/${HOST_ARCHIVE}.sha256"
+          fi
+
+      - name: Upload host artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.HOST_ARCHIVE }}
+          path: |
+            dist/${{ env.HOST_ARCHIVE }}
+            dist/${{ env.HOST_ARCHIVE }}.sha256
+          if-no-files-found: error
+
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - build
       - build-windows-arm64
+      - build-host
     runs-on: ubuntu-24.04
     steps:
       - name: Download build artifacts
@@ -197,10 +279,16 @@ jobs:
           set -euo pipefail
           sort dist/*.sha256 > dist/checksums.txt
           awk 'NF != 2 || $1 !~ /^[0-9a-fA-F]{64}$/ { print "invalid checksum line " NR ": " $0; bad=1 } END { exit bad }' dist/checksums.txt
+          shopt -s nullglob
+          assets=(dist/*.zip dist/*.tar.gz)
+          if (( ${#assets[@]} == 0 )); then
+            echo "no release assets found" >&2
+            exit 1
+          fi
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
           else
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" dist/checksums.txt \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --title "${GITHUB_REF_NAME}" \

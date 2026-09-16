@@ -3,11 +3,12 @@ PKG := ./cmd/cpa-key-policy
 DIST := dist
 WEB := web
 EMBED_INDEX := internal/plugin/web/dist/index.html
+GOFLAGS ?= -mod=mod
 
 .PHONY: test web-build build-linux-amd64 build-linux-arm64 build-linux clean
 
 test:
-	go test ./...
+	GOFLAGS="$(GOFLAGS)" go test ./...
 
 # Build the single-file web UI and place it where the Go embed expects it.
 web-build:
@@ -16,11 +17,11 @@ web-build:
 
 build-linux-amd64: web-build
 	mkdir -p $(DIST)
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared -buildmode=c-shared -o $(DIST)/$(PLUGIN)_linux_amd64.so $(PKG)
+	GOFLAGS="$(GOFLAGS)" GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared -buildmode=c-shared -o $(DIST)/$(PLUGIN)_linux_amd64.so $(PKG)
 
 build-linux-arm64: web-build
 	mkdir -p $(DIST)
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared -buildmode=c-shared -o $(DIST)/$(PLUGIN)_linux_arm64.so $(PKG)
+	GOFLAGS="$(GOFLAGS)" GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared -buildmode=c-shared -o $(DIST)/$(PLUGIN)_linux_arm64.so $(PKG)
 
 build-linux: build-linux-amd64 build-linux-arm64
 

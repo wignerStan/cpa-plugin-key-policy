@@ -1,0 +1,191 @@
+From c3f8f8e9da959f538dfeda1657d92d225bcb508a Mon Sep 17 00:00:00 2001
+From: Jacob <240170694+wignerStan@users.noreply.github.com>
+Date: Wed, 16 Sep 2026 10:43:11 +0800
+Subject: [PATCH 3/3] feat(models): gate native key model listings by config
+
+
+diff --git a/config.example.yaml b/config.example.yaml
+index 492a7dfb..967add29 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -41,6 +41,10 @@ api-keys:
+   - "your-api-key-2"
+   - "your-api-key-3"
+ 
++# Native CLIProxyAPI api-keys cannot access the global model list by default.
++# Set this explicitly to true only when those origin keys should see it.
++allow-origin-models-endpoint: false
++
+ # Enable debug logging
+ debug: false
+ 
+diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
+index 447f280c..d01d4ab0 100644
+--- a/internal/api/server_middleware.go
++++ b/internal/api/server_middleware.go
+@@ -152,6 +152,29 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+ 	return accessAuthMiddleware(manager, false)
+ }
+ 
++// originModelsEndpointMiddleware applies the explicit host-level policy for
++// native CLIProxyAPI api-keys. It is attached after AuthMiddleware on model
++// list routes, so plugin-owned providers and other auth providers retain their
++// own policies and native keys are denied before model generation by default.
++func (s *Server) originModelsEndpointMiddleware() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if s == nil || s.cfg == nil || s.cfg.AllowOriginModelsEndpoint || c == nil || c.Request == nil {
++			c.Next()
++			return
++		}
++
++		provider, _ := c.Get("accessProvider")
++		if providerName, ok := provider.(string); !ok || !strings.EqualFold(strings.TrimSpace(providerName), sdkaccess.DefaultAccessProviderName) {
++			c.Next()
++			return
++		}
++
++		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
++			"error": "model listing is disabled for native api-keys",
++		})
++	}
++}
++
+ func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+ 	return accessAuthMiddleware(manager, true)
+ }
+diff --git a/internal/api/server_origin_models_test.go b/internal/api/server_origin_models_test.go
+new file mode 100644
+index 00000000..96a8f4a4
+--- /dev/null
++++ b/internal/api/server_origin_models_test.go
+@@ -0,0 +1,49 @@
++package api
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
++)
++
++func TestOriginModelsEndpointMiddlewareDefaultsToDeny(t *testing.T) {
++	tests := []struct {
++		name     string
++		allow    bool
++		provider string
++		wantCode int
++	}{
++		{name: "native key denied by default", provider: access.DefaultAccessProviderName, wantCode: http.StatusUnauthorized},
++		{name: "native key explicitly allowed", allow: true, provider: access.DefaultAccessProviderName, wantCode: http.StatusOK},
++		{name: "plugin provider keeps plugin policy", provider: "plugin:cpa-key-policy:cpa-key-policy", wantCode: http.StatusOK},
++		{name: "no access provider keeps unauthenticated legacy behavior", wantCode: http.StatusOK},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			gin.SetMode(gin.TestMode)
++			engine := gin.New()
++			engine.Use(func(c *gin.Context) {
++				if tt.provider != "" {
++					c.Set("accessProvider", tt.provider)
++				}
++				c.Next()
++			})
++			server := &Server{cfg: &config.Config{SDKConfig: config.SDKConfig{AllowOriginModelsEndpoint: tt.allow}}}
++			engine.GET("/v1/models", server.originModelsEndpointMiddleware(), func(c *gin.Context) {
++				c.JSON(http.StatusOK, gin.H{"object": "list"})
++			})
++
++			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
++			recorder := httptest.NewRecorder()
++			engine.ServeHTTP(recorder, req)
++			if recorder.Code != tt.wantCode {
++				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantCode, recorder.Body.String())
++			}
++		})
++	}
++}
+diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
+index 1827bd53..f68a9dfb 100644
+--- a/internal/api/server_routes.go
++++ b/internal/api/server_routes.go
+@@ -62,7 +62,7 @@ func (s *Server) setupRoutes() {
+ 	v1 := s.engine.Group("/v1")
+ 	v1.Use(AuthMiddleware(s.accessManager))
+ 	{
+-		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
++		v1.GET("/models", s.originModelsEndpointMiddleware(), s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+ 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
+ 		v1.POST("/completions", openaiHandlers.Completions)
+ 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
+@@ -121,7 +121,7 @@ func (s *Server) setupRoutes() {
+ 	v1beta := s.engine.Group("/v1beta")
+ 	v1beta.Use(AuthMiddleware(s.accessManager))
+ 	{
+-		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
++		v1beta.GET("/models", s.originModelsEndpointMiddleware(), s.geminiModelsHandler(geminiHandlers))
+ 		v1beta.POST("/interactions", geminiHandlers.Interactions)
+ 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
+ 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
+diff --git a/internal/api/server_test.go b/internal/api/server_test.go
+index 21215e7c..007e26c2 100644
+--- a/internal/api/server_test.go
++++ b/internal/api/server_test.go
+@@ -618,7 +618,8 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
+ 
+ 	cfg := &proxyconfig.Config{
+ 		SDKConfig: sdkconfig.SDKConfig{
+-			APIKeys: []string{"test-key"},
++			APIKeys:                   []string{"test-key"},
++			AllowOriginModelsEndpoint: true,
+ 		},
+ 		Port:                   0,
+ 		AuthDir:                authDir,
+diff --git a/internal/config/origin_models_test.go b/internal/config/origin_models_test.go
+new file mode 100644
+index 00000000..60400831
+--- /dev/null
++++ b/internal/config/origin_models_test.go
+@@ -0,0 +1,21 @@
++package config
++
++import "testing"
++
++func TestParseConfigOriginModelsEndpointDefaultsAndOptIn(t *testing.T) {
++	defaultCfg, err := ParseConfigBytes([]byte("api-keys: [native]\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if defaultCfg.AllowOriginModelsEndpoint {
++		t.Fatal("allow-origin-models-endpoint defaulted to true")
++	}
++
++	optInCfg, err := ParseConfigBytes([]byte("allow-origin-models-endpoint: true\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !optInCfg.AllowOriginModelsEndpoint {
++		t.Fatal("allow-origin-models-endpoint: true was not parsed")
++	}
++}
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index 1c5a1bb6..9dfa544a 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -54,6 +54,13 @@ type SDKConfig struct {
+ 	// APIKeys is a list of keys for authenticating clients to this proxy server.
+ 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+ 
++	// AllowOriginModelsEndpoint controls whether native CLIProxyAPI api-keys may
++	// access the global GET /v1/models and /v1beta/models endpoints. It defaults
++	// to false so native keys do not expose the complete model catalog unless the
++	// operator explicitly opts in. Plugin-owned keys keep their own per-key
++	// allow_models_endpoint policy.
++	AllowOriginModelsEndpoint bool `yaml:"allow-origin-models-endpoint" json:"allow-origin-models-endpoint"`
++
+ 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
+ 	// Default is false (disabled).
+ 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

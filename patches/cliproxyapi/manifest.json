@@ -1,0 +1,30 @@
+{
+  "schema_version": "cliproxyapi-materialization/v1",
+  "output": "vendor/cliproxyapi",
+  "upstream": {
+    "url": "https://github.com/router-for-me/CLIProxyAPI.git",
+    "commit": "8335eac731946bd4eff18f500653f93736df53d6"
+  },
+  "patches": [
+    {
+      "order": 1,
+      "path": "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-intercepto.patch",
+      "commit": "374694f794d184dd1bf543782e16c61ddac50ce5",
+      "sha256": "e01b9a9a4c8d89025ac5f92a7f5d6f7ad2c496c719035aa4f000a049ea8b2a1d"
+    },
+    {
+      "order": 2,
+      "path": "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plug.patch",
+      "commit": "b961bb1c76284c098e91d30977c24deed14b932c",
+      "sha256": "e413301a2c84c81fe7b31d14fcae63ee1935167ed0f8f635710cd54509a1f995"
+    },
+    {
+      "order": 3,
+      "path": "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
+      "commit": "c3f8f8e9da959f538dfeda1657d92d225bcb508a",
+      "sha256": "285dcb221b27f07f60b0c3b9119c230ee78c7a18312a417134549d76604b17ac"
+    }
+  ],
+  "procedure": "bash scripts/materialize-cliproxyapi.sh",
+  "update_policy": "Advance upstream.commit, rebase the ordered patches, regenerate this manifest, and run scripts/check-cliproxyapi.sh before review."
+}
