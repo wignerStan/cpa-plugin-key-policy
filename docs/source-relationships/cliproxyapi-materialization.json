@@ -1,0 +1,15 @@
+{
+  "schema_version": "git-source-relationship/v1",
+  "kind": "vendored_import",
+  "path": "vendor/cliproxyapi",
+  "owner": "cpa-plugin-key-policy",
+  "integration": "generated_checkout",
+  "upstream": {
+    "url": "https://github.com/router-for-me/CLIProxyAPI.git",
+    "commit": "8335eac731946bd4eff18f500653f93736df53d6"
+  },
+  "patches": [],
+  "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
+  "result_tree": "9c4da00af0f1c15621da27afd282ea992fa9365c",
+  "licenses": ["vendor/cliproxyapi/LICENSE"]
+}

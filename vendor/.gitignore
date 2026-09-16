@@ -1,0 +1,6 @@
+# Everything under vendor/ is generated or materialized by a checked-in
+# procedure. Keep the directory itself visible, but never commit the generated
+# CLIProxyAPI checkout or an accidental nested repository.
+*
+!.gitignore
+!README.md

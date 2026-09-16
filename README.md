@@ -149,6 +149,36 @@ On Windows, build the `.so` via WSL/Linux. `go test ./...` uses a non-cgo stub s
 
 Copy the `.so` into CPA `plugins.dir` and enable the plugin in config.
 
+## Patched CLIProxyAPI and Homebrew
+
+This repository is the single maintenance owner for the plugin and the
+CLIProxyAPI integration patch set. The upstream CLIProxyAPI commit and ordered
+patch checksums are recorded in
+[`patches/cliproxyapi/manifest.json`](./patches/cliproxyapi/manifest.json).
+
+The host is materialized, never maintained as a second editable checkout:
+
+```bash
+bash scripts/materialize-cliproxyapi.sh
+bash scripts/check-cliproxyapi.sh
+```
+
+The generated files live under `vendor/cliproxyapi/` and are excluded by
+[`vendor/.gitignore`](./vendor/.gitignore). The materializer removes nested Git
+metadata and applies the patch stack from a clean upstream checkout.
+
+The same repository contains rolling Homebrew formulas for both components:
+
+```bash
+brew tap wignerStan/cpa-plugin-key-policy \
+  https://github.com/wignerStan/cpa-plugin-key-policy.git
+brew install --HEAD wignerStan/cpa-plugin-key-policy/cpa-key-policy
+brew install --HEAD wignerStan/cpa-plugin-key-policy/cliproxyapi-patched
+```
+
+Version tags publish plugin packages, patched CLIProxyAPI packages, and a
+combined checksum file through the release workflow.
+
 ---
 
 ## Config
@@ -359,6 +389,6 @@ For Pi/Codex clients (`/v1/models?client_version=...`) the plugin preserves the 
 ## Tests
 
 ```bash
-go test ./...
+GOFLAGS=-mod=mod go test ./...
 cd web && npm test && npm run build
 ```
