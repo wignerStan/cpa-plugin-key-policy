@@ -9,6 +9,10 @@ class CliproxyapiPatched < Formula
   conflicts_with "cliproxyapi", because: "both install a cliproxyapi binary"
 
   def install
+    # The Linux Homebrew host may expose a broken brewed gcc wrapper whose
+    # cc1 executable is missing. Use the system compiler for the CGO build.
+    ENV["CC"] = "/usr/bin/cc"
+    ENV["CXX"] = "/usr/bin/c++"
     system "bash", "scripts/materialize-cliproxyapi.sh"
     build_root = buildpath / "vendor" / "cliproxyapi"
     ldflags = %W[
