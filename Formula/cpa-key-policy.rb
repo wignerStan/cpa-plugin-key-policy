@@ -9,6 +9,11 @@ class CpaKeyPolicy < Formula
   def install
     ENV["CGO_ENABLED"] = "1"
     ENV["GOFLAGS"] = "-mod=mod"
+    # Some Linux Homebrew installations ship a GCC wrapper whose cc1 path is
+    # incomplete. Use the system compiler for this small c-shared build; on
+    # macOS /usr/bin/cc is Apple's supported clang entry point.
+    ENV["CC"] = "/usr/bin/cc"
+    ENV["CXX"] = "/usr/bin/c++"
     extension = OS.mac? ? "dylib" : "so"
     output = libexec / "cpa-key-policy.#{extension}"
     libexec.mkpath
