@@ -1,0 +1,590 @@
+From c1958270552fcfd90daf10c2c18062d68e2568ce Mon Sep 17 00:00:00 2001
+From: Jacob <24017069+wignerStan@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 20:37:50 -0700
+Subject: [PATCH 5/8] feat(codex): configurable thread-title session naming
+ across WS and HTTPS (default allow)
+
+
+diff --git a/config.example.yaml b/config.example.yaml
+index 3b8170b1..fdfdb2dc 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -848,6 +848,9 @@ oauth:
+       # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+       # Keeps one upstream account/model per socket; accepted input is never replayed.
+       response-steering: false
++      # Allow Codex thread_source=thread_title websocket upgrades and HTTP /v1/responses naming calls.
++      # Default is true (allowed). Set to false to disable both WS and HTTPS session naming.
++      thread-title-session: true
+       # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
+       disable-codex-cloaking: false
+       # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+diff --git a/internal/api/server_options.go b/internal/api/server_options.go
+index c19dd24c..ae233e2b 100644
+--- a/internal/api/server_options.go
++++ b/internal/api/server_options.go
+@@ -48,6 +48,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
+ 	sdkCfg.CodexOptimizeMultiAgentV2 = cfg.Codex.OptimizeMultiAgentV2
+ 	sdkCfg.CodexOrphanDelegationCompatibility = cfg.Codex.OrphanDelegationCompatibility
+ 	sdkCfg.CodexResponseSteering = cfg.Codex.ResponseSteering
++	sdkCfg.CodexThreadTitleSession = cfg.Codex.ThreadTitleSession
+ 	if cfg.CommercialMode {
+ 		sdkCfg.RequestLog = false
+ 	}
+diff --git a/internal/api/server_sdk_config_test.go b/internal/api/server_sdk_config_test.go
+index 77e1fa4d..29973ecd 100644
+--- a/internal/api/server_sdk_config_test.go
++++ b/internal/api/server_sdk_config_test.go
+@@ -34,6 +34,44 @@ func TestEffectiveSDKConfigCopiesCodexResponseSteering(t *testing.T) {
+ 	}
+ }
+ 
++func TestEffectiveSDKConfigCopiesCodexThreadTitleSession(t *testing.T) {
++	enabled := true
++	cfg := &config.Config{Codex: config.CodexConfig{ThreadTitleSession: &enabled}}
++
++	sdkCfg := effectiveSDKConfig(cfg)
++	if sdkCfg == nil || sdkCfg.CodexThreadTitleSession == nil || !*sdkCfg.CodexThreadTitleSession {
++		t.Fatalf("CodexThreadTitleSession = %v, want true", sdkCfg.CodexThreadTitleSession)
++	}
++}
++
++func TestCodexThreadTitleSessionYAMLUnmarshalDefaultsEnabled(t *testing.T) {
++	var cfg config.Config
++	if err := yaml.Unmarshal([]byte("codex: {}\n"), &cfg); err != nil {
++		t.Fatalf("unmarshal error: %v", err)
++	}
++	if cfg.Codex.ThreadTitleSession != nil {
++		t.Fatalf("cfg.Codex.ThreadTitleSession = %v, want nil (default enabled)", *cfg.Codex.ThreadTitleSession)
++	}
++	sdkCfg := effectiveSDKConfig(&cfg)
++	if sdkCfg == nil || sdkCfg.CodexThreadTitleSession != nil {
++		t.Fatalf("sdkCfg.CodexThreadTitleSession = %v, want nil (default enabled)", sdkCfg.CodexThreadTitleSession)
++	}
++}
++
++func TestCodexThreadTitleSessionYAMLUnmarshalExplicitDisabled(t *testing.T) {
++	var cfg config.Config
++	if err := yaml.Unmarshal([]byte("codex:\n  thread-title-session: false\n"), &cfg); err != nil {
++		t.Fatalf("unmarshal error: %v", err)
++	}
++	if cfg.Codex.ThreadTitleSession == nil || *cfg.Codex.ThreadTitleSession {
++		t.Fatalf("cfg.Codex.ThreadTitleSession = %v, want false", cfg.Codex.ThreadTitleSession)
++	}
++	sdkCfg := effectiveSDKConfig(&cfg)
++	if sdkCfg == nil || sdkCfg.CodexThreadTitleSession == nil || *sdkCfg.CodexThreadTitleSession {
++		t.Fatalf("sdkCfg.CodexThreadTitleSession = %v, want false", sdkCfg.CodexThreadTitleSession)
++	}
++}
++
+ func TestCodexResponseSteeringYAMLUnmarshal(t *testing.T) {
+ 	yamlContent := []byte(`
+ codex:
+diff --git a/internal/config/config_types.go b/internal/config/config_types.go
+index 4d44bf03..1a1acc31 100644
+--- a/internal/config/config_types.go
++++ b/internal/config/config_types.go
+@@ -219,6 +219,9 @@ type CodexConfig struct {
+ 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
+ 	// upstream model/account/socket for their entire lifetime. Default is false.
+ 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
++	// ThreadTitleSession allows Codex thread_source=thread_title websocket
++	// upgrades and HTTP /v1/responses naming calls. Default is true (allowed).
++	ThreadTitleSession *bool `yaml:"thread-title-session,omitempty" json:"thread-title-session,omitempty"`
+ }
+ 
+ // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index c7d3ceab..e7529704 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -56,6 +56,9 @@ type SDKConfig struct {
+ 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
+ 	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
+ 
++	// CodexThreadTitleSession mirrors Codex.ThreadTitleSession for API handlers.
++	CodexThreadTitleSession *bool `yaml:"-" json:"-"`
++
+ 	// ClaudeCode configures Claude Code compatibility behavior.
+ 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
+ 
+diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
+index 5a0ff31c..873fe873 100644
+--- a/internal/pluginhost/host.go
++++ b/internal/pluginhost/host.go
+@@ -1041,17 +1041,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
+ 		return capabilityRecord{}, pluginFile{}, false
+ 	}
+ 	return capabilityRecord{
+-			id:       lp.id,
+-			path:     lp.path,
+-			version:  lp.version,
+-			priority: item.Priority,
+-			meta:     plugin.Metadata,
+-			plugin:   plugin,
+-		}, pluginFile{
+-			ID:      lp.id,
+-			Path:    lp.path,
+-			Version: lp.version,
+-		}, true
++		id:       lp.id,
++		path:     lp.path,
++		version:  lp.version,
++		priority: item.Priority,
++		meta:     plugin.Metadata,
++		plugin:   plugin,
++	}, pluginFile{
++		ID:      lp.id,
++		Path:    lp.path,
++		Version: lp.version,
++	}, true
+ }
+ 
+ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
+diff --git a/internal/runtime/executor/claude_thinking_replay_test.go b/internal/runtime/executor/claude_thinking_replay_test.go
+index 553be9c2..7f04adc2 100644
+--- a/internal/runtime/executor/claude_thinking_replay_test.go
++++ b/internal/runtime/executor/claude_thinking_replay_test.go
+@@ -33,17 +33,17 @@ func claudeReplayTestAuth(baseURL string) *cliproxyauth.Auth {
+ 
+ func claudeReplayTestRequest(payload []byte, sessionID string, isCompat bool, source sdktranslator.Format) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+ 	return cliproxyexecutor.Request{
+-			Model:   "claude-synthetic-4772",
+-			Payload: payload,
+-			Metadata: map[string]any{
+-				claudeReplayResolvedModelInfoKey: &registry.ModelInfo{IsCompat: isCompat},
+-			},
+-		}, cliproxyexecutor.Options{
+-			SourceFormat: source,
+-			Metadata: map[string]any{
+-				cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+-			},
+-		}
++		Model:   "claude-synthetic-4772",
++		Payload: payload,
++		Metadata: map[string]any{
++			claudeReplayResolvedModelInfoKey: &registry.ModelInfo{IsCompat: isCompat},
++		},
++	}, cliproxyexecutor.Options{
++		SourceFormat: source,
++		Metadata: map[string]any{
++			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
++		},
++	}
+ }
+ 
+ func TestClaudeThinkingReplayEnabledRequiresCompatClaudeAPIKey(t *testing.T) {
+diff --git a/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go b/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
+index 8b8cba1b..031c7386 100644
+--- a/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
++++ b/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
+@@ -46,12 +46,12 @@ func codexTestAuth(baseURL string) *cliproxyauth.Auth {
+ 
+ func codexTestRequest() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+ 	return cliproxyexecutor.Request{
+-			Model:   "gpt-5.6-terra",
+-			Payload: []byte(`{"model":"gpt-5.6-terra","input":"hello"}`),
+-		}, cliproxyexecutor.Options{
+-			SourceFormat: sdktranslator.FromString("openai-response"),
+-			Stream:       true,
+-		}
++		Model:   "gpt-5.6-terra",
++		Payload: []byte(`{"model":"gpt-5.6-terra","input":"hello"}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Stream:       true,
++	}
+ }
+ 
+ // codexSSEServer streams the supplied event payloads as an HTTP 200 SSE response.
+@@ -92,11 +92,11 @@ func codexWebsocketServer(t *testing.T, frames ...string) *httptest.Server {
+ 
+ func codexWebsocketRequest() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+ 	return cliproxyexecutor.Request{
+-			Model:   "gpt-5.6-terra",
+-			Payload: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":"hello"}]}`),
+-		}, cliproxyexecutor.Options{
+-			SourceFormat: sdktranslator.FromString("openai-response"),
+-		}
++		Model:   "gpt-5.6-terra",
++		Payload: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":"hello"}]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++	}
+ }
+ 
+ // drainChunks collects every payload and the first error from a stream result.
+diff --git a/internal/runtime/executor/codex_websockets_executor_test.go b/internal/runtime/executor/codex_websockets_executor_test.go
+index 47e957f3..d972658b 100644
+--- a/internal/runtime/executor/codex_websockets_executor_test.go
++++ b/internal/runtime/executor/codex_websockets_executor_test.go
+@@ -3290,3 +3290,80 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
+ 		t.Fatalf("expected reason=send_error in log output, got: %s", logOutput)
+ 	}
+ }
++
++func TestPrepareCodexWebsocketStreamRejectsThreadTitleSidecar(t *testing.T) {
++	disabled := false
++	executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ThreadTitleSession: &disabled}})
++	auth := &cliproxyauth.Auth{
++		ID:       "auth-thread-title",
++		Provider: "codex",
++		Attributes: map[string]string{
++			"api_key":    "test-key",
++			"websockets": "true",
++		},
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	_, err := executor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
++		Model:   "gpt-6-astra",
++		Payload: []byte(`{"model":"gpt-6-astra","input":[]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Headers:      headers,
++	})
++	if err == nil {
++		t.Fatal("prepareCodexWebsocketStream accepted thread_title sidecar")
++	}
++	if !strings.Contains(err.Error(), "thread_title") {
++		t.Fatalf("error = %v, want thread_title", err)
++	}
++}
++
++func TestPrepareCodexWebsocketStreamAllowsThreadTitleByDefault(t *testing.T) {
++	executor := NewCodexWebsocketsExecutor(&config.Config{})
++	auth := &cliproxyauth.Auth{
++		ID:       "auth-thread-title-default",
++		Provider: "codex",
++		Attributes: map[string]string{
++			"api_key":    "test-key",
++			"websockets": "true",
++		},
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	_, err := executor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
++		Model:   "gpt-6-astra",
++		Payload: []byte(`{"model":"gpt-6-astra","input":[]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Headers:      headers,
++	})
++	if err != nil {
++		t.Fatalf("prepareCodexWebsocketStream rejected thread_title sidecar by default: %v", err)
++	}
++}
++
++func TestPrepareCodexWebsocketStreamAllowsThreadTitleWhenConfigured(t *testing.T) {
++	enabled := true
++	executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ThreadTitleSession: &enabled}})
++	auth := &cliproxyauth.Auth{
++		ID:       "auth-thread-title-enabled",
++		Provider: "codex",
++		Attributes: map[string]string{
++			"api_key":    "test-key",
++			"websockets": "true",
++		},
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	_, err := executor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
++		Model:   "gpt-6-astra",
++		Payload: []byte(`{"model":"gpt-6-astra","input":[]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Headers:      headers,
++	})
++	if err != nil {
++		t.Fatalf("prepareCodexWebsocketStream rejected thread_title sidecar when enabled: %v", err)
++	}
++}
+diff --git a/internal/runtime/executor/codex_websockets_request.go b/internal/runtime/executor/codex_websockets_request.go
+index cd7bd5f3..abc4b711 100644
+--- a/internal/runtime/executor/codex_websockets_request.go
++++ b/internal/runtime/executor/codex_websockets_request.go
+@@ -148,6 +148,24 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
+ 	return headers
+ }
+ 
++func codexThreadTitleSessionEnabled(cfg *config.Config) bool {
++	if cfg == nil || cfg.Codex.ThreadTitleSession == nil {
++		return true
++	}
++	return *cfg.Codex.ThreadTitleSession
++}
++
++func isCodexThreadTitleTurn(headers http.Header) bool {
++	if headers == nil {
++		return false
++	}
++	raw := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata"))
++	if raw == "" {
++		return false
++	}
++	return strings.EqualFold(strings.TrimSpace(gjson.Get(raw, "thread_source").String()), "thread_title")
++}
++
+ func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {
+ 	if target == nil {
+ 		return
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index f723fe68..4f1ee268 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -805,6 +805,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+ 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
+ 	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, body, opts.Headers)
+ 	applyModelHeaderOverrides(wsHeaders, baseModel)
++	if !codexThreadTitleSessionEnabled(e.cfg) && (isCodexThreadTitleTurn(opts.Headers) || isCodexThreadTitleTurn(wsHeaders)) {
++		return nil, fmt.Errorf("codex websockets: thread_title session naming is disabled")
++	}
+ 
+ 	return &codexWebsocketPrepared{
+ 		from:                 from,
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index d0acfa98..7fca7caa 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -24,6 +24,7 @@ import (
+ 	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ 	"github.com/tidwall/sjson"
+ )
+@@ -628,6 +629,17 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+ 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
+ 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
+ 
++	if isCodexThreadTitleRequest(c.Request.Header, rawJSON) && !codexThreadTitleSessionEnabled(h) {
++		log.Infof("responses: blocked thread_title session-naming sidecar remote=%s", c.ClientIP())
++		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
++			Error: handlers.ErrorDetail{
++				Message: "thread_title session is disabled",
++				Type:    "invalid_request_error",
++			},
++		})
++		return
++	}
++
+ 	// Check if the client requested a streaming response.
+ 	streamResult := gjson.GetBytes(rawJSON, "stream")
+ 	if streamResult.Type == gjson.True {
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 35bfc336..9d401ca2 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -266,6 +266,12 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
+ // It accepts `response.create` and `response.append` requests and streams
+ // response events back as JSON websocket text messages.
+ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
++	if isCodexThreadTitleSession(c.Request.Header) && !codexThreadTitleSessionEnabled(h) {
++		log.Infof("responses websocket: blocked thread_title session-naming sidecar remote=%s", websocketClientAddress(c))
++		c.AbortWithStatus(http.StatusForbidden)
++		return
++	}
++
+ 	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
+ 	if err != nil {
+ 		return
+@@ -648,6 +654,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
+ 		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+ 
++		if isCodexThreadTitleRequest(c.Request.Header, requestJSON) && !codexThreadTitleSessionEnabled(h) {
++			log.Infof("responses websocket: blocked thread_title session-naming payload remote=%s", websocketClientAddress(c))
++			errMsg := &interfaces.ErrorMessage{
++				StatusCode: http.StatusForbidden,
++				Error:      fmt.Errorf("thread_title session is disabled"),
++			}
++			_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
++			continue
++		}
++
+ 		if isPrewarm {
+ 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
+ 				requestJSON = updated
+@@ -885,6 +901,40 @@ func websocketClientAddress(c *gin.Context) string {
+ 	return strings.TrimSpace(c.ClientIP())
+ }
+ 
++func isCodexThreadTitleSession(headers http.Header) bool {
++	return isCodexThreadTitleMetadata(headers.Get("X-Codex-Turn-Metadata"))
++}
++
++func isCodexThreadTitleRequest(headers http.Header, body []byte) bool {
++	if isCodexThreadTitleSession(headers) {
++		return true
++	}
++	if len(body) == 0 {
++		return false
++	}
++	for _, path := range []string{"client_metadata.thread_source", "metadata.thread_source"} {
++		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, path).String()), "thread_title") {
++			return true
++		}
++	}
++	return false
++}
++
++func isCodexThreadTitleMetadata(raw string) bool {
++	raw = strings.TrimSpace(raw)
++	if raw == "" {
++		return false
++	}
++	return strings.EqualFold(strings.TrimSpace(gjson.Get(raw, "thread_source").String()), "thread_title")
++}
++
++func codexThreadTitleSessionEnabled(h *OpenAIResponsesAPIHandler) bool {
++	if h == nil || h.Cfg == nil || h.Cfg.CodexThreadTitleSession == nil {
++		return true
++	}
++	return *h.Cfg.CodexThreadTitleSession
++}
++
+ func websocketUpgradeHeaders(req *http.Request) http.Header {
+ 	headers := http.Header{}
+ 	if req == nil {
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_test.go b/sdk/api/handlers/openai/openai_responses_websocket_test.go
+index adc84445..164a908b 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_test.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_test.go
+@@ -7776,3 +7776,133 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
+ 		t.Fatal("timed out awaiting cancel callback on ping write failure")
+ 	}
+ }
++
++func boolPtr(b bool) *bool { return &b }
++
++func TestIsCodexThreadTitleSession(t *testing.T) {
++	if isCodexThreadTitleSession(nil) {
++		t.Fatal("nil headers treated as thread_title")
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","request_kind":"turn","thread_source":"user"}`)
++	if isCodexThreadTitleSession(headers) {
++		t.Fatal("user thread_source treated as thread_title")
++	}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","request_kind":"turn","thread_source":"thread_title"}`)
++	if !isCodexThreadTitleSession(headers) {
++		t.Fatal("thread_title sidecar not detected")
++	}
++}
++
++func TestResponsesWebsocketBlocksThreadTitleSidecar(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(false)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
++	_, resp, errDial := websocket.DefaultDialer.Dial(wsURL, http.Header{
++		"X-Codex-Turn-Metadata": []string{`{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`},
++	})
++	if errDial == nil {
++		t.Fatal("thread_title sidecar websocket was accepted")
++	}
++	if resp == nil || resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("thread_title sidecar status = %v, want 403", resp)
++	}
++}
++
++func TestResponsesHTTPBlocksThreadTitleSidecar(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(false)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.POST("/v1/responses", h.Responses)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-6-astra","input":[]}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	resp, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("thread_title HTTP status = %d, want 403", resp.StatusCode)
++	}
++}
++
++func TestResponsesHTTPBlocksThreadTitleInClientMetadata(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(false)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.POST("/v1/responses", h.Responses)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	body := `{"model":"gpt-6-astra","input":[],"client_metadata":{"thread_source":"thread_title"}}`
++	resp, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("thread_title HTTP status = %d, want 403", resp.StatusCode)
++	}
++}
++
++func TestResponsesWebsocketAllowsThreadTitleWhenConfigured(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(true)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
++	conn, resp, errDial := websocket.DefaultDialer.Dial(wsURL, http.Header{
++		"X-Codex-Turn-Metadata": []string{`{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`},
++	})
++	if errDial != nil {
++		t.Fatalf("dial websocket: %v status=%v", errDial, resp)
++	}
++	if errClose := conn.Close(); errClose != nil {
++		t.Errorf("close websocket: %v", errClose)
++	}
++}
++
++func TestResponsesWebsocketAllowsThreadTitleByDefault(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
++	conn, resp, errDial := websocket.DefaultDialer.Dial(wsURL, http.Header{
++		"X-Codex-Turn-Metadata": []string{`{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`},
++	})
++	if errDial != nil {
++		t.Fatalf("dial websocket by default: %v status=%v", errDial, resp)
++	}
++	if errClose := conn.Close(); errClose != nil {
++		t.Errorf("close websocket: %v", errClose)
++	}
++}
+-- 
+2.55.0
+

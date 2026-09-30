@@ -1,0 +1,61 @@
+From ba2a3f585463eb104728670fc791f9d8a75910cf Mon Sep 17 00:00:00 2001
+From: Jacob <240170694+wignerStan@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 11:57:49 +0800
+Subject: [PATCH 8/8] fix: use v8 plugin API for model-list interception
+
+
+diff --git a/config.example.yaml b/config.example.yaml
+index 7a4d5efb..cb56fe83 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -1086,7 +1086,7 @@ observability:
+     # Record proxy request/response logs. Management requests are excluded.
+     request-log: false
+ 
+-    # When true, dump Codex WS/HTTPS requests, responses, and frames to logrus debug log (linux only).
++    # When true, dump Codex WS/HTTPS requests, responses, and frames to logrus trace log (linux only).
+     # Default is false (disabled).
+     codex-dump: false
+ 
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index fcba1a4e..6ab17381 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -50,7 +50,7 @@ type SDKConfig struct {
+ 	// RequestLog enables or disables detailed request logging functionality.
+ 	RequestLog bool `yaml:"request-log" json:"request-log"`
+ 
+-	// CodexDump enables Codex WS/HTTPS frame and message dump to logrus debug (linux only, default off).
++	// CodexDump enables Codex WS/HTTPS frame and message dump to logrus trace (linux only, default off).
+ 	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
+ 
+ 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
+diff --git a/sdk/cliproxy/model_list_interceptor.go b/sdk/cliproxy/model_list_interceptor.go
+index b3371098..23956008 100644
+--- a/sdk/cliproxy/model_list_interceptor.go
++++ b/sdk/cliproxy/model_list_interceptor.go
+@@ -6,7 +6,7 @@ import (
+ 	"net/http"
+ 
+ 	"github.com/gin-gonic/gin"
+-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+ )
+ 
+ const (
+diff --git a/sdk/cliproxy/model_list_interceptor_test.go b/sdk/cliproxy/model_list_interceptor_test.go
+index c51057b5..7cc973fb 100644
+--- a/sdk/cliproxy/model_list_interceptor_test.go
++++ b/sdk/cliproxy/model_list_interceptor_test.go
+@@ -8,7 +8,7 @@ import (
+ 	"testing"
+ 
+ 	"github.com/gin-gonic/gin"
+-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+ )
+ 
+ type modelListInterceptorFunc func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+-- 
+2.55.0
+

@@ -1,0 +1,472 @@
+From e69e13692d0cedc481e97251b6ac64a5339f439d Mon Sep 17 00:00:00 2001
+From: Jacob <24017069+wignerStan@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 20:42:19 -0700
+Subject: [PATCH 6/8] feat(codex): add WS and HTTPS dump via logrus debug
+ (linux only, default off)
+
+
+diff --git a/config.example.yaml b/config.example.yaml
+index fdfdb2dc..9ee203cb 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -1083,6 +1083,10 @@ observability:
+     # Record proxy request/response logs. Management requests are excluded.
+     request-log: false
+ 
++    # When true, dump Codex WS/HTTPS requests, responses, and frames to logrus debug log (linux only).
++    # Default is false (disabled).
++    codex-dump: false
++
+   usage:
+     # When false, disable in-memory usage statistics aggregation
+     usage-statistics-enabled: false
+diff --git a/internal/api/server.go b/internal/api/server.go
+index 3cd910b8..6a7b2c03 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -217,6 +217,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 	}
+ 	logDir := logging.ResolveLogDirectory(cfg)
+ 	s.mgmt.SetLogDirectory(logDir)
++	logging.ConfigureCodexDump(cfg.CodexDump)
+ 	if optionState.postAuthHook != nil {
+ 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
+ 	}
+diff --git a/internal/api/server_reload.go b/internal/api/server_reload.go
+index 64b7ee9b..951d737a 100644
+--- a/internal/api/server_reload.go
++++ b/internal/api/server_reload.go
+@@ -86,6 +86,10 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+ 		}
+ 	}
+ 
++	if oldCfg == nil || oldCfg.CodexDump != cfg.CodexDump {
++		logging.ConfigureCodexDump(cfg.CodexDump)
++	}
++
+ 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
+ 		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+ 	}
+diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
+index 5ba3ea60..b9ffa905 100644
+--- a/internal/config/config_v8.go
++++ b/internal/config/config_v8.go
+@@ -58,6 +58,7 @@ func buildV8Paths() []configPath {
+ 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
+ 		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
+ 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
++		{"codex-dump", "observability.logs.codex-dump"},
+ 		{"error-logs-max-files", "observability.logs.error-logs-max-files"},
+ 		{"usage-statistics-enabled", "observability.usage.usage-statistics-enabled"},
+ 		{"redis-usage-queue-retention-seconds", "observability.usage.redis-usage-queue-retention-seconds"}, {"pprof", "observability.pprof"},
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index e7529704..fcba1a4e 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -50,6 +50,9 @@ type SDKConfig struct {
+ 	// RequestLog enables or disables detailed request logging functionality.
+ 	RequestLog bool `yaml:"request-log" json:"request-log"`
+ 
++	// CodexDump enables Codex WS/HTTPS frame and message dump to logrus debug (linux only, default off).
++	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
++
+ 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
+ 	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
+ 
+diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+new file mode 100644
+index 00000000..c5d39049
+--- /dev/null
++++ b/internal/logging/codex_dump.go
+@@ -0,0 +1,130 @@
++package logging
++
++import (
++	"encoding/base64"
++	"encoding/json"
++	"net/http"
++	"runtime"
++	"strings"
++	"sync/atomic"
++
++	log "github.com/sirupsen/logrus"
++	"github.com/tidwall/gjson"
++)
++
++var (
++	codexDumpActive atomic.Bool
++)
++
++// IsLinuxOS reports whether the runtime operating system is Linux.
++func IsLinuxOS() bool {
++	return runtime.GOOS == "linux"
++}
++
++// ConfigureCodexDump sets whether Codex WS/HTTPS dump is enabled via config.
++// Dump is linux-only and default off.
++func ConfigureCodexDump(enabled bool) {
++	if !IsLinuxOS() {
++		codexDumpActive.Store(false)
++		return
++	}
++	codexDumpActive.Store(enabled)
++}
++
++// CodexDumpEnabled reports whether dump capture is active.
++// Returns false on non-Linux OS or when disabled (default off).
++func CodexDumpEnabled() bool {
++	if !IsLinuxOS() {
++		return false
++	}
++	return codexDumpActive.Load()
++}
++
++// CodexDumpFrame logs one websocket text frame (any leg) to logrus at debug level.
++// leg examples: client_in, client_out, upstream_out, upstream_in.
++func CodexDumpFrame(sessionID, leg string, payload []byte) {
++	if !CodexDumpEnabled() {
++		return
++	}
++
++	eventType := ""
++	trimmed := bytesTrimSpace(payload)
++	if len(trimmed) > 0 && json.Valid(trimmed) {
++		eventType = gjson.GetBytes(trimmed, "type").String()
++	}
++
++	log.WithFields(log.Fields{
++		"protocol":   "ws",
++		"session_id": strings.TrimSpace(sessionID),
++		"leg":        strings.TrimSpace(leg),
++		"type":       eventType,
++		"size":       len(payload),
++	}).Debugf("ws dump: %s", string(trimmed))
++}
++
++// CodexDumpBinaryFrame logs a non-text websocket frame to logrus at debug level.
++func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
++	if !CodexDumpEnabled() || len(payload) == 0 {
++		return
++	}
++
++	log.WithFields(log.Fields{
++		"protocol":   "ws",
++		"session_id": strings.TrimSpace(sessionID),
++		"leg":        strings.TrimSpace(leg),
++		"binary":     true,
++		"size":       len(payload),
++	}).Debugf("ws binary dump: %s", base64.StdEncoding.EncodeToString(payload))
++}
++
++// CodexDumpHTTPRequest logs an HTTP request (upstream_out or client_in) to logrus at debug level.
++func CodexDumpHTTPRequest(sessionID, leg, method, url string, headers http.Header, body []byte) {
++	if !CodexDumpEnabled() {
++		return
++	}
++
++	trimmed := bytesTrimSpace(body)
++	log.WithFields(log.Fields{
++		"protocol":   "https",
++		"session_id": strings.TrimSpace(sessionID),
++		"leg":        strings.TrimSpace(leg),
++		"method":     strings.TrimSpace(method),
++		"url":        strings.TrimSpace(url),
++		"size":       len(body),
++	}).Debugf("https dump request: %s", string(trimmed))
++}
++
++// CodexDumpHTTPResponse logs an HTTP response metadata/body to logrus at debug level.
++func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
++	if !CodexDumpEnabled() {
++		return
++	}
++
++	trimmed := bytesTrimSpace(body)
++	log.WithFields(log.Fields{
++		"protocol":   "https",
++		"session_id": strings.TrimSpace(sessionID),
++		"leg":        strings.TrimSpace(leg),
++		"status":     status,
++		"size":       len(body),
++	}).Debugf("https dump response: %s", string(trimmed))
++}
++
++// CodexDumpHTTPChunk logs an HTTP response chunk (upstream_in or client_out) to logrus at debug level.
++func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
++	if !CodexDumpEnabled() || len(chunk) == 0 {
++		return
++	}
++
++	trimmed := bytesTrimSpace(chunk)
++	log.WithFields(log.Fields{
++		"protocol":   "https",
++		"session_id": strings.TrimSpace(sessionID),
++		"leg":        strings.TrimSpace(leg),
++		"size":       len(chunk),
++	}).Debugf("https dump chunk: %s", string(trimmed))
++}
++
++func bytesTrimSpace(b []byte) []byte {
++	return []byte(strings.TrimSpace(string(b)))
++}
+diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
+new file mode 100644
+index 00000000..09660975
+--- /dev/null
++++ b/internal/logging/codex_dump_test.go
+@@ -0,0 +1,62 @@
++package logging
++
++import (
++	"bytes"
++	"net/http"
++	"runtime"
++	"strings"
++	"testing"
++
++	log "github.com/sirupsen/logrus"
++)
++
++func TestCodexDumpDefaultsOff(t *testing.T) {
++	ConfigureCodexDump(false)
++	if CodexDumpEnabled() {
++		t.Fatal("CodexDumpEnabled() = true, want false by default")
++	}
++}
++
++func TestCodexDumpStandardLog(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("dump is linux only")
++	}
++
++	var buf bytes.Buffer
++	origOutput := log.StandardLogger().Out
++	origLevel := log.GetLevel()
++	log.SetOutput(&buf)
++	log.SetLevel(log.DebugLevel)
++	defer func() {
++		log.SetOutput(origOutput)
++		log.SetLevel(origLevel)
++		ConfigureCodexDump(false)
++	}()
++
++	ConfigureCodexDump(true)
++	if !CodexDumpEnabled() {
++		t.Fatal("CodexDumpEnabled() = false, want true on linux")
++	}
++
++	CodexDumpFrame("sess-ws", "client_in", []byte(`{"type":"response.create","model":"gpt-6-astra"}`))
++	CodexDumpHTTPRequest("sess-http", "upstream_out", "POST", "https://api.openai.com/v1/responses", http.Header{"Authorization": []string{"Bearer tok"}}, []byte(`{"model":"gpt-6-astra"}`))
++	CodexDumpHTTPResponse("sess-http", "upstream_in", 200, http.Header{"Content-Type": []string{"application/json"}}, []byte(`{"status":"ok"}`))
++	CodexDumpHTTPChunk("sess-http", "upstream_in", []byte("data: chunk\n\n"))
++
++	out := buf.String()
++	if !strings.Contains(out, "ws dump:") {
++		t.Fatalf("expected log output to contain 'ws dump:', got: %s", out)
++	}
++	if !strings.Contains(out, "response.create") {
++		t.Fatalf("expected log output to contain 'response.create', got: %s", out)
++	}
++	if !strings.Contains(out, "https dump request:") {
++		t.Fatalf("expected log output to contain 'https dump request:', got: %s", out)
++	}
++	if !strings.Contains(out, "https dump response:") {
++		t.Fatalf("expected log output to contain 'https dump response:', got: %s", out)
++	}
++	if !strings.Contains(out, "https dump chunk:") {
++		t.Fatalf("expected log output to contain 'https dump chunk:', got: %s", out)
++	}
++}
+diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
+index e1db2978..328da2fb 100644
+--- a/internal/runtime/executor/helps/logging_helpers.go
++++ b/internal/runtime/executor/helps/logging_helpers.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ )
+@@ -63,6 +64,7 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
+ 
+ // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
+ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
++	logging.CodexDumpHTTPRequest(cliproxyexecutor.ExecutionSessionID(ctx), "upstream_out", info.Method, info.URL, info.Headers, info.Body)
+ 	if cfg == nil || cfg.CommercialMode {
+ 		return
+ 	}
+@@ -190,6 +192,7 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
+ // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
+ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+ 	logging.SetResponseHeaders(ctx, headers)
++	logging.CodexDumpHTTPResponse(cliproxyexecutor.ExecutionSessionID(ctx), "upstream_in", status, headers, nil)
+ 	if !requestLogCaptureEnabled(cfg) {
+ 		return
+ 	}
+@@ -243,6 +246,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error)
+ 
+ // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
+ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
++	logging.CodexDumpHTTPChunk(cliproxyexecutor.ExecutionSessionID(ctx), "upstream_in", chunk)
+ 	if !requestLogCaptureEnabled(cfg) {
+ 		return
+ 	}
+@@ -287,6 +291,9 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
+ 
+ // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
+ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
++	if len(info.Body) > 0 {
++		logging.CodexDumpFrame(cliproxyexecutor.ExecutionSessionID(ctx), "upstream_out", info.Body)
++	}
+ 	if !requestLogCaptureEnabled(cfg) {
+ 		return
+ 	}
+@@ -378,6 +385,7 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
+ 
+ // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
+ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
++	logging.CodexDumpFrame(cliproxyexecutor.ExecutionSessionID(ctx), "upstream_in", payload)
+ 	if !requestLogCaptureEnabled(cfg) {
+ 		return
+ 	}
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index 7fca7caa..8a11a7a4 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -629,6 +629,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+ 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
+ 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
+ 
++	sessionID := handlers.ExecutionSessionID(c.Request.Context())
++	requestlogging.CodexDumpHTTPRequest(sessionID, "client_in", c.Request.Method, c.Request.URL.String(), c.Request.Header, rawJSON)
++
+ 	if isCodexThreadTitleRequest(c.Request.Header, rawJSON) && !codexThreadTitleSessionEnabled(h) {
+ 		log.Infof("responses: blocked thread_title session-naming sidecar remote=%s", c.ClientIP())
+ 		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
+@@ -718,6 +721,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
+ 		return
+ 	}
+ 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
++	requestlogging.CodexDumpHTTPResponse(handlers.ExecutionSessionID(c.Request.Context()), "client_out", http.StatusOK, c.Writer.Header(), resp)
+ 	_, _ = c.Writer.Write(resp)
+ 	cliCancel()
+ }
+@@ -1092,6 +1096,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
+ 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+ 		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
+ 		WriteChunk: func(chunk []byte) {
++			requestlogging.CodexDumpHTTPChunk(handlers.ExecutionSessionID(c.Request.Context()), "client_out", chunk)
+ 			framer.WriteChunk(c.Writer, chunk)
+ 		},
+ 		ChunkError: func() *interfaces.ErrorMessage {
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 9d401ca2..6ea5e018 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -16,6 +16,7 @@ import (
+ 	"github.com/google/uuid"
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+@@ -438,13 +439,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+ 			continue
+ 		}
+-		// log.Infof(
+-		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
+-		// 	passthroughSessionID,
+-		// 	msgType,
+-		// 	websocketPayloadEventType(payload),
+-		// 	websocketPayloadPreview(payload),
+-		// )
++		if msgType == websocket.BinaryMessage {
++			requestlogging.CodexDumpBinaryFrame(passthroughSessionID, "client_in", payload)
++		} else {
++			requestlogging.CodexDumpFrame(passthroughSessionID, "client_in", payload)
++		}
+ 		wsTimelineLog.BeginRequest()
+ 		wsTimelineLog.Append("request", payload, time.Now())
+ 
+@@ -631,7 +630,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		if errMsg != nil {
+ 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+ 			markAPIResponseTimestamp(c)
+-			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
++			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, passthroughSessionID, errMsg)
+ 			log.Infof(
+ 				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+ 				passthroughSessionID,
+@@ -660,7 +659,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 				StatusCode: http.StatusForbidden,
+ 				Error:      fmt.Errorf("thread_title session is disabled"),
+ 			}
+-			_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
++			_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, passthroughSessionID, errMsg)
+ 			continue
+ 		}
+ 
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_forward.go b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+index 4bcdfd68..7efc3b29 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_forward.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+@@ -218,7 +218,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ 				// 	websocketPayloadEventType(payloads[i]),
+ 				// 	websocketPayloadPreview(payloads[i]),
+ 				// )
+-				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
++				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payloads[i], time.Now()); errWrite != nil {
+ 					log.Warnf(
+ 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+ 						sessionID,
+@@ -654,10 +654,10 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
+ 	return payload, nil
+ }
+ 
+-func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {
++func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, sessionID string, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+ 	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+ 	if errBuild != nil {
+ 		return nil, errBuild
+ 	}
+-	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, payload, time.Now())
++	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payload, time.Now())
+ }
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go b/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
+index 0950fda2..562dc7a6 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
+@@ -45,7 +45,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
+ 		// 	websocketPayloadEventType(payloads[i]),
+ 		// 	websocketPayloadPreview(payloads[i]),
+ 		// )
+-		if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
++		if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payloads[i], time.Now()); errWrite != nil {
+ 			log.Warnf(
+ 				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+ 				sessionID,
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+index 920f1f19..aa5e8b12 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+@@ -277,11 +277,12 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
+ 	c.Set(key, []byte(trimmedBody))
+ }
+ 
+-func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, payload []byte, timestamp time.Time) error {
++func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, sessionID string, payload []byte, timestamp time.Time) error {
+ 	payload = requestlogging.NormalizeCodexResponseMetadataDownstream(payload)
+ 	if wsTimelineLog != nil {
+ 		wsTimelineLog.Append("response", payload, timestamp)
+ 	}
++	requestlogging.CodexDumpFrame(sessionID, "client_out", payload)
+ 	if writer == nil || writer.conn == nil {
+ 		return fmt.Errorf("responses websocket: writer is nil")
+ 	}
+-- 
+2.55.0
+
