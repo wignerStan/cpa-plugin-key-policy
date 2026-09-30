@@ -1,0 +1,262 @@
+From e64411858cad0876901a42604fc0d0ae7a8220ef Mon Sep 17 00:00:00 2001
+From: Jacob <24017069+wignerStan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 09:07:15 -0700
+Subject: [PATCH 7/8] feat(logging): add trace level logging and switch
+ ws/https dump to trace
+
+
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index d7ac6257..7de188f4 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -131,6 +131,7 @@ func main() {
+ 	var standalone bool
+ 	var managementBaseURL string
+ 	var localModel bool
++	var traceMode bool
+ 
+ 	// Define command-line flags for different operation modes.
+ 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
+@@ -160,6 +161,7 @@ func main() {
+ 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
+ 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
+ 	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
++	flag.BoolVar(&traceMode, "trace", false, "Enable trace logging")
+ 
+ 	flag.CommandLine.Usage = func() {
+ 		out := flag.CommandLine.Output()
+@@ -639,6 +641,10 @@ func main() {
+ 
+ 	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+ 
++	if traceMode {
++		cfg.Trace = true
++	}
++
+ 	// Set the log level based on the configuration.
+ 	util.SetLogLevel(cfg)
+ 
+diff --git a/config.example.yaml b/config.example.yaml
+index 9ee203cb..7a4d5efb 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -1069,6 +1069,9 @@ observability:
+     # Enable debug logging
+     debug: false
+ 
++    # Enable trace logging (most verbose, includes full WS/HTTPS payloads)
++    trace: false
++
+     # When true, write application logs to rotating files instead of stdout
+     logging-to-file: false
+ 
+diff --git a/internal/config/config.go b/internal/config/config.go
+index ca3767a5..f4dc1f91 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -41,6 +41,9 @@ type Config struct {
+ 	// Debug enables or disables debug-level logging and other debug features.
+ 	Debug bool `yaml:"debug" json:"debug"`
+ 
++	// Trace enables or disables trace-level logging.
++	Trace bool `yaml:"trace" json:"trace"`
++
+ 	// Pprof config controls the optional pprof HTTP debug server.
+ 	Pprof PprofConfig `yaml:"pprof" json:"pprof"`
+ 
+diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
+index b9ffa905..56a28ef4 100644
+--- a/internal/config/config_v8.go
++++ b/internal/config/config_v8.go
+@@ -56,7 +56,7 @@ func buildV8Paths() []configPath {
+ 		{"xai", "oauth.providers.xai"}, {"devin", "oauth.providers.devin"},
+ 		{"disable-image-generation", "multimedia.disable-image-generation"}, {"gpt-image-2-base-model", "multimedia.gpt-image-2-base-model"},
+ 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
+-		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
++		{"debug", "observability.logs.debug"}, {"trace", "observability.logs.trace"}, {"logging-to-file", "observability.logs.logging-to-file"},
+ 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
+ 		{"codex-dump", "observability.logs.codex-dump"},
+ 		{"error-logs-max-files", "observability.logs.error-logs-max-files"},
+diff --git a/internal/config/origin_models_test.go b/internal/config/origin_models_test.go
+index 892aeee7..c955ecbb 100644
+--- a/internal/config/origin_models_test.go
++++ b/internal/config/origin_models_test.go
+@@ -27,3 +27,13 @@ func TestParseConfigOriginModelsEndpointDefaultsAndOptIn(t *testing.T) {
+ 		t.Fatal("v8 access.allow-origin-models-endpoint: true was not parsed")
+ 	}
+ }
++
++func TestParseConfigTrace(t *testing.T) {
++	cfg, err := ParseConfigBytes([]byte("trace: true\n"))
++	if err != nil {
++		t.Fatalf("ParseConfigBytes with trace: %v", err)
++	}
++	if !cfg.Trace {
++		t.Fatal("trace: true was not parsed")
++	}
++}
+diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+index c5d39049..35cbabad 100644
+--- a/internal/logging/codex_dump.go
++++ b/internal/logging/codex_dump.go
+@@ -22,13 +22,16 @@ func IsLinuxOS() bool {
+ }
+ 
+ // ConfigureCodexDump sets whether Codex WS/HTTPS dump is enabled via config.
+-// Dump is linux-only and default off.
++// Dump is linux-only and default off. When enabled on Linux, it sets logrus to TraceLevel.
+ func ConfigureCodexDump(enabled bool) {
+ 	if !IsLinuxOS() {
+ 		codexDumpActive.Store(false)
+ 		return
+ 	}
+ 	codexDumpActive.Store(enabled)
++	if enabled {
++		log.SetLevel(log.TraceLevel)
++	}
+ }
+ 
+ // CodexDumpEnabled reports whether dump capture is active.
+@@ -40,7 +43,7 @@ func CodexDumpEnabled() bool {
+ 	return codexDumpActive.Load()
+ }
+ 
+-// CodexDumpFrame logs one websocket text frame (any leg) to logrus at debug level.
++// CodexDumpFrame logs one websocket text frame (any leg) to logrus at trace level.
+ // leg examples: client_in, client_out, upstream_out, upstream_in.
+ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+ 	if !CodexDumpEnabled() {
+@@ -59,10 +62,10 @@ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+ 		"leg":        strings.TrimSpace(leg),
+ 		"type":       eventType,
+ 		"size":       len(payload),
+-	}).Debugf("ws dump: %s", string(trimmed))
++	}).Tracef("ws dump: %s", string(trimmed))
+ }
+ 
+-// CodexDumpBinaryFrame logs a non-text websocket frame to logrus at debug level.
++// CodexDumpBinaryFrame logs a non-text websocket frame to logrus at trace level.
+ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+ 	if !CodexDumpEnabled() || len(payload) == 0 {
+ 		return
+@@ -74,10 +77,10 @@ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+ 		"leg":        strings.TrimSpace(leg),
+ 		"binary":     true,
+ 		"size":       len(payload),
+-	}).Debugf("ws binary dump: %s", base64.StdEncoding.EncodeToString(payload))
++	}).Tracef("ws binary dump: %s", base64.StdEncoding.EncodeToString(payload))
+ }
+ 
+-// CodexDumpHTTPRequest logs an HTTP request (upstream_out or client_in) to logrus at debug level.
++// CodexDumpHTTPRequest logs an HTTP request (upstream_out or client_in) to logrus at trace level.
+ func CodexDumpHTTPRequest(sessionID, leg, method, url string, headers http.Header, body []byte) {
+ 	if !CodexDumpEnabled() {
+ 		return
+@@ -91,10 +94,10 @@ func CodexDumpHTTPRequest(sessionID, leg, method, url string, headers http.Heade
+ 		"method":     strings.TrimSpace(method),
+ 		"url":        strings.TrimSpace(url),
+ 		"size":       len(body),
+-	}).Debugf("https dump request: %s", string(trimmed))
++	}).Tracef("https dump request: %s", string(trimmed))
+ }
+ 
+-// CodexDumpHTTPResponse logs an HTTP response metadata/body to logrus at debug level.
++// CodexDumpHTTPResponse logs an HTTP response metadata/body to logrus at trace level.
+ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
+ 	if !CodexDumpEnabled() {
+ 		return
+@@ -107,10 +110,10 @@ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Heade
+ 		"leg":        strings.TrimSpace(leg),
+ 		"status":     status,
+ 		"size":       len(body),
+-	}).Debugf("https dump response: %s", string(trimmed))
++	}).Tracef("https dump response: %s", string(trimmed))
+ }
+ 
+-// CodexDumpHTTPChunk logs an HTTP response chunk (upstream_in or client_out) to logrus at debug level.
++// CodexDumpHTTPChunk logs an HTTP response chunk (upstream_in or client_out) to logrus at trace level.
+ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ 	if !CodexDumpEnabled() || len(chunk) == 0 {
+ 		return
+@@ -122,7 +125,7 @@ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ 		"session_id": strings.TrimSpace(sessionID),
+ 		"leg":        strings.TrimSpace(leg),
+ 		"size":       len(chunk),
+-	}).Debugf("https dump chunk: %s", string(trimmed))
++	}).Tracef("https dump chunk: %s", string(trimmed))
+ }
+ 
+ func bytesTrimSpace(b []byte) []byte {
+diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
+index 09660975..0a29023d 100644
+--- a/internal/logging/codex_dump_test.go
++++ b/internal/logging/codex_dump_test.go
+@@ -26,7 +26,6 @@ func TestCodexDumpStandardLog(t *testing.T) {
+ 	origOutput := log.StandardLogger().Out
+ 	origLevel := log.GetLevel()
+ 	log.SetOutput(&buf)
+-	log.SetLevel(log.DebugLevel)
+ 	defer func() {
+ 		log.SetOutput(origOutput)
+ 		log.SetLevel(origLevel)
+@@ -37,6 +36,9 @@ func TestCodexDumpStandardLog(t *testing.T) {
+ 	if !CodexDumpEnabled() {
+ 		t.Fatal("CodexDumpEnabled() = false, want true on linux")
+ 	}
++	if log.GetLevel() != log.TraceLevel {
++		t.Fatalf("log level = %v, want TraceLevel", log.GetLevel())
++	}
+ 
+ 	CodexDumpFrame("sess-ws", "client_in", []byte(`{"type":"response.create","model":"gpt-6-astra"}`))
+ 	CodexDumpHTTPRequest("sess-http", "upstream_out", "POST", "https://api.openai.com/v1/responses", http.Header{"Authorization": []string{"Bearer tok"}}, []byte(`{"model":"gpt-6-astra"}`))
+@@ -44,6 +46,9 @@ func TestCodexDumpStandardLog(t *testing.T) {
+ 	CodexDumpHTTPChunk("sess-http", "upstream_in", []byte("data: chunk\n\n"))
+ 
+ 	out := buf.String()
++	if !strings.Contains(out, "level=trace") {
++		t.Fatalf("expected log output to contain 'level=trace', got: %s", out)
++	}
+ 	if !strings.Contains(out, "ws dump:") {
+ 		t.Fatalf("expected log output to contain 'ws dump:', got: %s", out)
+ 	}
+diff --git a/internal/util/util.go b/internal/util/util.go
+index 89275583..be55d621 100644
+--- a/internal/util/util.go
++++ b/internal/util/util.go
+@@ -9,6 +9,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
++	"runtime"
+ 	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+@@ -55,11 +56,14 @@ func SanitizeFunctionName(name string) string {
+ }
+ 
+ // SetLogLevel configures the logrus log level based on the configuration.
+-// It sets the log level to DebugLevel if debug mode is enabled, otherwise to InfoLevel.
++// It sets the log level to TraceLevel if trace mode or codex-dump is enabled,
++// DebugLevel if debug mode is enabled, otherwise to InfoLevel.
+ func SetLogLevel(cfg *config.Config) {
+ 	currentLevel := log.GetLevel()
+ 	var newLevel log.Level
+-	if cfg.Debug {
++	if cfg.Trace || (cfg.CodexDump && runtime.GOOS == "linux") {
++		newLevel = log.TraceLevel
++	} else if cfg.Debug {
+ 		newLevel = log.DebugLevel
+ 	} else {
+ 		newLevel = log.InfoLevel
+@@ -67,7 +71,7 @@ func SetLogLevel(cfg *config.Config) {
+ 
+ 	if currentLevel != newLevel {
+ 		log.SetLevel(newLevel)
+-		log.Infof("log level changed from %s to %s (debug=%t)", currentLevel, newLevel, cfg.Debug)
++		log.Infof("log level changed from %s to %s (trace=%t, debug=%t)", currentLevel, newLevel, cfg.Trace, cfg.Debug)
+ 	}
+ }
+ 
+-- 
+2.55.0
+

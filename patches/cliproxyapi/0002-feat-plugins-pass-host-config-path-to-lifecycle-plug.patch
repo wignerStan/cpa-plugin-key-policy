@@ -1,14 +1,14 @@
-From b961bb1c76284c098e91d30977c24deed14b932c Mon Sep 17 00:00:00 2001
+From d3b6af809a506b6958f9f781442c9e0d462bee8b Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 14 Sep 2026 16:46:12 -0700
-Subject: [PATCH 2/3] feat(plugins): pass host config path to lifecycle plugins
+Subject: [PATCH 2/8] feat(plugins): pass host config path to lifecycle plugins
 
 
 diff --git a/cmd/server/main.go b/cmd/server/main.go
-index dc86faf7..8c4178fc 100644
+index 2b990778..d7ac6257 100644
 --- a/cmd/server/main.go
 +++ b/cmd/server/main.go
-@@ -185,6 +185,7 @@ func main() {
+@@ -189,6 +189,7 @@ func main() {
  	}
  
  	pluginHost := pluginhost.New()
@@ -16,7 +16,7 @@ index dc86faf7..8c4178fc 100644
  	if !isDiscoverMode {
  		if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
  			pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
-@@ -194,6 +195,7 @@ func main() {
+@@ -198,6 +199,7 @@ func main() {
  
  	// Parse the command-line flags.
  	flag.Parse()
@@ -24,7 +24,7 @@ index dc86faf7..8c4178fc 100644
  
  	if discoverGateways || discoverJSON {
  		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
-@@ -674,6 +676,7 @@ func main() {
+@@ -678,6 +680,7 @@ func main() {
  
  	// Register built-in access providers before constructing services.
  	configaccess.Register(&cfg.SDKConfig)
@@ -33,10 +33,10 @@ index dc86faf7..8c4178fc 100644
  	if configLoadedFromHome && homePluginStatusReady {
  		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
 diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
-index a6f8b086..736b2813 100644
+index b9cf9d0f..5a0ff31c 100644
 --- a/internal/pluginhost/host.go
 +++ b/internal/pluginhost/host.go
-@@ -69,6 +69,7 @@ type Host struct {
+@@ -73,6 +73,7 @@ type Host struct {
  	activePluginPaths      map[string]string
  	cleanupFilesPending    bool
  	runtimeConfig          *config.Config
@@ -44,7 +44,7 @@ index a6f8b086..736b2813 100644
  	authManager            *coreauth.Manager
  	modelExecutor          modelExecutor
  	modelClientIDs         map[string]struct{}
-@@ -127,6 +128,27 @@ func NewForTest(loader pluginLoader) *Host {
+@@ -133,6 +134,27 @@ func NewForTest(loader pluginLoader) *Host {
  	return h
  }
  
@@ -73,10 +73,10 @@ index a6f8b086..736b2813 100644
  	if h == nil {
  		return
 diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.go
-index fe265e07..afad313e 100644
+index 96e3785d..532e96eb 100644
 --- a/internal/pluginhost/rpc_client.go
 +++ b/internal/pluginhost/rpc_client.go
-@@ -66,7 +66,13 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+@@ -67,7 +67,13 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
  		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
  	}
  	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
@@ -92,7 +92,7 @@ index fe265e07..afad313e 100644
  	})
  	if errCall != nil {
 diff --git a/internal/pluginhost/rpc_schema.go b/internal/pluginhost/rpc_schema.go
-index 1150eef0..bacf0cd7 100644
+index 188ed246..e5c1f5d0 100644
 --- a/internal/pluginhost/rpc_schema.go
 +++ b/internal/pluginhost/rpc_schema.go
 @@ -9,6 +9,7 @@ import (
@@ -104,7 +104,7 @@ index 1150eef0..bacf0cd7 100644
  }
  
 diff --git a/sdk/cliproxy/builder.go b/sdk/cliproxy/builder.go
-index 658a76f4..1e9322a4 100644
+index 40404ff8..9503f14f 100644
 --- a/sdk/cliproxy/builder.go
 +++ b/sdk/cliproxy/builder.go
 @@ -241,6 +241,9 @@ func (b *Builder) Build() (*Service, error) {
@@ -117,3 +117,6 @@ index 658a76f4..1e9322a4 100644
  	if b.cfg != nil {
  		pluginHost.ApplyConfig(context.Background(), b.cfg)
  		pluginHost.RegisterFrontendAuthProviders()
+-- 
+2.55.0
+

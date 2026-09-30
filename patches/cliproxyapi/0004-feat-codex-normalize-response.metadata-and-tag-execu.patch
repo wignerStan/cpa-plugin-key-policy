@@ -1,0 +1,302 @@
+From e3f5188df9b66173fed4ed30d565037782c4302c Mon Sep 17 00:00:00 2001
+From: Jacob <24017069+wignerStan@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 20:33:18 -0700
+Subject: [PATCH 4/8] feat(codex): normalize response.metadata and tag
+ execution session context
+
+
+diff --git a/internal/logging/codex_response_metadata.go b/internal/logging/codex_response_metadata.go
+new file mode 100644
+index 00000000..35aeb35a
+--- /dev/null
++++ b/internal/logging/codex_response_metadata.go
+@@ -0,0 +1,25 @@
++package logging
++
++import (
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++)
++
++const (
++	codexResponseMetadataType = "codex.response.metadata"
++	responseMetadataType      = "response.metadata"
++)
++
++// NormalizeCodexResponseMetadataDownstream rewrites upstream codex.response.metadata
++// to response.metadata so official Codex clients persist x-codex-turn-state. Only
++// the JSON "type" field changes; headers and other fields are preserved.
++func NormalizeCodexResponseMetadataDownstream(payload []byte) []byte {
++	if gjson.GetBytes(payload, "type").String() != codexResponseMetadataType {
++		return payload
++	}
++	out, err := sjson.SetBytes(payload, "type", responseMetadataType)
++	if err != nil || len(out) == 0 {
++		return payload
++	}
++	return out
++}
+diff --git a/internal/logging/codex_response_metadata_test.go b/internal/logging/codex_response_metadata_test.go
+new file mode 100644
+index 00000000..893da2cd
+--- /dev/null
++++ b/internal/logging/codex_response_metadata_test.go
+@@ -0,0 +1,22 @@
++package logging
++
++import (
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestNormalizeCodexResponseMetadataDownstream(t *testing.T) {
++	in := []byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"tok-abc","x-models-etag":"W/\"x\""}}`)
++	out := NormalizeCodexResponseMetadataDownstream(in)
++	if gjson.GetBytes(out, "type").String() != responseMetadataType {
++		t.Fatalf("type=%q want %q", gjson.GetBytes(out, "type").String(), responseMetadataType)
++	}
++	if gjson.GetBytes(out, "headers.x-codex-turn-state").String() != "tok-abc" {
++		t.Fatalf("turn-state changed: %s", out)
++	}
++	unchanged := NormalizeCodexResponseMetadataDownstream([]byte(`{"type":"response.created"}`))
++	if string(unchanged) != `{"type":"response.created"}` {
++		t.Fatalf("unexpected rewrite: %s", unchanged)
++	}
++}
+diff --git a/internal/watcher/synthesizer/file.go b/internal/watcher/synthesizer/file.go
+index 36c50915..fb12588b 100644
+--- a/internal/watcher/synthesizer/file.go
++++ b/internal/watcher/synthesizer/file.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"runtime"
++	"strconv"
+ 	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+@@ -249,6 +250,18 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
+ 	}
+ 	// For codex auth files, extract plan_type from metadata or JWT id_token.
+ 	if provider == "codex" {
++		if ws, ok := metadata["websockets"]; ok {
++			switch v := ws.(type) {
++			case bool:
++				if v {
++					a.Attributes["websockets"] = "true"
++				}
++			case string:
++				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(v)); errParse == nil && parsed {
++					a.Attributes["websockets"] = "true"
++				}
++			}
++		}
+ 		if ptRaw, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(ptRaw) != "" {
+ 			a.Attributes["plan_type"] = strings.TrimSpace(ptRaw)
+ 		} else if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+diff --git a/sdk/api/handlers/handlers_context.go b/sdk/api/handlers/handlers_context.go
+index e95fca91..29bdf4c1 100644
+--- a/sdk/api/handlers/handlers_context.go
++++ b/sdk/api/handlers/handlers_context.go
+@@ -7,6 +7,7 @@ import (
+ 	"sync"
+ 
+ 	"github.com/gin-gonic/gin"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"golang.org/x/net/context"
+ )
+ 
+@@ -138,7 +139,13 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
+ 	if ctx == nil {
+ 		ctx = context.Background()
+ 	}
+-	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
++	ctx = context.WithValue(ctx, executionSessionContextKey{}, sessionID)
++	return cliproxyexecutor.WithExecutionSessionID(ctx, sessionID)
++}
++
++// ExecutionSessionID returns the execution session ID from ctx when present.
++func ExecutionSessionID(ctx context.Context) string {
++	return cliproxyexecutor.ExecutionSessionID(ctx)
+ }
+ 
+ // WithDisallowFreeAuth returns a child context that requests skipping known free-tier credentials.
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index 99902074..d0acfa98 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+ 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	"github.com/tidwall/gjson"
+@@ -135,11 +136,18 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+ 			return true
+ 		}
+ 
+-		// If official Codex client, preserve codex.response.metadata but filter rate limits.
++		// Official Codex client: codex.response.metadata is normalized to response.metadata
++		// in repairFrame; filter rate limits and other codex.* private events only.
+ 		if f != nil && f.isCodexClient {
+ 			if name == "codex.rate_limits" {
+ 				return true
+ 			}
++			if name == "codex.response.metadata" {
++				return false
++			}
++			if strings.HasPrefix(name, "codex.") {
++				return true
++			}
+ 			return false
+ 		}
+ 
+@@ -176,6 +184,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+ 		return nil
+ 	}
+ 
++	if f != nil && f.isCodexClient && payloadType == "codex.response.metadata" {
++		normalized := requestlogging.NormalizeCodexResponseMetadataDownstream(payload)
++		f.dataFrames++
++		return responsesSSEFrameWithEventAndData("response.metadata", normalized)
++	}
++
+ 	f.dataFrames++
+ 
+ 	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
+@@ -317,6 +331,22 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
+ 	return out.Bytes()
+ }
+ 
++func responsesSSEFrameWithEventAndData(eventName string, payload []byte) []byte {
++	var out bytes.Buffer
++	if trimmed := strings.TrimSpace(eventName); trimmed != "" {
++		out.WriteString("event: ")
++		out.WriteString(trimmed)
++		out.WriteByte('\n')
++	}
++	for _, line := range bytes.Split(payload, []byte("\n")) {
++		out.WriteString("data: ")
++		out.Write(line)
++		out.WriteByte('\n')
++	}
++	out.WriteByte('\n')
++	return out.Bytes()
++}
++
+ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
+ 	item := gjson.GetBytes(payload, "item")
+ 	if !item.Exists() || !item.IsObject() || item.Get("type").String() == "" {
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go b/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
+index 58d1349a..f63f17ee 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
+@@ -601,7 +601,7 @@ func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
+ 	var output bytes.Buffer
+ 	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+ 
+-	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
++	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-codex-turn-state\":\"turn-1\"}}\n\n")
+ 	framer.WriteChunk(&output, metadataFrame)
+ 
+ 	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+@@ -611,8 +611,14 @@ func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
+ 	framer.WriteChunk(&output, completedFrame)
+ 
+ 	got := output.String()
+-	if !strings.Contains(got, "codex.response.metadata") {
+-		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
++	if strings.Contains(got, "codex.response.metadata") {
++		t.Fatalf("expected codex.response.metadata normalized away, got: %q", got)
++	}
++	if !strings.Contains(got, "event: response.metadata") {
++		t.Fatalf("expected response.metadata for official Codex client, got: %q", got)
++	}
++	if !strings.Contains(got, "x-codex-turn-state") {
++		t.Fatalf("expected turn-state header preserved, got: %q", got)
+ 	}
+ 	if !strings.Contains(got, "event: response.created") {
+ 		t.Fatalf("expected response.created in output, got: %q", got)
+@@ -690,8 +696,11 @@ func TestResponsesSSEFramer_CodexClientFiltersRateLimitsAndTiming(t *testing.T)
+ 	if strings.Contains(got, "responsesapi.websocket_timing") {
+ 		t.Fatalf("expected responsesapi.websocket_timing to be stripped for Codex client, got: %q", got)
+ 	}
+-	if !strings.Contains(got, "codex.response.metadata") {
+-		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
++	if strings.Contains(got, "codex.response.metadata") {
++		t.Fatalf("expected codex.response.metadata normalized away for Codex client, got: %q", got)
++	}
++	if !strings.Contains(got, "event: response.metadata") {
++		t.Fatalf("expected response.metadata for official Codex client, got: %q", got)
+ 	}
+ 	if !strings.Contains(got, "event: response.created") {
+ 		t.Fatalf("expected response.created in output, got: %q", got)
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+index 77187a79..920f1f19 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+@@ -278,6 +278,7 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
+ }
+ 
+ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, payload []byte, timestamp time.Time) error {
++	payload = requestlogging.NormalizeCodexResponseMetadataDownstream(payload)
+ 	if wsTimelineLog != nil {
+ 		wsTimelineLog.Append("response", payload, timestamp)
+ 	}
+diff --git a/sdk/cliproxy/executor/context.go b/sdk/cliproxy/executor/context.go
+index 30cbebf5..7d05c91a 100644
+--- a/sdk/cliproxy/executor/context.go
++++ b/sdk/cliproxy/executor/context.go
+@@ -2,12 +2,14 @@ package executor
+ 
+ import (
+ 	"context"
++	"strings"
+ 	"sync/atomic"
+ )
+ 
+ type downstreamWebsocketContextKey struct{}
+ type requireUpstreamWebsocketContextKey struct{}
+ type upstreamAttemptTrackerContextKey struct{}
++type executionSessionContextKey struct{}
+ 
+ type upstreamAttemptTracker struct {
+ 	attempted atomic.Bool
+@@ -77,3 +79,31 @@ func UpstreamAttempted(ctx context.Context) bool {
+ 	tracker, ok := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker)
+ 	return ok && tracker != nil && tracker.attempted.Load()
+ }
++
++// WithExecutionSessionID tags a long-lived downstream websocket execution session.
++func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
++	sessionID = strings.TrimSpace(sessionID)
++	if sessionID == "" {
++		return ctx
++	}
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
++}
++
++// ExecutionSessionID returns the execution session ID when present.
++func ExecutionSessionID(ctx context.Context) string {
++	if ctx == nil {
++		return ""
++	}
++	raw := ctx.Value(executionSessionContextKey{})
++	switch v := raw.(type) {
++	case string:
++		return strings.TrimSpace(v)
++	case []byte:
++		return strings.TrimSpace(string(v))
++	default:
++		return ""
++	}
++}
+-- 
+2.55.0
+

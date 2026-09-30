@@ -1,26 +1,24 @@
-From c3f8f8e9da959f538dfeda1657d92d225bcb508a Mon Sep 17 00:00:00 2001
+From df0729fec03f1e3047af8069977445346580bcef Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
-Date: Wed, 16 Sep 2026 10:43:11 +0800
-Subject: [PATCH 3/3] feat(models): gate native key model listings by config
+Date: Wed, 30 Sep 2026 05:54:58 +0800
+Subject: [PATCH 3/8] feat(models): gate native key model listings by config
 
 
 diff --git a/config.example.yaml b/config.example.yaml
-index 492a7dfb..967add29 100644
+index 0b1d7f87..3b8170b1 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -41,6 +41,10 @@ api-keys:
-   - "your-api-key-2"
-   - "your-api-key-3"
+@@ -88,6 +88,8 @@ access:
+     - "your-api-key-1"
+     - "your-api-key-2"
+     - "your-api-key-3"
++  # Native API keys cannot access the global model list unless explicitly allowed.
++  allow-origin-models-endpoint: false
  
-+# Native CLIProxyAPI api-keys cannot access the global model list by default.
-+# Set this explicitly to true only when those origin keys should see it.
-+allow-origin-models-endpoint: false
-+
- # Enable debug logging
- debug: false
+ # Optional credential concurrency and observation contracts.
  
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
-index 447f280c..d01d4ab0 100644
+index 3e75beda..6cdb6b9c 100644
 --- a/internal/api/server_middleware.go
 +++ b/internal/api/server_middleware.go
 @@ -152,6 +152,29 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
@@ -55,7 +53,7 @@ index 447f280c..d01d4ab0 100644
  }
 diff --git a/internal/api/server_origin_models_test.go b/internal/api/server_origin_models_test.go
 new file mode 100644
-index 00000000..96a8f4a4
+index 00000000..b5960233
 --- /dev/null
 +++ b/internal/api/server_origin_models_test.go
 @@ -0,0 +1,49 @@
@@ -67,8 +65,8 @@ index 00000000..96a8f4a4
 +	"testing"
 +
 +	"github.com/gin-gonic/gin"
-+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 +)
 +
 +func TestOriginModelsEndpointMiddlewareDefaultsToDeny(t *testing.T) {
@@ -109,10 +107,10 @@ index 00000000..96a8f4a4
 +	}
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index 1827bd53..f68a9dfb 100644
+index 546ca731..cfa1d41c 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
-@@ -62,7 +62,7 @@ func (s *Server) setupRoutes() {
+@@ -63,7 +63,7 @@ func (s *Server) setupRoutes() {
  	v1 := s.engine.Group("/v1")
  	v1.Use(AuthMiddleware(s.accessManager))
  	{
@@ -121,7 +119,7 @@ index 1827bd53..f68a9dfb 100644
  		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
  		v1.POST("/completions", openaiHandlers.Completions)
  		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
-@@ -121,7 +121,7 @@ func (s *Server) setupRoutes() {
+@@ -122,7 +122,7 @@ func (s *Server) setupRoutes() {
  	v1beta := s.engine.Group("/v1beta")
  	v1beta.Use(AuthMiddleware(s.accessManager))
  	{
@@ -131,25 +129,37 @@ index 1827bd53..f68a9dfb 100644
  		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
  		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 diff --git a/internal/api/server_test.go b/internal/api/server_test.go
-index 21215e7c..007e26c2 100644
+index a089f283..45f4339b 100644
 --- a/internal/api/server_test.go
 +++ b/internal/api/server_test.go
-@@ -618,7 +618,8 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
- 
+@@ -610,7 +610,8 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
+ 	t.Helper()
  	cfg := &proxyconfig.Config{
  		SDKConfig: sdkconfig.SDKConfig{
 -			APIKeys: []string{"test-key"},
 +			APIKeys:                   []string{"test-key"},
 +			AllowOriginModelsEndpoint: true,
  		},
- 		Port:                   0,
- 		AuthDir:                authDir,
+ 	}
+ 	return newTestServerWithConfig(t, cfg, opts...)
+diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
+index 388ce34b..5ba3ea60 100644
+--- a/internal/config/config_v8.go
++++ b/internal/config/config_v8.go
+@@ -33,6 +33,7 @@ func buildV8Paths() []configPath {
+ 		{"host", "server.host"}, {"port", "server.port"}, {"trusted-proxies", "server.trusted-proxies"},
+ 		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
+ 		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
++		{"allow-origin-models-endpoint", "access.allow-origin-models-endpoint"},
+ 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
+ 		{"force-model-prefix", "routing.force-model-prefix"},
+ 		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
 diff --git a/internal/config/origin_models_test.go b/internal/config/origin_models_test.go
 new file mode 100644
-index 00000000..60400831
+index 00000000..892aeee7
 --- /dev/null
 +++ b/internal/config/origin_models_test.go
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,29 @@
 +package config
 +
 +import "testing"
@@ -170,12 +180,20 @@ index 00000000..60400831
 +	if !optInCfg.AllowOriginModelsEndpoint {
 +		t.Fatal("allow-origin-models-endpoint: true was not parsed")
 +	}
++
++	v8Cfg, err := ParseConfigBytes([]byte("config-version: 8\naccess:\n  allow-origin-models-endpoint: true\n"))
++	if err != nil {
++		t.Fatalf("ParseConfigBytes with v8 allow-origin-models-endpoint: %v", err)
++	}
++	if !v8Cfg.AllowOriginModelsEndpoint {
++		t.Fatal("v8 access.allow-origin-models-endpoint: true was not parsed")
++	}
 +}
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
-index 1c5a1bb6..9dfa544a 100644
+index b2f8db65..c7d3ceab 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
-@@ -54,6 +54,13 @@ type SDKConfig struct {
+@@ -62,6 +62,13 @@ type SDKConfig struct {
  	// APIKeys is a list of keys for authenticating clients to this proxy server.
  	APIKeys []string `yaml:"api-keys" json:"api-keys"`
  
@@ -189,3 +207,6 @@ index 1c5a1bb6..9dfa544a 100644
  	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
  	// Default is false (disabled).
  	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
+-- 
+2.55.0
+
