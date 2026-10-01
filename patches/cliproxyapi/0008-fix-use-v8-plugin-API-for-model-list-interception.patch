@@ -1,8 +1,14 @@
-From ba2a3f585463eb104728670fc791f9d8a75910cf Mon Sep 17 00:00:00 2001
+From 7bf71900a8cda6cd3eedcdd03393e0d20574ef43 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 11:57:49 +0800
-Subject: [PATCH 8/8] fix: use v8 plugin API for model-list interception
+Subject: [PATCH 08/10] fix: use v8 plugin API for model-list interception
 
+---
+ config.example.yaml                         | 2 +-
+ internal/config/sdk_config.go               | 2 +-
+ sdk/cliproxy/model_list_interceptor.go      | 2 +-
+ sdk/cliproxy/model_list_interceptor_test.go | 2 +-
+ 4 files changed, 4 insertions(+), 4 deletions(-)
 
 diff --git a/config.example.yaml b/config.example.yaml
 index 7a4d5efb..cb56fe83 100644
@@ -56,6 +62,3 @@ index c51057b5..7cc973fb 100644
  )
  
  type modelListInterceptorFunc func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
--- 
-2.55.0
-

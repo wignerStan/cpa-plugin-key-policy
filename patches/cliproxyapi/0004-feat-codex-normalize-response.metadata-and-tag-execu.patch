@@ -1,9 +1,21 @@
-From e3f5188df9b66173fed4ed30d565037782c4302c Mon Sep 17 00:00:00 2001
+From 707a6bca6c7108bce950e82105340e03b9903db8 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:33:18 -0700
-Subject: [PATCH 4/8] feat(codex): normalize response.metadata and tag
+Subject: [PATCH 04/10] feat(codex): normalize response.metadata and tag
  execution session context
 
+---
+ internal/logging/codex_response_metadata.go   | 25 +++++++++++++++
+ .../logging/codex_response_metadata_test.go   | 22 +++++++++++++
+ internal/watcher/synthesizer/file.go          | 13 ++++++++
+ sdk/api/handlers/handlers_context.go          |  9 +++++-
+ .../openai/openai_responses_handlers.go       | 32 ++++++++++++++++++-
+ .../openai_responses_handlers_stream_test.go  | 19 ++++++++---
+ .../openai_responses_websocket_timeline.go    |  1 +
+ sdk/cliproxy/executor/context.go              | 30 +++++++++++++++++
+ 8 files changed, 144 insertions(+), 7 deletions(-)
+ create mode 100644 internal/logging/codex_response_metadata.go
+ create mode 100644 internal/logging/codex_response_metadata_test.go
 
 diff --git a/internal/logging/codex_response_metadata.go b/internal/logging/codex_response_metadata.go
 new file mode 100644
@@ -297,6 +309,3 @@ index 30cbebf5..7d05c91a 100644
 +		return ""
 +	}
 +}
--- 
-2.55.0
-

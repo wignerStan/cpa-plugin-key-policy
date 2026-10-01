@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="${repo_root}/patches/cliproxyapi/manifest.json"
-output="${CLIPROXYAPI_VENDOR_DIR:-${repo_root}/vendor/cliproxyapi}"
+output="${CLIPROXYAPI_BUILD_DIR:-${repo_root}/build/cliproxyapi}"
 
 if [[ ! -f "${manifest}" ]]; then
   printf 'missing CLIProxyAPI manifest: %s\n' "${manifest}" >&2
@@ -11,9 +11,9 @@ if [[ ! -f "${manifest}" ]]; then
 fi
 
 case "${output}" in
-  "${repo_root}/vendor/cliproxyapi") ;;
+  "${repo_root}/build/cliproxyapi") ;;
   *)
-    printf 'refusing output outside vendor/cliproxyapi: %s\n' "${output}" >&2
+    printf 'refusing output outside build/cliproxyapi: %s\n' "${output}" >&2
     exit 1
     ;;
 esac
@@ -99,7 +99,7 @@ if [[ -e "${output}" && -L "${output}" ]]; then
   printf 'refusing to replace symlink: %s\n' "${output}" >&2
   exit 1
 fi
-mkdir -p "${repo_root}/vendor"
+mkdir -p "${repo_root}/build"
 rm -rf "${output}"
 mkdir -p "${output}"
 rsync -a --delete --exclude='.git' "${work_dir}/" "${output}/"

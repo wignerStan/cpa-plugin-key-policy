@@ -1,0 +1,151 @@
+From 181ef62ddbe772926e41bbaf15831cf11d0dea2e Mon Sep 17 00:00:00 2001
+From: Jacob <24017069+wignerStan@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 03:20:44 -0700
+Subject: [PATCH 09/10] feat(logging): dump full raw payload in trace log
+
+---
+ internal/logging/codex_dump.go                | 53 +++++++++++++------
+ .../openai/openai_responses_handlers.go       |  3 +-
+ 2 files changed, 39 insertions(+), 17 deletions(-)
+
+diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+index 35cbabad..b02b07f6 100644
+--- a/internal/logging/codex_dump.go
++++ b/internal/logging/codex_dump.go
+@@ -43,7 +43,7 @@ func CodexDumpEnabled() bool {
+ 	return codexDumpActive.Load()
+ }
+ 
+-// CodexDumpFrame logs one websocket text frame (any leg) to logrus at trace level.
++// CodexDumpFrame logs one websocket text frame (any leg) with raw payload to logrus at trace level.
+ // leg examples: client_in, client_out, upstream_out, upstream_in.
+ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+ 	if !CodexDumpEnabled() {
+@@ -56,76 +56,99 @@ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+ 		eventType = gjson.GetBytes(trimmed, "type").String()
+ 	}
+ 
++	raw := string(payload)
+ 	log.WithFields(log.Fields{
+ 		"protocol":   "ws",
+ 		"session_id": strings.TrimSpace(sessionID),
+ 		"leg":        strings.TrimSpace(leg),
+ 		"type":       eventType,
+ 		"size":       len(payload),
+-	}).Tracef("ws dump: %s", string(trimmed))
++		"raw":        raw,
++	}).Tracef("ws dump: %s", raw)
+ }
+ 
+-// CodexDumpBinaryFrame logs a non-text websocket frame to logrus at trace level.
++// CodexDumpBinaryFrame logs a non-text websocket frame with raw base64 to logrus at trace level.
+ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+ 	if !CodexDumpEnabled() || len(payload) == 0 {
+ 		return
+ 	}
+ 
++	b64 := base64.StdEncoding.EncodeToString(payload)
+ 	log.WithFields(log.Fields{
+ 		"protocol":   "ws",
+ 		"session_id": strings.TrimSpace(sessionID),
+ 		"leg":        strings.TrimSpace(leg),
+ 		"binary":     true,
+ 		"size":       len(payload),
+-	}).Tracef("ws binary dump: %s", base64.StdEncoding.EncodeToString(payload))
++		"raw":        b64,
++	}).Tracef("ws binary dump: %s", b64)
+ }
+ 
+-// CodexDumpHTTPRequest logs an HTTP request (upstream_out or client_in) to logrus at trace level.
++// CodexDumpHTTPRequest logs an HTTP request with raw body and headers to logrus at trace level.
+ func CodexDumpHTTPRequest(sessionID, leg, method, url string, headers http.Header, body []byte) {
+ 	if !CodexDumpEnabled() {
+ 		return
+ 	}
+ 
+-	trimmed := bytesTrimSpace(body)
+-	log.WithFields(log.Fields{
++	raw := string(body)
++	fields := log.Fields{
+ 		"protocol":   "https",
+ 		"session_id": strings.TrimSpace(sessionID),
+ 		"leg":        strings.TrimSpace(leg),
+ 		"method":     strings.TrimSpace(method),
+ 		"url":        strings.TrimSpace(url),
+ 		"size":       len(body),
+-	}).Tracef("https dump request: %s", string(trimmed))
++		"raw":        raw,
++	}
++	if len(headers) > 0 {
++		hdrMap := make(map[string]string, len(headers))
++		for k, v := range headers {
++			hdrMap[k] = strings.Join(v, ", ")
++		}
++		fields["headers"] = hdrMap
++	}
++	log.WithFields(fields).Tracef("https dump request: %s %s raw: %s", method, url, raw)
+ }
+ 
+-// CodexDumpHTTPResponse logs an HTTP response metadata/body to logrus at trace level.
++// CodexDumpHTTPResponse logs an HTTP response with raw body and headers to logrus at trace level.
+ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
+ 	if !CodexDumpEnabled() {
+ 		return
+ 	}
+ 
+-	trimmed := bytesTrimSpace(body)
+-	log.WithFields(log.Fields{
++	raw := string(body)
++	fields := log.Fields{
+ 		"protocol":   "https",
+ 		"session_id": strings.TrimSpace(sessionID),
+ 		"leg":        strings.TrimSpace(leg),
+ 		"status":     status,
+ 		"size":       len(body),
+-	}).Tracef("https dump response: %s", string(trimmed))
++		"raw":        raw,
++	}
++	if len(headers) > 0 {
++		hdrMap := make(map[string]string, len(headers))
++		for k, v := range headers {
++			hdrMap[k] = strings.Join(v, ", ")
++		}
++		fields["headers"] = hdrMap
++	}
++	log.WithFields(fields).Tracef("https dump response: status=%d raw: %s", status, raw)
+ }
+ 
+-// CodexDumpHTTPChunk logs an HTTP response chunk (upstream_in or client_out) to logrus at trace level.
++// CodexDumpHTTPChunk logs an HTTP response chunk with raw content to logrus at trace level.
+ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ 	if !CodexDumpEnabled() || len(chunk) == 0 {
+ 		return
+ 	}
+ 
+-	trimmed := bytesTrimSpace(chunk)
++	raw := string(chunk)
+ 	log.WithFields(log.Fields{
+ 		"protocol":   "https",
+ 		"session_id": strings.TrimSpace(sessionID),
+ 		"leg":        strings.TrimSpace(leg),
+ 		"size":       len(chunk),
+-	}).Tracef("https dump chunk: %s", string(trimmed))
++		"raw":        raw,
++	}).Tracef("https dump chunk: %s", raw)
+ }
+ 
+ func bytesTrimSpace(b []byte) []byte {
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index 8a11a7a4..c3bab254 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -137,8 +137,7 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+ 			return true
+ 		}
+ 
+-		// Official Codex client: codex.response.metadata is normalized to response.metadata
+-		// in repairFrame; filter rate limits and other codex.* private events only.
++		// If official Codex client, preserve codex.response.metadata (normalized in repairFrame) but filter rate limits.
+ 		if f != nil && f.isCodexClient {
+ 			if name == "codex.rate_limits" {
+ 				return true

@@ -1,8 +1,20 @@
-From df0729fec03f1e3047af8069977445346580bcef Mon Sep 17 00:00:00 2001
+From 8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 05:54:58 +0800
-Subject: [PATCH 3/8] feat(models): gate native key model listings by config
+Subject: [PATCH 03/10] feat(models): gate native key model listings by config
 
+---
+ config.example.yaml                       |  2 +
+ internal/api/server_middleware.go         | 23 +++++++++++
+ internal/api/server_origin_models_test.go | 49 +++++++++++++++++++++++
+ internal/api/server_routes.go             |  4 +-
+ internal/api/server_test.go               |  3 +-
+ internal/config/config_v8.go              |  1 +
+ internal/config/origin_models_test.go     | 29 ++++++++++++++
+ internal/config/sdk_config.go             |  7 ++++
+ 8 files changed, 115 insertions(+), 3 deletions(-)
+ create mode 100644 internal/api/server_origin_models_test.go
+ create mode 100644 internal/config/origin_models_test.go
 
 diff --git a/config.example.yaml b/config.example.yaml
 index 0b1d7f87..3b8170b1 100644
@@ -207,6 +219,3 @@ index b2f8db65..c7d3ceab 100644
  	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
  	// Default is false (disabled).
  	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
--- 
-2.55.0
-

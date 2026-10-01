@@ -1,8 +1,16 @@
-From 237da8c69ec5033e1c8bae9af8071822b50e4dce Mon Sep 17 00:00:00 2001
+From a54d035d6d79b6bdabd78beb7ca5df5a16d0ff35 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Sat, 5 Sep 2026 15:33:19 +0800
-Subject: [PATCH 1/8] feat(plugins): expose /v1/models to response interceptors
+Subject: [PATCH 01/10] feat(plugins): expose /v1/models to response
+ interceptors
 
+---
+ sdk/cliproxy/builder.go                     |   1 +
+ sdk/cliproxy/model_list_interceptor.go      | 163 ++++++++++++++++++++
+ sdk/cliproxy/model_list_interceptor_test.go | 113 ++++++++++++++
+ 3 files changed, 277 insertions(+)
+ create mode 100644 sdk/cliproxy/model_list_interceptor.go
+ create mode 100644 sdk/cliproxy/model_list_interceptor_test.go
 
 diff --git a/sdk/cliproxy/builder.go b/sdk/cliproxy/builder.go
 index 83004161..40404ff8 100644
@@ -304,6 +312,3 @@ index 00000000..c51057b5
 +		t.Fatalf("body = %s", recorder.Body.String())
 +	}
 +}
--- 
-2.55.0
-

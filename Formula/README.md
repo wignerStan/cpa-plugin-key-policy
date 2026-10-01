@@ -2,8 +2,8 @@
 
 The formulas live with the plugin source so the plugin, patched host, patch
 manifest, and release workflow have one maintenance owner. The patched host is
-generated from `vendor/` at build time; Homebrew never uses a nested fork
-checkout.
+materialized into the ignored `build/` directory at build time; Homebrew never
+uses a nested fork checkout or a checked-in `vendor/` copy.
 
 For a private or rolling install, tap this repository explicitly and use the
 HEAD formulas:

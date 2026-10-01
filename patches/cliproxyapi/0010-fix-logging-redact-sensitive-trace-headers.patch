@@ -1,0 +1,49 @@
+From 66b0530a77ffd7393bbabfb0f991ab6a119e4c3f Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Thu, 1 Oct 2026 14:28:14 +0800
+Subject: [PATCH 10/10] fix(logging): redact sensitive trace headers
+
+---
+ internal/logging/codex_dump.go | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+index b02b07f6..2a35cf1f 100644
+--- a/internal/logging/codex_dump.go
++++ b/internal/logging/codex_dump.go
+@@ -103,6 +103,10 @@ func CodexDumpHTTPRequest(sessionID, leg, method, url string, headers http.Heade
+ 	if len(headers) > 0 {
+ 		hdrMap := make(map[string]string, len(headers))
+ 		for k, v := range headers {
++			if sensitiveTraceHeader(k) {
++				hdrMap[k] = "[REDACTED]"
++				continue
++			}
+ 			hdrMap[k] = strings.Join(v, ", ")
+ 		}
+ 		fields["headers"] = hdrMap
+@@ -128,6 +132,10 @@ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Heade
+ 	if len(headers) > 0 {
+ 		hdrMap := make(map[string]string, len(headers))
+ 		for k, v := range headers {
++			if sensitiveTraceHeader(k) {
++				hdrMap[k] = "[REDACTED]"
++				continue
++			}
+ 			hdrMap[k] = strings.Join(v, ", ")
+ 		}
+ 		fields["headers"] = hdrMap
+@@ -154,3 +162,13 @@ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ func bytesTrimSpace(b []byte) []byte {
+ 	return []byte(strings.TrimSpace(string(b)))
+ }
++
++func sensitiveTraceHeader(name string) bool {
++	name = strings.ToLower(strings.TrimSpace(name))
++	for _, marker := range []string{"authorization", "cookie", "api-key", "api_key", "token", "secret", "credential"} {
++		if strings.Contains(name, marker) {
++			return true
++		}
++	}
++	return false
++}

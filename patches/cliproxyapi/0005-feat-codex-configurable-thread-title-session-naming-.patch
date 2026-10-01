@@ -1,9 +1,25 @@
-From c1958270552fcfd90daf10c2c18062d68e2568ce Mon Sep 17 00:00:00 2001
+From 3e6d3330c39541bf9663775b0e113a4f702abfb9 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:37:50 -0700
-Subject: [PATCH 5/8] feat(codex): configurable thread-title session naming
+Subject: [PATCH 05/10] feat(codex): configurable thread-title session naming
  across WS and HTTPS (default allow)
 
+---
+ config.example.yaml                           |   3 +
+ internal/api/server_options.go                |   1 +
+ internal/api/server_sdk_config_test.go        |  38 +++++
+ internal/config/config_types.go               |   3 +
+ internal/config/sdk_config.go                 |   3 +
+ internal/pluginhost/host.go                   |  22 +--
+ .../executor/claude_thinking_replay_test.go   |  22 +--
+ .../codex_stream_bootstrap_buffering_test.go  |  22 +--
+ .../codex_websockets_executor_test.go         |  77 +++++++++++
+ .../executor/codex_websockets_request.go      |  18 +++
+ .../executor/codex_websockets_stream.go       |   3 +
+ .../openai/openai_responses_handlers.go       |  12 ++
+ .../openai/openai_responses_websocket.go      |  50 +++++++
+ .../openai/openai_responses_websocket_test.go | 130 ++++++++++++++++++
+ 14 files changed, 371 insertions(+), 33 deletions(-)
 
 diff --git a/config.example.yaml b/config.example.yaml
 index 3b8170b1..fdfdb2dc 100644
@@ -329,7 +345,7 @@ index cd7bd5f3..abc4b711 100644
  	if target == nil {
  		return
 diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
-index f723fe68..4f1ee268 100644
+index b6bcb49e..b8dbf057 100644
 --- a/internal/runtime/executor/codex_websockets_stream.go
 +++ b/internal/runtime/executor/codex_websockets_stream.go
 @@ -805,6 +805,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
@@ -585,6 +601,3 @@ index adc84445..164a908b 100644
 +		t.Errorf("close websocket: %v", errClose)
 +	}
 +}
--- 
-2.55.0
-

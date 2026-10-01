@@ -13,6 +13,23 @@
 
 ---
 
+## CLIProxyAPI 集成
+
+本仓库统一维护插件和 CLIProxyAPI 集成补丁。固定的官方上游提交和按顺序排列的补丁
+校验值记录在 [`patches/cliproxyapi/manifest.json`](./patches/cliproxyapi/manifest.json)。
+补丁包含插件生命周期与模型目录接入、Codex 会话元数据，以及会隐藏敏感请求头的
+trace 原始载荷日志。
+
+构建时会下载固定版本的上游源码、应用仓库内补丁并构建，生成文件放在被忽略的
+`build/` 目录中；不会在 `vendor/` 中保留副本，也不会维护第二份可编辑源码。
+在仓库根目录运行以下命令检查主程序：
+
+```bash
+bash scripts/check-cliproxyapi.sh
+```
+
+---
+
 ## 它能干什么
 
 1. **发钥匙** — 批量创建下游 key，每把绑定可用模型 / 别名。  

@@ -1,15 +1,26 @@
 {
   "schema_version": "git-source-relationship/v1",
-  "kind": "vendored_import",
-  "path": "vendor/cliproxyapi",
+  "kind": "patched_upstream_build",
+  "path": "build/cliproxyapi",
   "owner": "cpa-plugin-key-policy",
-  "integration": "generated_checkout",
+  "integration": "build_materialization",
   "upstream": {
     "url": "https://github.com/router-for-me/CLIProxyAPI.git",
-    "commit": "8335eac731946bd4eff18f500653f93736df53d6"
+    "commit": "fd48ea6840f5572deb53aeb5657740937ac9daaa"
   },
-  "patches": [],
+  "patches": [
+    "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-intercepto.patch",
+    "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plug.patch",
+    "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
+    "patches/cliproxyapi/0004-feat-codex-normalize-response.metadata-and-tag-execu.patch",
+    "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-.patch",
+    "patches/cliproxyapi/0006-feat-codex-add-WS-and-HTTPS-dump-via-logrus-debug-li.patch",
+    "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-ws-h.patch",
+    "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
+    "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
+    "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch"
+  ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
-  "result_tree": "9c4da00af0f1c15621da27afd282ea992fa9365c",
-  "licenses": ["vendor/cliproxyapi/LICENSE"]
+  "result_tree": "7796027bd82a2816541cc645d058dfcc7d496bc7",
+  "licenses": ["build/cliproxyapi/LICENSE"]
 }

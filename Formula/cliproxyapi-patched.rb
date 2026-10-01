@@ -1,5 +1,5 @@
 class CliproxyapiPatched < Formula
-  desc "CLIProxyAPI built from the materialized key-policy patch set"
+  desc "CLIProxyAPI built with the key-policy integration patches"
   homepage "https://github.com/wignerStan/cpa-plugin-key-policy"
   license "MIT"
   head "https://github.com/wignerStan/cpa-plugin-key-policy.git", branch: "main"
@@ -14,7 +14,7 @@ class CliproxyapiPatched < Formula
     ENV["CC"] = "/usr/bin/cc"
     ENV["CXX"] = "/usr/bin/c++"
     system "bash", "scripts/materialize-cliproxyapi.sh"
-    build_root = buildpath / "vendor" / "cliproxyapi"
+    build_root = buildpath / "build" / "cliproxyapi"
     ldflags = %W[
       -X main.Version=#{version}
       -X main.Commit=wignerstan/cpa-plugin-key-policy

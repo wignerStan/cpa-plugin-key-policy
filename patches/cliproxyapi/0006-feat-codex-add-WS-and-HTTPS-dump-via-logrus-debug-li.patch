@@ -1,9 +1,26 @@
-From e69e13692d0cedc481e97251b6ac64a5339f439d Mon Sep 17 00:00:00 2001
+From 7a24ee3b701ba3a7f787957b00c0e615d2a549b3 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:42:19 -0700
-Subject: [PATCH 6/8] feat(codex): add WS and HTTPS dump via logrus debug
+Subject: [PATCH 06/10] feat(codex): add WS and HTTPS dump via logrus debug
  (linux only, default off)
 
+---
+ config.example.yaml                           |   4 +
+ internal/api/server.go                        |   1 +
+ internal/api/server_reload.go                 |   4 +
+ internal/config/config_v8.go                  |   1 +
+ internal/config/sdk_config.go                 |   3 +
+ internal/logging/codex_dump.go                | 130 ++++++++++++++++++
+ internal/logging/codex_dump_test.go           |  62 +++++++++
+ .../runtime/executor/helps/logging_helpers.go |   8 ++
+ .../openai/openai_responses_handlers.go       |   5 +
+ .../openai/openai_responses_websocket.go      |  17 ++-
+ .../openai_responses_websocket_forward.go     |   6 +-
+ .../openai_responses_websocket_prewarm.go     |   2 +-
+ .../openai_responses_websocket_timeline.go    |   3 +-
+ 13 files changed, 232 insertions(+), 14 deletions(-)
+ create mode 100644 internal/logging/codex_dump.go
+ create mode 100644 internal/logging/codex_dump_test.go
 
 diff --git a/config.example.yaml b/config.example.yaml
 index fdfdb2dc..9ee203cb 100644
@@ -467,6 +484,3 @@ index 920f1f19..aa5e8b12 100644
  	if writer == nil || writer.conn == nil {
  		return fmt.Errorf("responses websocket: writer is nil")
  	}
--- 
-2.55.0
-

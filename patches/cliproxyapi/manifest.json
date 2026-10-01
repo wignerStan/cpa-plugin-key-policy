@@ -1,60 +1,72 @@
 {
   "schema_version": "cliproxyapi-materialization/v1",
-  "output": "vendor/cliproxyapi",
+  "output": "build/cliproxyapi",
   "upstream": {
     "url": "https://github.com/router-for-me/CLIProxyAPI.git",
-    "commit": "a270e7b9e57aaecd8f82555f44c2108518ad2330"
+    "commit": "fd48ea6840f5572deb53aeb5657740937ac9daaa"
   },
   "patches": [
     {
       "order": 1,
       "path": "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-intercepto.patch",
-      "commit": "237da8c69ec5033e1c8bae9af8071822b50e4dce",
-      "sha256": "8ffdea9ccd487f342956af73079e58eae1592b7fa58b0eb210d9fbbb6770f164"
+      "commit": "a54d035d6d79b6bdabd78beb7ca5df5a16d0ff35",
+      "sha256": "9708cb0d59d9bdaec521d91e86b7804ffbd40086f91d1c09687246a2e1fdcd3b"
     },
     {
       "order": 2,
       "path": "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plug.patch",
-      "commit": "d3b6af809a506b6958f9f781442c9e0d462bee8b",
-      "sha256": "40db03ed81894c68f0df5a59f0588044afa6b9eb7c1de181d479bbb7a0fa96a0"
+      "commit": "62dcea63475ce02ae16a2aac51d42712027ec4bb",
+      "sha256": "3fe4d13aa2c0e7d40e0410c13f1b85c7e492f53f5ea22cfe0df7b3b4345cfe44"
     },
     {
       "order": 3,
       "path": "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
-      "commit": "df0729fec03f1e3047af8069977445346580bcef",
-      "sha256": "de6b2d1e642b65ddc5ce0d3c7cb130040dc660f4658855e3620d3dbe46a4ae0d"
+      "commit": "8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89",
+      "sha256": "89ab742377e41fe52dcd0b06114e80e7c3116958b95bbab4ec05fb1f369f69ca"
     },
     {
       "order": 4,
       "path": "patches/cliproxyapi/0004-feat-codex-normalize-response.metadata-and-tag-execu.patch",
-      "commit": "e3f5188df9b66173fed4ed30d565037782c4302c",
-      "sha256": "979ef058c030f663689e9c81d01b7cd5f653f325ccee4e26cb9967d0b6397273"
+      "commit": "707a6bca6c7108bce950e82105340e03b9903db8",
+      "sha256": "30555efd8b7011102f6b97f623133339e5e478e4afbe509e3794db3ac980dda9"
     },
     {
       "order": 5,
       "path": "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-.patch",
-      "commit": "c1958270552fcfd90daf10c2c18062d68e2568ce",
-      "sha256": "5de278e09509897b5ae10540d9048aacf46763c3f99f236a212f325513cea1b9"
+      "commit": "3e6d3330c39541bf9663775b0e113a4f702abfb9",
+      "sha256": "19cfa789e170d5fa043970464d007f290dfb41f3dc6086463ab30a59160fd05b"
     },
     {
       "order": 6,
       "path": "patches/cliproxyapi/0006-feat-codex-add-WS-and-HTTPS-dump-via-logrus-debug-li.patch",
-      "commit": "e69e13692d0cedc481e97251b6ac64a5339f439d",
-      "sha256": "daf2e7acde1d05fa069052818a355270d1b75ff4d95113169024e972272a4b1a"
+      "commit": "7a24ee3b701ba3a7f787957b00c0e615d2a549b3",
+      "sha256": "e91f45a81f2244012ffdb88e7829030f30744c4512226f4901fba61c4ccc50e7"
     },
     {
       "order": 7,
       "path": "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-ws-h.patch",
-      "commit": "e64411858cad0876901a42604fc0d0ae7a8220ef",
-      "sha256": "584c72b6e1615cbe777fdc21833a08b1abc2176e9e77e0d819b6327f34a307e7"
+      "commit": "5dd1fc352c1e34c72ad8af5ad9bc1fc9bb3f5f8b",
+      "sha256": "d33cdfeaab86b1944c06381624b81800cb5f6f2e873398c5a20287047ac5346d"
     },
     {
       "order": 8,
       "path": "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
-      "commit": "ba2a3f585463eb104728670fc791f9d8a75910cf",
-      "sha256": "01ed0bfb66525e0603de343f05d60e31c299f08ed03de204025fc693d7c074f1"
+      "commit": "7bf71900a8cda6cd3eedcdd03393e0d20574ef43",
+      "sha256": "1e92d3d531b9a5ebd2c2d5a2900db9478d64545cf0056ebade270f6f3e1fc3cc"
+    },
+    {
+      "order": 9,
+      "path": "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
+      "commit": "181ef62ddbe772926e41bbaf15831cf11d0dea2e",
+      "sha256": "5c56b8b0010b786aa987adf5d59be6c1838efe0646ae89c64f233c8095c3d159"
+    },
+    {
+      "order": 10,
+      "path": "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch",
+      "commit": "66b0530a77ffd7393bbabfb0f991ab6a119e4c3f",
+      "sha256": "888307fc28c861121108db7038b5ee0096bf28c506dc61c43b2a0a51688ed5b2"
     }
   ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",
-  "update_policy": "Advance the official upstream commit and rebase this repository's ordered patches. Do not maintain a parallel CLIProxyAPI fork. Regenerate checksums and run scripts/check-cliproxyapi.sh before review."
+  "update_policy": "Advance the official upstream commit and rebase this repository's ordered patches. Do not maintain a parallel CLIProxyAPI fork. Refresh checksums and run scripts/check-cliproxyapi.sh before merging."
 }

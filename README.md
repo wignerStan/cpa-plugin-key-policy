@@ -152,20 +152,26 @@ Copy the `.so` into CPA `plugins.dir` and enable the plugin in config.
 ## Patched CLIProxyAPI and Homebrew
 
 This repository is the single maintenance owner for the plugin and the
-CLIProxyAPI integration patch set. The upstream CLIProxyAPI commit and ordered
-patch checksums are recorded in
+CLIProxyAPI integration patch set. The rebased patches and pinned official
+upstream commit are recorded in
 [`patches/cliproxyapi/manifest.json`](./patches/cliproxyapi/manifest.json).
+The patch series includes plugin lifecycle and model-catalog integration,
+Codex session metadata, and trace-level raw payload logging with sensitive
+headers redacted.
 
-The host is materialized, never maintained as a second editable checkout:
+Builds materialize the pinned upstream source, apply the checked-in patches,
+and build the result under the ignored `build/` directory. No generated source
+is stored in `vendor/`, and the host is not maintained as a second editable
+checkout:
 
 ```bash
 bash scripts/materialize-cliproxyapi.sh
 bash scripts/check-cliproxyapi.sh
 ```
 
-The generated files live under `vendor/cliproxyapi/` and are excluded by
-[`vendor/.gitignore`](./vendor/.gitignore). The materializer removes nested Git
-metadata and applies the patch stack from a clean upstream checkout.
+To update the host, review a newer official CLIProxyAPI commit, rebase the
+ordered patches, refresh their checksums in the manifest, then run the focused
+check script on a dedicated branch.
 
 The same repository contains rolling Homebrew formulas for both components:
 
