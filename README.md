@@ -6,7 +6,7 @@ In plain words: you issue your own `cpa_…` keys to clients. Each key only sees
 
 | | |
 |---|---|
-| **Repo** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
+| **Repo** | [wignerStan/cpa-plugin-key-policy](https://github.com/wignerStan/cpa-plugin-key-policy) |
 | **License** | MIT |
 | **Install** | [CLIProxyAPI Plugins Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) or build from source |
 | **中文说明** | [README.zh-CN.md](./README.zh-CN.md) |
@@ -149,7 +149,7 @@ On Windows, build the `.so` via WSL/Linux. `go test ./...` uses a non-cgo stub s
 
 Copy the `.so` into CPA `plugins.dir` and enable the plugin in config.
 
-## Patched CLIProxyAPI and Homebrew
+## Patched CLIProxyAPI integration
 
 This repository is the single maintenance owner for the plugin and the
 CLIProxyAPI integration patch set. The rebased patches and pinned official
@@ -175,14 +175,9 @@ To update the host, review a newer official CLIProxyAPI commit, rebase the
 ordered patches, refresh their checksums in the manifest, then run the focused
 check script on a dedicated branch.
 
-The same repository contains rolling Homebrew formulas for both components:
-
-```bash
-brew tap wignerStan/cpa-plugin-key-policy \
-  https://github.com/wignerStan/cpa-plugin-key-policy.git
-brew install --HEAD wignerStan/cpa-plugin-key-policy/cpa-key-policy
-brew install --HEAD wignerStan/cpa-plugin-key-policy/cliproxyapi-patched
-```
+Homebrew formulas are maintained in the separate
+[wignerStan/homebrew-tap](https://github.com/wignerStan/homebrew-tap) repository.
+Its `cliproxyapi` formula builds this repository's `main` branch.
 
 Version tags publish plugin packages, patched CLIProxyAPI packages, and a
 combined checksum file through the release workflow.

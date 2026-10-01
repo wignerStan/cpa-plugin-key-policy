@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| **仓库** | [origin652/cpa-plugin-key-policy](https://github.com/origin652/cpa-plugin-key-policy) |
+| **仓库** | [wignerStan/cpa-plugin-key-policy](https://github.com/wignerStan/cpa-plugin-key-policy) |
 | **协议** | MIT |
 | **安装** | [CLIProxyAPI 插件商店](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) 或自行编译 |
 | **English** | [README.md](./README.md) |
