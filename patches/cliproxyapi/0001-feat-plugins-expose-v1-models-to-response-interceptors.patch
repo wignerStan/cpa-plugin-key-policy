@@ -1,7 +1,7 @@
 From a54d035d6d79b6bdabd78beb7ca5df5a16d0ff35 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Sat, 5 Sep 2026 15:33:19 +0800
-Subject: [PATCH 01/10] feat(plugins): expose /v1/models to response
+Subject: [PATCH 01/11] feat(plugins): expose /v1/models to response
  interceptors
 
 ---

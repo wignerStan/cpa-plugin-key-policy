@@ -1,7 +1,7 @@
 From 7bf71900a8cda6cd3eedcdd03393e0d20574ef43 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 11:57:49 +0800
-Subject: [PATCH 08/10] fix: use v8 plugin API for model-list interception
+Subject: [PATCH 08/11] fix: use v8 plugin API for model-list interception
 
 ---
  config.example.yaml                         | 2 +-

@@ -1,7 +1,7 @@
 From 707a6bca6c7108bce950e82105340e03b9903db8 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:33:18 -0700
-Subject: [PATCH 04/10] feat(codex): normalize response.metadata and tag
+Subject: [PATCH 04/11] feat(codex): normalize response.metadata and tag
  execution session context
 
 ---

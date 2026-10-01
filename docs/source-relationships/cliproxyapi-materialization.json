@@ -9,18 +9,65 @@
     "commit": "fd48ea6840f5572deb53aeb5657740937ac9daaa"
   },
   "patches": [
-    "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-intercepto.patch",
-    "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plug.patch",
-    "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
-    "patches/cliproxyapi/0004-feat-codex-normalize-response.metadata-and-tag-execu.patch",
-    "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-.patch",
-    "patches/cliproxyapi/0006-feat-codex-add-WS-and-HTTPS-dump-via-logrus-debug-li.patch",
-    "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-ws-h.patch",
-    "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
-    "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
-    "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch"
+    {
+      "order": 1,
+      "path": "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-interceptors.patch",
+      "sha256": "40cfd00338544f057a20ae1fe2b7ac0676a8724d3419966f209d15655196594e"
+    },
+    {
+      "order": 2,
+      "path": "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plugins.patch",
+      "sha256": "48c91686cd33817241f5272d73ac65ccb8240b9d365fbce6e932187f65aba3e3"
+    },
+    {
+      "order": 3,
+      "path": "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
+      "sha256": "b28e2a4a1603415f477dd6f7f7ce3b6f32f86192e641d630db018ef7613b111b"
+    },
+    {
+      "order": 4,
+      "path": "patches/cliproxyapi/0004-feat-codex-normalize-response-metadata-and-tag-execution-session-context.patch",
+      "sha256": "a82a433eb0a6eea700162678b39c3d92bc3d445aaef49723ae679f893b1d20d2"
+    },
+    {
+      "order": 5,
+      "path": "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-across-websocket-and-https-default-allow.patch",
+      "sha256": "1bd0b7587b55befdba584cf00ed1d70e079c1dcd5bed6733b9fe3d2bffe2ce13"
+    },
+    {
+      "order": 6,
+      "path": "patches/cliproxyapi/0006-feat-codex-add-websocket-and-https-dump-via-logrus-debug-linux-only-default-off.patch",
+      "sha256": "cf03e5c46730add9f264c298ed96893d7312afa04b7ee6c4a018a0db70e4117b"
+    },
+    {
+      "order": 7,
+      "path": "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-websocket-and-https-dump-to-trace.patch",
+      "sha256": "df0a79765feddaccdfc03dbad208e7c1d091b88bdbd3f2594821bac21c741e05"
+    },
+    {
+      "order": 8,
+      "path": "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
+      "sha256": "1bbb6ef3202b13a2f9bcdd698d95c2f97617e589ece401141371704748ed6b36"
+    },
+    {
+      "order": 9,
+      "path": "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
+      "sha256": "55bcee3cc7b215bd63ef10d3d1c506714dd33025464668f9b0140a7ee307c16d"
+    },
+    {
+      "order": 10,
+      "path": "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch",
+      "sha256": "6da2ffcd2e07c6fa3dbcf7f0acfc469ef0da48ca957981f1c18e81dc24506748"
+    },
+    {
+      "order": 11,
+      "path": "patches/cliproxyapi/0011-fix-logging-honor-diagnostic-capture-contract.patch",
+      "sha256": "4d314fa968a3334ba30b784e18d2c590d59c5248120558f7745eef81459d68b9"
+    }
   ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
-  "result_tree": "7796027bd82a2816541cc645d058dfcc7d496bc7",
-  "licenses": ["build/cliproxyapi/LICENSE"]
+  "result_tree": "d3a3c3c28e4c5ab71289664792ca84d65dec1f6f",
+  "licenses": [
+    "build/cliproxyapi/LICENSE"
+  ]
 }

@@ -8,63 +8,63 @@
   "patches": [
     {
       "order": 1,
-      "path": "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-intercepto.patch",
+      "path": "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-interceptors.patch",
       "commit": "a54d035d6d79b6bdabd78beb7ca5df5a16d0ff35",
-      "sha256": "9708cb0d59d9bdaec521d91e86b7804ffbd40086f91d1c09687246a2e1fdcd3b"
+      "sha256": "40cfd00338544f057a20ae1fe2b7ac0676a8724d3419966f209d15655196594e"
     },
     {
       "order": 2,
-      "path": "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plug.patch",
+      "path": "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plugins.patch",
       "commit": "62dcea63475ce02ae16a2aac51d42712027ec4bb",
-      "sha256": "3fe4d13aa2c0e7d40e0410c13f1b85c7e492f53f5ea22cfe0df7b3b4345cfe44"
+      "sha256": "48c91686cd33817241f5272d73ac65ccb8240b9d365fbce6e932187f65aba3e3"
     },
     {
       "order": 3,
       "path": "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
       "commit": "8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89",
-      "sha256": "89ab742377e41fe52dcd0b06114e80e7c3116958b95bbab4ec05fb1f369f69ca"
+      "sha256": "b28e2a4a1603415f477dd6f7f7ce3b6f32f86192e641d630db018ef7613b111b"
     },
     {
       "order": 4,
-      "path": "patches/cliproxyapi/0004-feat-codex-normalize-response.metadata-and-tag-execu.patch",
+      "path": "patches/cliproxyapi/0004-feat-codex-normalize-response-metadata-and-tag-execution-session-context.patch",
       "commit": "707a6bca6c7108bce950e82105340e03b9903db8",
-      "sha256": "30555efd8b7011102f6b97f623133339e5e478e4afbe509e3794db3ac980dda9"
+      "sha256": "a82a433eb0a6eea700162678b39c3d92bc3d445aaef49723ae679f893b1d20d2"
     },
     {
       "order": 5,
-      "path": "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-.patch",
+      "path": "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-across-websocket-and-https-default-allow.patch",
       "commit": "3e6d3330c39541bf9663775b0e113a4f702abfb9",
-      "sha256": "19cfa789e170d5fa043970464d007f290dfb41f3dc6086463ab30a59160fd05b"
+      "sha256": "1bd0b7587b55befdba584cf00ed1d70e079c1dcd5bed6733b9fe3d2bffe2ce13"
     },
     {
       "order": 6,
-      "path": "patches/cliproxyapi/0006-feat-codex-add-WS-and-HTTPS-dump-via-logrus-debug-li.patch",
+      "path": "patches/cliproxyapi/0006-feat-codex-add-websocket-and-https-dump-via-logrus-debug-linux-only-default-off.patch",
       "commit": "7a24ee3b701ba3a7f787957b00c0e615d2a549b3",
-      "sha256": "e91f45a81f2244012ffdb88e7829030f30744c4512226f4901fba61c4ccc50e7"
+      "sha256": "cf03e5c46730add9f264c298ed96893d7312afa04b7ee6c4a018a0db70e4117b"
     },
     {
       "order": 7,
-      "path": "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-ws-h.patch",
+      "path": "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-websocket-and-https-dump-to-trace.patch",
       "commit": "5dd1fc352c1e34c72ad8af5ad9bc1fc9bb3f5f8b",
-      "sha256": "d33cdfeaab86b1944c06381624b81800cb5f6f2e873398c5a20287047ac5346d"
+      "sha256": "df0a79765feddaccdfc03dbad208e7c1d091b88bdbd3f2594821bac21c741e05"
     },
     {
       "order": 8,
       "path": "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
       "commit": "7bf71900a8cda6cd3eedcdd03393e0d20574ef43",
-      "sha256": "1e92d3d531b9a5ebd2c2d5a2900db9478d64545cf0056ebade270f6f3e1fc3cc"
+      "sha256": "1bbb6ef3202b13a2f9bcdd698d95c2f97617e589ece401141371704748ed6b36"
     },
     {
       "order": 9,
       "path": "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
       "commit": "181ef62ddbe772926e41bbaf15831cf11d0dea2e",
-      "sha256": "5c56b8b0010b786aa987adf5d59be6c1838efe0646ae89c64f233c8095c3d159"
+      "sha256": "55bcee3cc7b215bd63ef10d3d1c506714dd33025464668f9b0140a7ee307c16d"
     },
     {
       "order": 10,
       "path": "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch",
       "commit": "66b0530a77ffd7393bbabfb0f991ab6a119e4c3f",
-      "sha256": "888307fc28c861121108db7038b5ee0096bf28c506dc61c43b2a0a51688ed5b2"
+      "sha256": "6da2ffcd2e07c6fa3dbcf7f0acfc469ef0da48ca957981f1c18e81dc24506748"
     },
     {
       "order": 11,
