@@ -1,7 +1,7 @@
 From 8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 05:54:58 +0800
-Subject: [PATCH 03/10] feat(models): gate native key model listings by config
+Subject: [PATCH 03/11] feat(models): gate native key model listings by config
 
 ---
  config.example.yaml                       |  2 +

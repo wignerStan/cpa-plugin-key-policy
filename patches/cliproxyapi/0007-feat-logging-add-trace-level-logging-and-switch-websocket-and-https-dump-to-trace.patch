@@ -1,7 +1,7 @@
 From 5dd1fc352c1e34c72ad8af5ad9bc1fc9bb3f5f8b Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Tue, 29 Sep 2026 09:07:15 -0700
-Subject: [PATCH 07/10] feat(logging): add trace level logging and switch
+Subject: [PATCH 07/11] feat(logging): add trace level logging and switch
  ws/https dump to trace
 
 ---

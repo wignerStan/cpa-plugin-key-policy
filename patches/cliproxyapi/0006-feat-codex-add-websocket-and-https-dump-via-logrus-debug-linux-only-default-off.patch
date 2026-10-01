@@ -1,7 +1,7 @@
 From 7a24ee3b701ba3a7f787957b00c0e615d2a549b3 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:42:19 -0700
-Subject: [PATCH 06/10] feat(codex): add WS and HTTPS dump via logrus debug
+Subject: [PATCH 06/11] feat(codex): add WS and HTTPS dump via logrus debug
  (linux only, default off)
 
 ---

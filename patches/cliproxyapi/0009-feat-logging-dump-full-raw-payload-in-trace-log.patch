@@ -1,7 +1,7 @@
 From 181ef62ddbe772926e41bbaf15831cf11d0dea2e Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 03:20:44 -0700
-Subject: [PATCH 09/10] feat(logging): dump full raw payload in trace log
+Subject: [PATCH 09/11] feat(logging): dump full raw payload in trace log
 
 ---
  internal/logging/codex_dump.go                | 53 +++++++++++++------
