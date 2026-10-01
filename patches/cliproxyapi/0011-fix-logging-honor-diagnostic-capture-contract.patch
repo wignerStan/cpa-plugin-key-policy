@@ -1,0 +1,972 @@
+From 9f52fc90d1aef9992890b246500b5a0c1ce1c499 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Thu, 1 Oct 2026 15:27:51 +0800
+Subject: [PATCH 11/11] fix(logging): honor diagnostic capture contract
+
+---
+ config.example.yaml                 |   5 +-
+ internal/api/server.go              |   2 +-
+ internal/api/server_reload.go       |   6 +-
+ internal/config/sdk_config.go       |   4 +-
+ internal/logging/codex_dump.go      | 468 +++++++++++++++++++++-------
+ internal/logging/codex_dump_test.go | 180 ++++++++---
+ internal/logging/global_logger.go   |  35 ++-
+ internal/util/log_level_test.go     |  44 +++
+ internal/util/util.go               |   8 +-
+ 9 files changed, 587 insertions(+), 165 deletions(-)
+ create mode 100644 internal/util/log_level_test.go
+
+diff --git a/config.example.yaml b/config.example.yaml
+index cb56fe8..60b2861 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -1086,8 +1086,9 @@ observability:
+     # Record proxy request/response logs. Management requests are excluded.
+     request-log: false
+ 
+-    # When true, dump Codex WS/HTTPS requests, responses, and frames to logrus trace log (linux only).
+-    # Default is false (disabled).
++    # Explicitly capture exact Codex WS/HTTPS bytes into separate private files (Linux only).
++    # Requires trace: true; payload bytes are never written to application logs. Individual
++    # artifacts are limited to 8 MiB and retained artifacts to 64 MiB total. Default is false.
+     codex-dump: false
+ 
+   usage:
+diff --git a/internal/api/server.go b/internal/api/server.go
+index 6a7b2c0..b9d2d4f 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -217,7 +217,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 	}
+ 	logDir := logging.ResolveLogDirectory(cfg)
+ 	s.mgmt.SetLogDirectory(logDir)
+-	logging.ConfigureCodexDump(cfg.CodexDump)
++	logging.ConfigureCodexDump(cfg.CodexDump, logDir)
+ 	if optionState.postAuthHook != nil {
+ 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
+ 	}
+diff --git a/internal/api/server_reload.go b/internal/api/server_reload.go
+index 951d737..cea7292 100644
+--- a/internal/api/server_reload.go
++++ b/internal/api/server_reload.go
+@@ -86,9 +86,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+ 		}
+ 	}
+ 
+-	if oldCfg == nil || oldCfg.CodexDump != cfg.CodexDump {
+-		logging.ConfigureCodexDump(cfg.CodexDump)
+-	}
++	logging.ConfigureCodexDump(cfg.CodexDump, logging.ResolveLogDirectory(cfg))
+ 
+ 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
+ 		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+@@ -126,7 +124,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+ 	}
+ 
+ 	// Update log level dynamically when debug flag changes
+-	if oldCfg == nil || oldCfg.Debug != cfg.Debug {
++	if oldCfg == nil || oldCfg.Debug != cfg.Debug || oldCfg.Trace != cfg.Trace {
+ 		util.SetLogLevel(cfg)
+ 	}
+ 
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index 6ab1738..4787100 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -50,7 +50,9 @@ type SDKConfig struct {
+ 	// RequestLog enables or disables detailed request logging functionality.
+ 	RequestLog bool `yaml:"request-log" json:"request-log"`
+ 
+-	// CodexDump enables Codex WS/HTTPS frame and message dump to logrus trace (linux only, default off).
++	// CodexDump explicitly authorizes private raw Codex WS/HTTPS capture (Linux only, default off).
++	// Capture also requires trace logging and is written separately from application logs.
++	// Individual artifacts are limited to 8 MiB and retained artifacts to 64 MiB total.
+ 	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
+ 
+ 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
+diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+index 2a35cf1..e7b9eca 100644
+--- a/internal/logging/codex_dump.go
++++ b/internal/logging/codex_dump.go
+@@ -1,19 +1,39 @@
+ package logging
+ 
+ import (
+-	"encoding/base64"
++	"bytes"
++	"crypto/sha256"
+ 	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
+ 	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
+ 	"runtime"
++	"sort"
+ 	"strings"
++	"sync"
+ 	"sync/atomic"
++	"time"
+ 
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ )
+ 
++const (
++	maxCodexDumpArtifactBytes = 8 << 20
++	maxCodexDumpTotalBytes    = 64 << 20
++	maxCodexDumpViewBytes     = 8 << 10
++)
++
+ var (
+-	codexDumpActive atomic.Bool
++	codexDumpConfigMu sync.RWMutex
++	codexDumpEnabled  bool
++	codexDumpLogDir   string
++	codexDumpWriteMu  sync.Mutex
++	codexDumpSequence atomic.Uint64
+ )
+ 
+ // IsLinuxOS reports whether the runtime operating system is Linux.
+@@ -21,154 +41,388 @@ func IsLinuxOS() bool {
+ 	return runtime.GOOS == "linux"
+ }
+ 
+-// ConfigureCodexDump sets whether Codex WS/HTTPS dump is enabled via config.
+-// Dump is linux-only and default off. When enabled on Linux, it sets logrus to TraceLevel.
+-func ConfigureCodexDump(enabled bool) {
+-	if !IsLinuxOS() {
+-		codexDumpActive.Store(false)
+-		return
+-	}
+-	codexDumpActive.Store(enabled)
+-	if enabled {
+-		log.SetLevel(log.TraceLevel)
+-	}
++// ConfigureCodexDump controls explicit raw capture. Capture is available only
++// on Linux and only while TRACE logging is selected. It never changes the
++// process-wide logging level.
++func ConfigureCodexDump(enabled bool, logDir string) {
++	codexDumpConfigMu.Lock()
++	codexDumpEnabled = enabled && IsLinuxOS()
++	codexDumpLogDir = strings.TrimSpace(logDir)
++	codexDumpConfigMu.Unlock()
+ }
+ 
+-// CodexDumpEnabled reports whether dump capture is active.
+-// Returns false on non-Linux OS or when disabled (default off).
++// CodexDumpEnabled reports whether explicit raw capture has been authorized.
++// TRACE logging is an independent requirement and does not authorize capture.
+ func CodexDumpEnabled() bool {
+-	if !IsLinuxOS() {
+-		return false
+-	}
+-	return codexDumpActive.Load()
++	enabled, _ := codexDumpConfiguration()
++	return enabled && IsLinuxOS()
+ }
+ 
+-// CodexDumpFrame logs one websocket text frame (any leg) with raw payload to logrus at trace level.
+-// leg examples: client_in, client_out, upstream_out, upstream_in.
++func codexDumpConfiguration() (bool, string) {
++	codexDumpConfigMu.RLock()
++	enabled := codexDumpEnabled
++	logDir := codexDumpLogDir
++	codexDumpConfigMu.RUnlock()
++	return enabled, logDir
++}
++
++// CodexDumpFrame records safe WebSocket boundary metadata and, when explicitly
++// enabled, stores the exact frame bytes in a separate private artifact.
+ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+-	if !CodexDumpEnabled() {
++	if !log.IsLevelEnabled(log.TraceLevel) {
+ 		return
+ 	}
+ 
+ 	eventType := ""
+-	trimmed := bytesTrimSpace(payload)
+-	if len(trimmed) > 0 && json.Valid(trimmed) {
+-		eventType = gjson.GetBytes(trimmed, "type").String()
++	if json.Valid(payload) {
++		eventType = gjson.GetBytes(payload, "type").String()
+ 	}
+-
+-	raw := string(payload)
+-	log.WithFields(log.Fields{
+-		"protocol":   "ws",
+-		"session_id": strings.TrimSpace(sessionID),
+-		"leg":        strings.TrimSpace(leg),
+-		"type":       eventType,
+-		"size":       len(payload),
+-		"raw":        raw,
+-	}).Tracef("ws dump: %s", raw)
++	fields := log.Fields{
++		"codex_event": "codex.ws.frame",
++		"protocol":    "websocket",
++		"session_id":  strings.TrimSpace(sessionID),
++		"leg":         strings.TrimSpace(leg),
++		"event_type":  eventType,
++		"size":        len(payload),
++	}
++	emitCodexDump(fields, sessionID, leg, payload, true)
+ }
+ 
+-// CodexDumpBinaryFrame logs a non-text websocket frame with raw base64 to logrus at trace level.
++// CodexDumpBinaryFrame records binary frame metadata. Raw bytes are never
++// base64-encoded into the application log.
+ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+-	if !CodexDumpEnabled() || len(payload) == 0 {
++	if !log.IsLevelEnabled(log.TraceLevel) || len(payload) == 0 {
+ 		return
+ 	}
+-
+-	b64 := base64.StdEncoding.EncodeToString(payload)
+-	log.WithFields(log.Fields{
+-		"protocol":   "ws",
+-		"session_id": strings.TrimSpace(sessionID),
+-		"leg":        strings.TrimSpace(leg),
+-		"binary":     true,
+-		"size":       len(payload),
+-		"raw":        b64,
+-	}).Tracef("ws binary dump: %s", b64)
++	fields := log.Fields{
++		"codex_event": "codex.ws.binary_frame",
++		"protocol":    "websocket",
++		"session_id":  strings.TrimSpace(sessionID),
++		"leg":         strings.TrimSpace(leg),
++		"binary":      true,
++		"size":        len(payload),
++	}
++	emitCodexDump(fields, sessionID, leg, payload, false)
+ }
+ 
+-// CodexDumpHTTPRequest logs an HTTP request with raw body and headers to logrus at trace level.
+-func CodexDumpHTTPRequest(sessionID, leg, method, url string, headers http.Header, body []byte) {
+-	if !CodexDumpEnabled() {
++// CodexDumpHTTPRequest records safe request metadata and a classified JSON
++// view. The original body is only written to a separate artifact when capture
++// was explicitly enabled and TRACE is selected.
++func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.Header, body []byte) {
++	if !log.IsLevelEnabled(log.TraceLevel) {
+ 		return
+ 	}
+-
+-	raw := string(body)
+ 	fields := log.Fields{
+-		"protocol":   "https",
+-		"session_id": strings.TrimSpace(sessionID),
+-		"leg":        strings.TrimSpace(leg),
+-		"method":     strings.TrimSpace(method),
+-		"url":        strings.TrimSpace(url),
+-		"size":       len(body),
+-		"raw":        raw,
+-	}
+-	if len(headers) > 0 {
+-		hdrMap := make(map[string]string, len(headers))
+-		for k, v := range headers {
+-			if sensitiveTraceHeader(k) {
+-				hdrMap[k] = "[REDACTED]"
+-				continue
+-			}
+-			hdrMap[k] = strings.Join(v, ", ")
+-		}
+-		fields["headers"] = hdrMap
++		"codex_event": "codex.https.request",
++		"protocol":    "https",
++		"session_id":  strings.TrimSpace(sessionID),
++		"leg":         strings.TrimSpace(leg),
++		"method":      strings.TrimSpace(method),
++		"host":        safeURLHost(rawURL),
++		"size":        len(body),
+ 	}
+-	log.WithFields(fields).Tracef("https dump request: %s %s raw: %s", method, url, raw)
++	addHeaderView(fields, headers)
++	emitCodexDump(fields, sessionID, leg, body, true)
+ }
+ 
+-// CodexDumpHTTPResponse logs an HTTP response with raw body and headers to logrus at trace level.
++// CodexDumpHTTPResponse records safe response metadata and a classified JSON
++// view. The original body is only written to a separate artifact when capture
++// was explicitly enabled and TRACE is selected.
+ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
+-	if !CodexDumpEnabled() {
++	if !log.IsLevelEnabled(log.TraceLevel) {
+ 		return
+ 	}
++	fields := log.Fields{
++		"codex_event": "codex.https.response",
++		"protocol":    "https",
++		"session_id":  strings.TrimSpace(sessionID),
++		"leg":         strings.TrimSpace(leg),
++		"status":      status,
++		"size":        len(body),
++	}
++	addHeaderView(fields, headers)
++	emitCodexDump(fields, sessionID, leg, body, true)
++}
+ 
+-	raw := string(body)
++// CodexDumpHTTPChunk records chunk metadata. It never puts the raw stream chunk
++// into the application log.
++func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
++	if !log.IsLevelEnabled(log.TraceLevel) || len(chunk) == 0 {
++		return
++	}
+ 	fields := log.Fields{
+-		"protocol":   "https",
+-		"session_id": strings.TrimSpace(sessionID),
+-		"leg":        strings.TrimSpace(leg),
+-		"status":     status,
+-		"size":       len(body),
+-		"raw":        raw,
+-	}
+-	if len(headers) > 0 {
+-		hdrMap := make(map[string]string, len(headers))
+-		for k, v := range headers {
+-			if sensitiveTraceHeader(k) {
+-				hdrMap[k] = "[REDACTED]"
+-				continue
++		"codex_event": "codex.https.chunk",
++		"protocol":    "https",
++		"session_id":  strings.TrimSpace(sessionID),
++		"leg":         strings.TrimSpace(leg),
++		"size":        len(chunk),
++	}
++	emitCodexDump(fields, sessionID, leg, chunk, false)
++}
++
++func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, includePayloadView bool) {
++	enabled, logDir := codexDumpConfiguration()
++	if enabled && IsLinuxOS() && len(payload) > 0 {
++		path, pruned, err := captureCodexDumpArtifact(logDir, sessionID, leg, payload)
++		if err != nil {
++			log.WithFields(log.Fields{
++				"codex_event":    "codex.capture.failed",
++				"session_id":     strings.TrimSpace(sessionID),
++				"leg":            strings.TrimSpace(leg),
++				"size":           len(payload),
++				"capture_pruned": pruned,
++			}).WithError(err).Warn("Codex raw capture failed")
++		} else {
++			fields["capture_path"] = path
++			fields["capture_bytes"] = len(payload)
++			fields["capture_fidelity"] = "received-exact"
++			if pruned > 0 {
++				fields["capture_pruned"] = pruned
+ 			}
+-			hdrMap[k] = strings.Join(v, ", ")
+ 		}
+-		fields["headers"] = hdrMap
+ 	}
+-	log.WithFields(fields).Tracef("https dump response: status=%d raw: %s", status, raw)
++	if includePayloadView {
++		addPayloadView(fields, payload)
++	}
++	log.WithFields(fields).Trace(fields["codex_event"])
+ }
+ 
+-// CodexDumpHTTPChunk logs an HTTP response chunk with raw content to logrus at trace level.
+-func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+-	if !CodexDumpEnabled() || len(chunk) == 0 {
+-		return
++func captureCodexDumpArtifact(logDir, sessionID, leg string, payload []byte) (string, int, error) {
++	if len(payload) > maxCodexDumpArtifactBytes {
++		return "", 0, fmt.Errorf("payload is %d bytes; capture limit is %d bytes", len(payload), maxCodexDumpArtifactBytes)
++	}
++	if logDir == "" {
++		return "", 0, errors.New("log directory is not configured")
++	}
++
++	codexDumpWriteMu.Lock()
++	defer codexDumpWriteMu.Unlock()
++
++	dir := filepath.Join(logDir, "codex-dumps")
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return "", 0, fmt.Errorf("create private capture directory: %w", err)
++	}
++	info, err := os.Lstat(dir)
++	if err != nil {
++		return "", 0, fmt.Errorf("inspect private capture directory: %w", err)
++	}
++	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
++		return "", 0, errors.New("private capture path is not a directory")
++	}
++	if err := os.Chmod(dir, 0o700); err != nil {
++		return "", 0, fmt.Errorf("restrict private capture directory: %w", err)
++	}
++	pruned, err := makeRoomForCodexDump(dir, int64(len(payload)))
++	if err != nil {
++		return "", pruned, err
+ 	}
+ 
+-	raw := string(chunk)
+-	log.WithFields(log.Fields{
+-		"protocol":   "https",
+-		"session_id": strings.TrimSpace(sessionID),
+-		"leg":        strings.TrimSpace(leg),
+-		"size":       len(chunk),
+-		"raw":        raw,
+-	}).Tracef("https dump chunk: %s", raw)
++	sessionDigest := sha256.Sum256([]byte(sessionID))
++	name := fmt.Sprintf("%d-%x-%s-%d.raw", time.Now().UTC().UnixNano(), sessionDigest[:6], safeCaptureLeg(leg), codexDumpSequence.Add(1))
++	path := filepath.Join(dir, name)
++	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
++	if err != nil {
++		return "", pruned, fmt.Errorf("create raw capture artifact: %w", err)
++	}
++	fail := func(err error) (string, error) {
++		_ = f.Close()
++		_ = os.Remove(path)
++		return "", err
++	}
++	if err := f.Chmod(0o600); err != nil {
++		_, captureErr := fail(fmt.Errorf("restrict raw capture artifact: %w", err))
++		return "", pruned, captureErr
++	}
++	n, err := f.Write(payload)
++	if err != nil {
++		_, captureErr := fail(fmt.Errorf("write raw capture artifact: %w", err))
++		return "", pruned, captureErr
++	}
++	if n != len(payload) {
++		_, captureErr := fail(fmt.Errorf("write raw capture artifact: %w", io.ErrShortWrite))
++		return "", pruned, captureErr
++	}
++	if err := f.Sync(); err != nil {
++		_, captureErr := fail(fmt.Errorf("sync raw capture artifact: %w", err))
++		return "", pruned, captureErr
++	}
++	if err := f.Close(); err != nil {
++		_ = os.Remove(path)
++		return "", pruned, fmt.Errorf("close raw capture artifact: %w", err)
++	}
++	return path, pruned, nil
+ }
+ 
+-func bytesTrimSpace(b []byte) []byte {
+-	return []byte(strings.TrimSpace(string(b)))
++func makeRoomForCodexDump(dir string, incoming int64) (int, error) {
++	if incoming > maxCodexDumpTotalBytes {
++		return 0, fmt.Errorf("capture is %d bytes; total capture limit is %d bytes", incoming, maxCodexDumpTotalBytes)
++	}
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		return 0, fmt.Errorf("read private capture directory: %w", err)
++	}
++	type artifact struct {
++		path    string
++		size    int64
++		modTime time.Time
++	}
++	var files []artifact
++	var total int64
++	for _, entry := range entries {
++		if entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".raw") {
++			continue
++		}
++		info, err := entry.Info()
++		if err != nil || !info.Mode().IsRegular() {
++			continue
++		}
++		files = append(files, artifact{filepath.Join(dir, entry.Name()), info.Size(), info.ModTime()})
++		total += info.Size()
++	}
++	if total+incoming <= maxCodexDumpTotalBytes {
++		return 0, nil
++	}
++	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
++	pruned := 0
++	for _, file := range files {
++		if total+incoming <= maxCodexDumpTotalBytes {
++			break
++		}
++		if err := os.Remove(file.path); err != nil {
++			return pruned, fmt.Errorf("prune old raw capture artifact: %w", err)
++		}
++		total -= file.size
++		pruned++
++	}
++	if total+incoming > maxCodexDumpTotalBytes {
++		return pruned, errors.New("private capture size limit could not be enforced")
++	}
++	return pruned, nil
++}
++
++func safeCaptureLeg(leg string) string {
++	var b strings.Builder
++	for _, r := range strings.TrimSpace(leg) {
++		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
++			b.WriteRune(r)
++		}
++	}
++	if b.Len() == 0 {
++		return "unknown"
++	}
++	return b.String()
++}
++
++func addPayloadView(fields log.Fields, payload []byte) {
++	if len(payload) == 0 {
++		return
++	}
++	var value any
++	if err := json.Unmarshal(payload, &value); err != nil {
++		return
++	}
++	var buffer bytes.Buffer
++	encoder := json.NewEncoder(&buffer)
++	encoder.SetEscapeHTML(false)
++	if err := encoder.Encode(classifiedTraceView(value)); err != nil {
++		return
++	}
++	view := bytes.TrimSpace(buffer.Bytes())
++	if len(view) > maxCodexDumpViewBytes {
++		fields["payload_view_omitted"] = "view-size-limit"
++		return
++	}
++	fields["payload_view"] = string(view)
++}
++
++func classifiedTraceView(value any) any {
++	switch typed := value.(type) {
++	case map[string]any:
++		redacted := make(map[string]any, len(typed))
++		for key, item := range typed {
++			if sensitiveTraceField(key) {
++				redacted[key] = "<redacted>"
++			} else if publicTracePayloadField(key) {
++				redacted[key] = classifiedTraceView(item)
++			}
++		}
++		return redacted
++	case []any:
++		redacted := make([]any, len(typed))
++		for i, item := range typed {
++			redacted[i] = classifiedTraceView(item)
++		}
++		return redacted
++	default:
++		return value
++	}
+ }
+ 
+-func sensitiveTraceHeader(name string) bool {
++func publicTracePayloadField(name string) bool {
+ 	name = strings.ToLower(strings.TrimSpace(name))
+-	for _, marker := range []string{"authorization", "cookie", "api-key", "api_key", "token", "secret", "credential"} {
+-		if strings.Contains(name, marker) {
++	switch name {
++	case "type", "model", "model_id", "scheme", "status", "role",
++		"id", "request_id", "correlation_id", "response_id", "conversation_id",
++		"thread_id", "session_id", "routing_token", "x-codex-turn-state", "x-models-etag":
++		return true
++	default:
++		return false
++	}
++}
++
++func sensitiveTraceField(name string) bool {
++	normalized := strings.ToLower(strings.TrimSpace(name))
++	normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
++	if normalized == "routingtoken" {
++		return false
++	}
++	for _, marker := range []string{"authorization", "credential", "password", "secret", "cookie", "apikey", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken", "token"} {
++		if strings.Contains(normalized, marker) {
+ 			return true
+ 		}
+ 	}
+ 	return false
+ }
++
++func addHeaderView(fields log.Fields, headers http.Header) {
++	if len(headers) == 0 {
++		return
++	}
++	keys := make([]string, 0, len(headers))
++	for key := range headers {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	parts := make([]string, 0, len(keys))
++	for _, key := range keys {
++		value := ""
++		if sensitiveTraceField(key) {
++			value = "<redacted>"
++		} else if publicTraceHeader(key) {
++			value = strings.Join(headers.Values(key), ", ")
++		} else {
++			continue
++		}
++		parts = append(parts, fmt.Sprintf("%s=%q", key, value))
++	}
++	fields["headers"] = strings.Join(parts, " ")
++}
++
++func publicTraceHeader(name string) bool {
++	switch strings.ToLower(strings.TrimSpace(name)) {
++	case "accept", "content-type", "user-agent", "x-request-id", "request-id",
++		"x-correlation-id", "correlation-id", "x-codex-turn-state", "x-models-etag",
++		"openai-beta":
++		return true
++	default:
++		return false
++	}
++}
++
++func safeURLHost(rawURL string) string {
++	parsed, err := url.Parse(rawURL)
++	if err != nil || parsed == nil {
++		return ""
++	}
++	return parsed.Host
++}
+diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
+index 0a29023..719f0f2 100644
+--- a/internal/logging/codex_dump_test.go
++++ b/internal/logging/codex_dump_test.go
+@@ -3,6 +3,8 @@ package logging
+ import (
+ 	"bytes"
+ 	"net/http"
++	"os"
++	"path/filepath"
+ 	"runtime"
+ 	"strings"
+ 	"testing"
+@@ -10,58 +12,166 @@ import (
+ 	log "github.com/sirupsen/logrus"
+ )
+ 
++func captureCodexDumpLogs(t *testing.T) *bytes.Buffer {
++	t.Helper()
++	logger := log.StandardLogger()
++	originalOutput := logger.Out
++	originalFormatter := logger.Formatter
++	originalLevel := logger.GetLevel()
++	var output bytes.Buffer
++	logger.SetOutput(&output)
++	logger.SetFormatter(&LogFormatter{})
++	t.Cleanup(func() {
++		ConfigureCodexDump(false, "")
++		logger.SetOutput(originalOutput)
++		logger.SetFormatter(originalFormatter)
++		logger.SetLevel(originalLevel)
++	})
++	return &output
++}
++
+ func TestCodexDumpDefaultsOff(t *testing.T) {
+-	ConfigureCodexDump(false)
++	ConfigureCodexDump(false, "")
+ 	if CodexDumpEnabled() {
+ 		t.Fatal("CodexDumpEnabled() = true, want false by default")
+ 	}
+ }
+ 
+-func TestCodexDumpStandardLog(t *testing.T) {
+-	if runtime.GOOS != "linux" {
+-		t.Skip("dump is linux only")
++func TestCodexDumpDoesNotChangeSelectedLogLevel(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.DebugLevel)
++	ConfigureCodexDump(true, t.TempDir())
++	if log.GetLevel() != log.DebugLevel {
++		t.Fatalf("log level = %v, want DebugLevel", log.GetLevel())
++	}
++	CodexDumpFrame("session", "client_in", []byte(`{"type":"response.create"}`))
++	if output.Len() != 0 {
++		t.Fatalf("debug selection emitted trace diagnostics: %s", output.String())
+ 	}
++}
+ 
+-	var buf bytes.Buffer
+-	origOutput := log.StandardLogger().Out
+-	origLevel := log.GetLevel()
+-	log.SetOutput(&buf)
+-	defer func() {
+-		log.SetOutput(origOutput)
+-		log.SetLevel(origLevel)
+-		ConfigureCodexDump(false)
+-	}()
++func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	logDir := t.TempDir()
++	payload := []byte(`{"type":"response.create","credential":"fixture-secret","scheme":"Bearer","routing_token":"opaque-public","prompt":"private prompt text"}`)
+ 
+-	ConfigureCodexDump(true)
+-	if !CodexDumpEnabled() {
+-		t.Fatal("CodexDumpEnabled() = false, want true on linux")
++	ConfigureCodexDump(false, logDir)
++	CodexDumpFrame("session", "client_in", payload)
++	view := output.String()
++	for _, secret := range []string{"fixture-secret", "private prompt text"} {
++		if strings.Contains(view, secret) {
++			t.Fatalf("trace view exposed classified or unclassified payload data %q: %s", secret, view)
++		}
++	}
++	if !strings.Contains(view, "response.create") || !strings.Contains(view, "<redacted>") {
++		t.Fatalf("trace view omitted event or redaction: %s", view)
++	}
++	if !strings.Contains(view, "opaque-public") || !strings.Contains(view, "Bearer") {
++		t.Fatalf("trace view changed public fields: %s", view)
+ 	}
+-	if log.GetLevel() != log.TraceLevel {
+-		t.Fatalf("log level = %v, want TraceLevel", log.GetLevel())
++	if _, err := os.Stat(filepath.Join(logDir, "codex-dumps")); !os.IsNotExist(err) {
++		t.Fatalf("TRACE alone created a raw capture directory, stat error = %v", err)
+ 	}
+ 
+-	CodexDumpFrame("sess-ws", "client_in", []byte(`{"type":"response.create","model":"gpt-6-astra"}`))
+-	CodexDumpHTTPRequest("sess-http", "upstream_out", "POST", "https://api.openai.com/v1/responses", http.Header{"Authorization": []string{"Bearer tok"}}, []byte(`{"model":"gpt-6-astra"}`))
+-	CodexDumpHTTPResponse("sess-http", "upstream_in", 200, http.Header{"Content-Type": []string{"application/json"}}, []byte(`{"status":"ok"}`))
+-	CodexDumpHTTPChunk("sess-http", "upstream_in", []byte("data: chunk\n\n"))
++	if runtime.GOOS != "linux" {
++		t.Skip("raw capture artifacts are supported on Linux only")
++	}
++	output.Reset()
++	ConfigureCodexDump(true, logDir)
++	CodexDumpFrame("session", "client_in", payload)
++	view = output.String()
++	if strings.Contains(view, "fixture-secret") {
++		t.Fatalf("captured payload leaked into trace view: %s", view)
++	}
++	if !strings.Contains(view, "capture_fidelity=\"received-exact\"") {
++		t.Fatalf("capture receipt missing from trace view: %s", view)
++	}
++	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++	if err != nil {
++		t.Fatalf("read capture directory: %v", err)
++	}
++	if len(files) != 1 {
++		t.Fatalf("capture files = %d, want 1", len(files))
++	}
++	path := filepath.Join(logDir, "codex-dumps", files[0].Name())
++	got, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatalf("read capture artifact: %v", err)
++	}
++	if !bytes.Equal(got, payload) {
++		t.Fatalf("raw capture changed bytes: got %q, want %q", got, payload)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatalf("stat capture artifact: %v", err)
++	}
++	if info.Mode().Perm() != 0o600 {
++		t.Fatalf("capture file mode = %o, want 600", info.Mode().Perm())
++	}
++	dirInfo, err := os.Stat(filepath.Dir(path))
++	if err != nil {
++		t.Fatalf("stat capture directory: %v", err)
++	}
++	if dirInfo.Mode().Perm() != 0o700 {
++		t.Fatalf("capture directory mode = %o, want 700", dirInfo.Mode().Perm())
++	}
++}
+ 
+-	out := buf.String()
+-	if !strings.Contains(out, "level=trace") {
+-		t.Fatalf("expected log output to contain 'level=trace', got: %s", out)
++func TestCodexDumpHTTPViewRedactsHeadersAndPayload(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, t.TempDir())
++	body := []byte(`{"credential":"body-secret","scheme":"Bearer","routing_token":"opaque-public","prompt":"private prompt text"}`)
++	headers := http.Header{
++		"Authorization":    []string{"Bearer header-secret"},
++		"Content-Type":     []string{"application/json"},
++		"X-Correlation-Id": []string{"a%252Fb"},
++		"X-Private-Note":   []string{"unclassified-header"},
++	}
++	CodexDumpHTTPRequest("session", "upstream_out", "POST", "https://user:pass@api.example/v1/responses?token=query-secret", headers, body)
++	CodexDumpHTTPResponse("session", "upstream_in", 200, headers, body)
++
++	view := output.String()
++	for _, secret := range []string{"body-secret", "private prompt text", "header-secret", "query-secret", "user:pass", "unclassified-header"} {
++		if strings.Contains(view, secret) {
++			t.Fatalf("HTTP trace view exposed %q: %s", secret, view)
++		}
++	}
++	for _, public := range []string{"<redacted>", "application/json", "a%252Fb", "opaque-public", "api.example"} {
++		if !strings.Contains(view, public) {
++			t.Fatalf("HTTP trace view omitted public or classified view value %q: %s", public, view)
++		}
++	}
++}
++
++func TestCodexDumpArtifactStoresExactBytesPrivately(t *testing.T) {
++	logDir := t.TempDir()
++	ConfigureCodexDump(true, logDir)
++	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
++	path, _, err := captureCodexDumpArtifact(logDir, "session", "client_in", payload)
++	if err != nil {
++		t.Fatalf("capture raw bytes: %v", err)
++	}
++	got, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatalf("read raw capture: %v", err)
+ 	}
+-	if !strings.Contains(out, "ws dump:") {
+-		t.Fatalf("expected log output to contain 'ws dump:', got: %s", out)
++	if !bytes.Equal(got, payload) {
++		t.Fatalf("raw capture changed bytes: got %v, want %v", got, payload)
+ 	}
+-	if !strings.Contains(out, "response.create") {
+-		t.Fatalf("expected log output to contain 'response.create', got: %s", out)
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatalf("stat raw capture: %v", err)
+ 	}
+-	if !strings.Contains(out, "https dump request:") {
+-		t.Fatalf("expected log output to contain 'https dump request:', got: %s", out)
++	if info.Mode().Perm() != 0o600 {
++		t.Fatalf("capture file mode = %o, want 600", info.Mode().Perm())
+ 	}
+-	if !strings.Contains(out, "https dump response:") {
+-		t.Fatalf("expected log output to contain 'https dump response:', got: %s", out)
++	dirInfo, err := os.Stat(filepath.Dir(path))
++	if err != nil {
++		t.Fatalf("stat capture directory: %v", err)
+ 	}
+-	if !strings.Contains(out, "https dump chunk:") {
+-		t.Fatalf("expected log output to contain 'https dump chunk:', got: %s", out)
++	if dirInfo.Mode().Perm() != 0o700 {
++		t.Fatalf("capture directory mode = %o, want 700", dirInfo.Mode().Perm())
+ 	}
+ }
+diff --git a/internal/logging/global_logger.go b/internal/logging/global_logger.go
+index 524fc42..930c0e1 100644
+--- a/internal/logging/global_logger.go
++++ b/internal/logging/global_logger.go
+@@ -58,19 +58,34 @@ var logFieldOrder = []string{
+ 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
+ 	"credential", "auth_id", "connection", "proxy_scheme", "remote_transport",
+ 	"media_session_id", "call_id", "peer", "state", "reason",
++	"codex_event", "protocol", "session_id", "leg", "event_type",
++	"size", "method", "host", "status", "headers", "payload_view", "payload_view_omitted",
++	"capture_path", "capture_bytes", "capture_fidelity", "capture_pruned", "binary",
+ }
+ 
+ var quotedLogFields = map[string]struct{}{
+-	"credential":       {},
+-	"auth_id":          {},
+-	"connection":       {},
+-	"proxy_scheme":     {},
+-	"remote_transport": {},
+-	"media_session_id": {},
+-	"call_id":          {},
+-	"peer":             {},
+-	"state":            {},
+-	"reason":           {},
++	"credential":           {},
++	"auth_id":              {},
++	"connection":           {},
++	"proxy_scheme":         {},
++	"remote_transport":     {},
++	"media_session_id":     {},
++	"call_id":              {},
++	"peer":                 {},
++	"state":                {},
++	"reason":               {},
++	"codex_event":          {},
++	"protocol":             {},
++	"session_id":           {},
++	"leg":                  {},
++	"event_type":           {},
++	"method":               {},
++	"host":                 {},
++	"headers":              {},
++	"payload_view":         {},
++	"payload_view_omitted": {},
++	"capture_path":         {},
++	"capture_fidelity":     {},
+ }
+ 
+ var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}
+diff --git a/internal/util/log_level_test.go b/internal/util/log_level_test.go
+new file mode 100644
+index 0000000..1a9566d
+--- /dev/null
++++ b/internal/util/log_level_test.go
+@@ -0,0 +1,44 @@
++package util
++
++import (
++	"io"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	log "github.com/sirupsen/logrus"
++)
++
++func TestSetLogLevelFollowsExplicitVerbosity(t *testing.T) {
++	logger := log.StandardLogger()
++	originalOutput := logger.Out
++	originalLevel := logger.GetLevel()
++	logger.SetOutput(io.Discard)
++	t.Cleanup(func() {
++		logger.SetOutput(originalOutput)
++		logger.SetLevel(originalLevel)
++	})
++
++	cases := []struct {
++		name string
++		cfg  config.Config
++		want log.Level
++	}{
++		{name: "info by default", cfg: config.Config{}, want: log.InfoLevel},
++		{name: "debug selected", cfg: config.Config{Debug: true}, want: log.DebugLevel},
++		{name: "trace selected", cfg: config.Config{Trace: true}, want: log.TraceLevel},
++		{
++			name: "capture authorization does not raise level",
++			cfg:  config.Config{SDKConfig: config.SDKConfig{CodexDump: true}},
++			want: log.InfoLevel,
++		},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			logger.SetLevel(log.PanicLevel)
++			SetLogLevel(&tc.cfg)
++			if got := logger.GetLevel(); got != tc.want {
++				t.Fatalf("log level = %v, want %v", got, tc.want)
++			}
++		})
++	}
++}
+diff --git a/internal/util/util.go b/internal/util/util.go
+index be55d62..385877a 100644
+--- a/internal/util/util.go
++++ b/internal/util/util.go
+@@ -9,7 +9,6 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
+-	"runtime"
+ 	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+@@ -55,13 +54,12 @@ func SanitizeFunctionName(name string) string {
+ 	return sanitized
+ }
+ 
+-// SetLogLevel configures the logrus log level based on the configuration.
+-// It sets the log level to TraceLevel if trace mode or codex-dump is enabled,
+-// DebugLevel if debug mode is enabled, otherwise to InfoLevel.
++// SetLogLevel configures the logrus log level based on the selected verbosity.
++// Raw capture authorization is separate and never raises the process log level.
+ func SetLogLevel(cfg *config.Config) {
+ 	currentLevel := log.GetLevel()
+ 	var newLevel log.Level
+-	if cfg.Trace || (cfg.CodexDump && runtime.GOOS == "linux") {
++	if cfg.Trace {
+ 		newLevel = log.TraceLevel
+ 	} else if cfg.Debug {
+ 		newLevel = log.DebugLevel
+-- 
+2.56.0
+

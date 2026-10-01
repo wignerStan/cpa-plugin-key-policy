@@ -156,8 +156,10 @@ CLIProxyAPI integration patch set. The rebased patches and pinned official
 upstream commit are recorded in
 [`patches/cliproxyapi/manifest.json`](./patches/cliproxyapi/manifest.json).
 The patch series includes plugin lifecycle and model-catalog integration,
-Codex session metadata, and trace-level raw payload logging with sensitive
-headers redacted.
+Codex session metadata, and trace-level boundary diagnostics. Explicit raw
+capture is Linux-only, requires both `codex-dump: true` and `trace: true`, and
+writes exact bytes to separate private artifacts. Application logs contain a
+classified payload view; they never contain the captured raw bytes.
 
 Builds materialize the pinned upstream source, apply the checked-in patches,
 and build the result under the ignored `build/` directory. No generated source

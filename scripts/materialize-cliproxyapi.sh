@@ -105,7 +105,7 @@ mkdir -p "${output}"
 rsync -a --delete --exclude='.git' "${work_dir}/" "${output}/"
 
 if find "${output}" -type d -name .git -print -quit | grep -q .; then
-  printf 'generated vendor checkout contains a nested .git directory\n' >&2
+  printf 'materialized CLIProxyAPI checkout contains a nested .git directory\n' >&2
   exit 1
 fi
 

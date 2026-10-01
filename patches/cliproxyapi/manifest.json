@@ -65,6 +65,12 @@
       "path": "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch",
       "commit": "66b0530a77ffd7393bbabfb0f991ab6a119e4c3f",
       "sha256": "888307fc28c861121108db7038b5ee0096bf28c506dc61c43b2a0a51688ed5b2"
+    },
+    {
+      "order": 11,
+      "path": "patches/cliproxyapi/0011-fix-logging-honor-diagnostic-capture-contract.patch",
+      "commit": "9f52fc90d1aef9992890b246500b5a0c1ce1c499",
+      "sha256": "4d314fa968a3334ba30b784e18d2c590d59c5248120558f7745eef81459d68b9"
     }
   ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",
