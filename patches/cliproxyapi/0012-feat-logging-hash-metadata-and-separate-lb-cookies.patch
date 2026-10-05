@@ -1,0 +1,394 @@
+From 3e143ea1885a3ddb3fc256cecc40123814bd277f Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sun, 4 Oct 2026 21:03:24 -0700
+Subject: [PATCH] feat(logging): hash metadata and separate lb cookies in trace
+ dump
+
+---
+ internal/logging/codex_dump.go                | 207 ++++++++++++++++--
+ internal/logging/codex_dump_test.go           |  30 ++-
+ .../runtime/executor/helps/logging_helpers.go |   1 +
+ internal/util/util.go                         |   5 +-
+ .../openai/openai_responses_websocket.go      |   1 +
+ 5 files changed, 224 insertions(+), 20 deletions(-)
+
+diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+index e7b9eca..1f14d3e 100644
+--- a/internal/logging/codex_dump.go
++++ b/internal/logging/codex_dump.go
+@@ -336,21 +336,26 @@ func addPayloadView(fields log.Fields, payload []byte) {
+ }
+ 
+ func classifiedTraceView(value any) any {
++	return classifiedTraceViewScoped(value, false)
++}
++
++func classifiedTraceViewScoped(value any, inMetadata bool) any {
+ 	switch typed := value.(type) {
+ 	case map[string]any:
+ 		redacted := make(map[string]any, len(typed))
+ 		for key, item := range typed {
++			metaChild := inMetadata || isMetadataContainer(key)
+ 			if sensitiveTraceField(key) {
+-				redacted[key] = "<redacted>"
+-			} else if publicTracePayloadField(key) {
+-				redacted[key] = classifiedTraceView(item)
++				redacted[key] = hashTraceValue(item)
++			} else if inMetadata || publicTracePayloadField(key) || isMetadataContainer(key) {
++				redacted[key] = classifiedTraceViewScoped(item, metaChild)
+ 			}
+ 		}
+ 		return redacted
+ 	case []any:
+ 		redacted := make([]any, len(typed))
+ 		for i, item := range typed {
+-			redacted[i] = classifiedTraceView(item)
++			redacted[i] = classifiedTraceViewScoped(item, inMetadata)
+ 		}
+ 		return redacted
+ 	default:
+@@ -358,12 +363,54 @@ func classifiedTraceView(value any) any {
+ 	}
+ }
+ 
++func isMetadataContainer(name string) bool {
++	n := strings.ToLower(strings.TrimSpace(name))
++	return strings.Contains(n, "metadata") || strings.Contains(n, "context") || strings.Contains(n, "session") || strings.Contains(n, "thread")
++}
++
++func hashTraceString(s string) string {
++	s = strings.TrimSpace(s)
++	if s == "" {
++		return ""
++	}
++	digest := sha256.Sum256([]byte(s))
++	return fmt.Sprintf("hash:%x", digest[:8])
++}
++
++func hashTraceValue(value any) any {
++	switch v := value.(type) {
++	case string:
++		return hashTraceString(v)
++	case []byte:
++		return hashTraceString(string(v))
++	case map[string]any:
++		out := make(map[string]any, len(v))
++		for k, val := range v {
++			out[k] = hashTraceValue(val)
++		}
++		return out
++	case []any:
++		out := make([]any, len(v))
++		for i, val := range v {
++			out[i] = hashTraceValue(val)
++		}
++		return out
++	default:
++		b, err := json.Marshal(v)
++		if err == nil {
++			return hashTraceString(string(b))
++		}
++		return hashTraceString(fmt.Sprintf("%v", v))
++	}
++}
++
+ func publicTracePayloadField(name string) bool {
+ 	name = strings.ToLower(strings.TrimSpace(name))
+ 	switch name {
+ 	case "type", "model", "model_id", "scheme", "status", "role",
+ 		"id", "request_id", "correlation_id", "response_id", "conversation_id",
+-		"thread_id", "session_id", "routing_token", "x-codex-turn-state", "x-models-etag":
++		"thread_id", "session_id", "routing_token", "x-codex-turn-state", "x-models-etag",
++		"metadata", "client_metadata", "turn_metadata", "headers", "x-codex-turn-metadata":
+ 		return true
+ 	default:
+ 		return false
+@@ -373,7 +420,7 @@ func publicTracePayloadField(name string) bool {
+ func sensitiveTraceField(name string) bool {
+ 	normalized := strings.ToLower(strings.TrimSpace(name))
+ 	normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
+-	if normalized == "routingtoken" {
++	if normalized == "routingtoken" || normalized == "xcodexturnstate" {
+ 		return false
+ 	}
+ 	for _, marker := range []string{"authorization", "credential", "password", "secret", "cookie", "apikey", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken", "token"} {
+@@ -384,6 +431,140 @@ func sensitiveTraceField(name string) bool {
+ 	return false
+ }
+ 
++func isLBCookie(name string) bool {
++	n := strings.ToLower(strings.TrimSpace(name))
++	switch {
++	case strings.HasPrefix(n, "__cf"), strings.HasPrefix(n, "cf_"), strings.HasPrefix(n, "_cf"),
++		strings.Contains(n, "clearance"), strings.HasPrefix(n, "aws"),
++		strings.Contains(n, "alb"), strings.Contains(n, "gclb"),
++		strings.Contains(n, "anycast"), strings.Contains(n, "ray"),
++		strings.Contains(n, "route"), strings.Contains(n, "affinity"),
++		n == "lb", strings.HasPrefix(n, "lb_"), strings.HasPrefix(n, "lb-"):
++		return true
++	default:
++		return false
++	}
++}
++
++func isAuthOrSessionCookie(name string) bool {
++	n := strings.ToLower(strings.TrimSpace(name))
++	switch {
++	case strings.Contains(n, "session"), strings.Contains(n, "token"),
++		strings.Contains(n, "auth"), strings.Contains(n, "secret"),
++		strings.Contains(n, "secure"), strings.Contains(n, "jwt"),
++		strings.Contains(n, "key"), strings.Contains(n, "sid"),
++		strings.HasPrefix(n, "__secure-"), strings.HasPrefix(n, "__host-"),
++		strings.Contains(n, "credential"), strings.Contains(n, "login"):
++		return true
++	default:
++		return false
++	}
++}
++
++func formatCookieHeader(raw string) string {
++	parts := strings.Split(raw, ";")
++	formatted := make([]string, 0, len(parts))
++	for _, part := range parts {
++		trimmed := strings.TrimSpace(part)
++		if trimmed == "" {
++			continue
++		}
++		eq := strings.IndexByte(trimmed, '=')
++		if eq == -1 {
++			formatted = append(formatted, trimmed)
++			continue
++		}
++		name := strings.TrimSpace(trimmed[:eq])
++		val := strings.TrimSpace(trimmed[eq+1:])
++		if isLBCookie(name) {
++			formatted = append(formatted, fmt.Sprintf("%s=%s", name, val))
++		} else if isAuthOrSessionCookie(name) {
++			formatted = append(formatted, fmt.Sprintf("%s=%s", name, hashTraceString(val)))
++		} else {
++			formatted = append(formatted, fmt.Sprintf("%s=%s", name, hashTraceString(val)))
++		}
++	}
++	return strings.Join(formatted, "; ")
++}
++
++func formatSetCookieHeader(raw string) string {
++	parts := strings.Split(raw, ";")
++	if len(parts) == 0 {
++		return raw
++	}
++	first := strings.TrimSpace(parts[0])
++	eq := strings.IndexByte(first, '=')
++	if eq == -1 {
++		return raw
++	}
++	name := strings.TrimSpace(first[:eq])
++	val := strings.TrimSpace(first[eq+1:])
++	var formattedFirst string
++	if isLBCookie(name) {
++		formattedFirst = fmt.Sprintf("%s=%s", name, val)
++	} else if isAuthOrSessionCookie(name) {
++		formattedFirst = fmt.Sprintf("%s=%s", name, hashTraceString(val))
++	} else {
++		formattedFirst = fmt.Sprintf("%s=%s", name, hashTraceString(val))
++	}
++
++	remaining := make([]string, 0, len(parts))
++	remaining = append(remaining, formattedFirst)
++	for _, p := range parts[1:] {
++		remaining = append(remaining, strings.TrimSpace(p))
++	}
++	return strings.Join(remaining, "; ")
++}
++
++func isLBHeader(name string) bool {
++	n := strings.ToLower(strings.TrimSpace(name))
++	switch {
++	case strings.HasPrefix(n, "cf-"), n == "cfray", n == "cf-ray",
++		strings.HasPrefix(n, "x-cf-"), strings.HasPrefix(n, "x-amz-"),
++		strings.HasPrefix(n, "x-edge-"), strings.HasPrefix(n, "x-lb-"),
++		strings.Contains(n, "anycast"), strings.Contains(n, "ray"),
++		n == "server", n == "via", n == "x-served-by", n == "x-cache":
++		return true
++	default:
++		return false
++	}
++}
++
++func formatHeaderValue(key string, values []string) (string, bool) {
++	kLower := strings.ToLower(strings.TrimSpace(key))
++	switch kLower {
++	case "cookie":
++		var out []string
++		for _, v := range values {
++			out = append(out, formatCookieHeader(v))
++		}
++		return strings.Join(out, "; "), true
++	case "set-cookie":
++		var out []string
++		for _, v := range values {
++			out = append(out, formatSetCookieHeader(v))
++		}
++		return strings.Join(out, ", "), true
++	case "authorization":
++		val := strings.TrimSpace(strings.Join(values, " "))
++		if strings.HasPrefix(strings.ToLower(val), "bearer ") {
++			token := strings.TrimSpace(val[7:])
++			return "Bearer " + hashTraceString(token), true
++		}
++		return hashTraceString(val), true
++	}
++
++	if isLBHeader(key) || publicTraceHeader(key) {
++		return strings.Join(values, ", "), true
++	}
++
++	if sensitiveTraceField(key) {
++		return hashTraceString(strings.Join(values, ", ")), true
++	}
++
++	return "", false
++}
++
+ func addHeaderView(fields log.Fields, headers http.Header) {
+ 	if len(headers) == 0 {
+ 		return
+@@ -395,15 +576,13 @@ func addHeaderView(fields log.Fields, headers http.Header) {
+ 	sort.Strings(keys)
+ 	parts := make([]string, 0, len(keys))
+ 	for _, key := range keys {
+-		value := ""
+-		if sensitiveTraceField(key) {
+-			value = "<redacted>"
+-		} else if publicTraceHeader(key) {
+-			value = strings.Join(headers.Values(key), ", ")
+-		} else {
+-			continue
++		values := headers[key]
++		if len(values) == 0 {
++			values = headers.Values(key)
++		}
++		if formatted, ok := formatHeaderValue(key, values); ok && formatted != "" {
++			parts = append(parts, fmt.Sprintf("%s=%q", key, formatted))
+ 		}
+-		parts = append(parts, fmt.Sprintf("%s=%q", key, value))
+ 	}
+ 	fields["headers"] = strings.Join(parts, " ")
+ }
+diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
+index 719f0f2..8b332f5 100644
+--- a/internal/logging/codex_dump_test.go
++++ b/internal/logging/codex_dump_test.go
+@@ -64,8 +64,8 @@ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *te
+ 			t.Fatalf("trace view exposed classified or unclassified payload data %q: %s", secret, view)
+ 		}
+ 	}
+-	if !strings.Contains(view, "response.create") || !strings.Contains(view, "<redacted>") {
+-		t.Fatalf("trace view omitted event or redaction: %s", view)
++	if !strings.Contains(view, "response.create") || !strings.Contains(view, "hash:") {
++		t.Fatalf("trace view omitted event or hash: %s", view)
+ 	}
+ 	if !strings.Contains(view, "opaque-public") || !strings.Contains(view, "Bearer") {
+ 		t.Fatalf("trace view changed public fields: %s", view)
+@@ -127,24 +127,46 @@ func TestCodexDumpHTTPViewRedactsHeadersAndPayload(t *testing.T) {
+ 		"Authorization":    []string{"Bearer header-secret"},
+ 		"Content-Type":     []string{"application/json"},
+ 		"X-Correlation-Id": []string{"a%252Fb"},
++		"CF-Ray":           []string{"8e12345-SJC"},
++		"Cookie":           []string{"__cf_bm=lb123; session=user_secret"},
++		"Set-Cookie":       []string{"__Secure-session=sec_tok; path=/; Secure", "__cf_bm=lb123; path=/; HttpOnly"},
+ 		"X-Private-Note":   []string{"unclassified-header"},
+ 	}
+ 	CodexDumpHTTPRequest("session", "upstream_out", "POST", "https://user:pass@api.example/v1/responses?token=query-secret", headers, body)
+ 	CodexDumpHTTPResponse("session", "upstream_in", 200, headers, body)
+ 
+ 	view := output.String()
+-	for _, secret := range []string{"body-secret", "private prompt text", "header-secret", "query-secret", "user:pass", "unclassified-header"} {
++	for _, secret := range []string{"body-secret", "private prompt text", "header-secret", "query-secret", "user:pass", "user_secret", "sec_tok"} {
+ 		if strings.Contains(view, secret) {
+ 			t.Fatalf("HTTP trace view exposed %q: %s", secret, view)
+ 		}
+ 	}
+-	for _, public := range []string{"<redacted>", "application/json", "a%252Fb", "opaque-public", "api.example"} {
++	for _, public := range []string{"application/json", "a%252Fb", "opaque-public", "api.example", "8e12345-SJC", "__cf_bm=lb123", "session=hash:", "__Secure-session=hash:"} {
+ 		if !strings.Contains(view, public) {
+ 			t.Fatalf("HTTP trace view omitted public or classified view value %q: %s", public, view)
+ 		}
+ 	}
+ }
+ 
++func TestCodexDumpMetadataUsesHashNotRedacted(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, t.TempDir())
++	payload := []byte(`{"type":"response.create","model":"gpt-6-astra","client_metadata":{"turn_id":"turn-1","token":"secret-token","x-codex-turn-state":"ts-val"}}`)
++	CodexDumpFrame("session", "client_in", payload)
++	view := output.String()
++
++	if strings.Contains(view, "<redacted>") {
++		t.Fatalf("expected metadata not to be redacted with literal '<redacted>', got: %s", view)
++	}
++	if !strings.Contains(view, "hash:") {
++		t.Fatalf("expected token to be hashed with 'hash:', got: %s", view)
++	}
++	if !strings.Contains(view, "turn-1") {
++		t.Fatalf("expected public turn_id to be preserved, got: %s", view)
++	}
++}
++
+ func TestCodexDumpArtifactStoresExactBytesPrivately(t *testing.T) {
+ 	logDir := t.TempDir()
+ 	ConfigureCodexDump(true, logDir)
+diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
+index 328da2f..c147fd6 100644
+--- a/internal/runtime/executor/helps/logging_helpers.go
++++ b/internal/runtime/executor/helps/logging_helpers.go
+@@ -327,6 +327,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
+ // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
+ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+ 	logging.SetResponseHeaders(ctx, headers)
++	logging.CodexDumpHTTPResponse(cliproxyexecutor.ExecutionSessionID(ctx), "upstream_in", status, headers, nil)
+ 	if !requestLogCaptureEnabled(cfg) {
+ 		return
+ 	}
+diff --git a/internal/util/util.go b/internal/util/util.go
+index 385877a..f44445e 100644
+--- a/internal/util/util.go
++++ b/internal/util/util.go
+@@ -9,6 +9,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
++	"runtime"
+ 	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+@@ -55,11 +56,11 @@ func SanitizeFunctionName(name string) string {
+ }
+ 
+ // SetLogLevel configures the logrus log level based on the selected verbosity.
+-// Raw capture authorization is separate and never raises the process log level.
++// Trace mode or codex-dump (Linux only) sets logrus to TraceLevel.
+ func SetLogLevel(cfg *config.Config) {
+ 	currentLevel := log.GetLevel()
+ 	var newLevel log.Level
+-	if cfg.Trace {
++	if cfg.Trace || (cfg.CodexDump && runtime.GOOS == "linux") {
+ 		newLevel = log.TraceLevel
+ 	} else if cfg.Debug {
+ 		newLevel = log.DebugLevel
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 6ea5e01..696cede 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -286,6 +286,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 	}
+ 	writer := newResponsesWebsocketWriter(conn)
+ 	passthroughSessionID := uuid.NewString()
++	requestlogging.CodexDumpHTTPRequest(passthroughSessionID, "client_in", c.Request.Method, c.Request.URL.String(), c.Request.Header, nil)
+ 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
+ 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
+ 	clientIP := websocketClientAddress(c)
+-- 
+2.55.0
+
