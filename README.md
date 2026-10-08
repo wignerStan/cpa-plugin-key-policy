@@ -395,3 +395,8 @@ For Pi/Codex clients (`/v1/models?client_version=...`) the plugin preserves the 
 GOFLAGS=-mod=mod go test ./...
 cd web && npm test && npm run build
 ```
+
+The diagnostic adapter in patch 0012 reuses a checksummed infra source snapshot;
+see [infra diagnostic source provenance](docs/source-relationships/infra-diagnostics-vendor.md).
+Raw dumps require explicit opt-in and never perform per-delta file writes or trace
+logging. Capture owners drain on configuration changes and shutdown.

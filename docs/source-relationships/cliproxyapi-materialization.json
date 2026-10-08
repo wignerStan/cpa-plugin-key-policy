@@ -63,11 +63,55 @@
       "order": 11,
       "path": "patches/cliproxyapi/0011-fix-logging-honor-diagnostic-capture-contract.patch",
       "sha256": "4d314fa968a3334ba30b784e18d2c590d59c5248120558f7745eef81459d68b9"
+    },
+    {
+      "order": 12,
+      "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
+      "sha256": "077fe91fd0f5cf895fa658dbdcba19339960b83e43b7cdf212535cf71bbcd3d3"
     }
   ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
-  "result_tree": "d3a3c3c28e4c5ab71289664792ca84d65dec1f6f",
+  "result_tree": "feb1d485a00ed41aaac3465be8e5473b74245ea7",
   "licenses": [
     "build/cliproxyapi/LICENSE"
-  ]
+  ],
+  "infra_diagnostics": {
+    "source_url": "https://github.com/wignerStan/infra.git",
+    "source_commit": "bfe03881674ce181d2b624aa0a2fe161eeae63d8",
+    "source_paths": [
+      "go/observability/diagnosticoutput",
+      "go/observability/artifactcapture"
+    ],
+    "snapshot": "third_party/infra",
+    "files": [
+      {
+        "path": "LICENSE-APACHE",
+        "sha256": "8269e060542eedd21b863fa4842e576c208a263692c7e501c8c1543b30cc40ac"
+      },
+      {
+        "path": "LICENSE-MIT",
+        "sha256": "48e0f542d8d6a5b1ac7bcca0c878a1dadf7007af5481298c83da8889f531189b"
+      },
+      {
+        "path": "go/go.mod",
+        "sha256": "73f17e9590cdc12b82a1ea72bfc39282cadd38ba3e72cdfd2b86c2f13b119a8b"
+      },
+      {
+        "path": "go/observability/artifactcapture/collector.go",
+        "sha256": "2512ad585383abcc8ccbf3a5c3a3a4229dddaea1da33d97b42bef24968b5c225"
+      },
+      {
+        "path": "go/observability/artifactcapture/files.go",
+        "sha256": "04787649aadb3e1894ff11e3449c4074de57579c735a18933b78dde318afefcd"
+      },
+      {
+        "path": "go/observability/diagnosticoutput/capture.go",
+        "sha256": "0165610e7d14e0f096406be73f140c877d4764fe45e27c5266badcbd80075364"
+      },
+      {
+        "path": "go/observability/diagnosticoutput/credentials.go",
+        "sha256": "fbe9bfa76f5d041710547ca8b9622b8faf9fd721cc4fabc88c31793123d892b4"
+      }
+    ]
+  }
 }
