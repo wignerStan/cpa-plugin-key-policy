@@ -1,22 +1,170 @@
-From 3e143ea1885a3ddb3fc256cecc40123814bd277f Mon Sep 17 00:00:00 2001
-From: Codex <codex@localhost>
-Date: Sun, 4 Oct 2026 21:03:24 -0700
-Subject: [PATCH] feat(logging): hash metadata and separate lb cookies in trace
- dump
+From fbfe28107bb018503659c9427c544c05456b682e Mon Sep 17 00:00:00 2001
+From: Jacob <24017069+wignerStan@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 22:24:46 -0700
+Subject: [PATCH] feat(logging): separate trace and dump settings and preserve
+ lb cookies
 
 ---
- internal/logging/codex_dump.go                | 207 ++++++++++++++++--
- internal/logging/codex_dump_test.go           |  30 ++-
+ config.example.yaml                           |   4 +-
+ internal/config/sdk_config.go                 |   2 +-
+ internal/logging/codex_dump.go                | 274 +++++++++++++++---
+ internal/logging/codex_dump_test.go           |  90 +++++-
  .../runtime/executor/helps/logging_helpers.go |   1 +
- internal/util/util.go                         |   5 +-
+ internal/util/util.go                         |   2 +-
  .../openai/openai_responses_websocket.go      |   1 +
- 5 files changed, 224 insertions(+), 20 deletions(-)
+ 7 files changed, 331 insertions(+), 43 deletions(-)
 
+diff --git a/config.example.yaml b/config.example.yaml
+index 60b2861..ebf7dbd 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -1087,8 +1087,8 @@ observability:
+     request-log: false
+ 
+     # Explicitly capture exact Codex WS/HTTPS bytes into separate private files (Linux only).
+-    # Requires trace: true; payload bytes are never written to application logs. Individual
+-    # artifacts are limited to 8 MiB and retained artifacts to 64 MiB total. Default is false.
++    # Preserves payload dumps to restore payload and response. Individual artifacts are
++    # limited to 8 MiB and retained artifacts to 64 MiB total. Default is false.
+     codex-dump: false
+ 
+   usage:
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index 4787100..d52f0c7 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -51,7 +51,7 @@ type SDKConfig struct {
+ 	RequestLog bool `yaml:"request-log" json:"request-log"`
+ 
+ 	// CodexDump explicitly authorizes private raw Codex WS/HTTPS capture (Linux only, default off).
+-	// Capture also requires trace logging and is written separately from application logs.
++	// Preserves payload dumps to restore payload and response.
+ 	// Individual artifacts are limited to 8 MiB and retained artifacts to 64 MiB total.
+ 	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
+ 
 diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
-index e7b9eca..1f14d3e 100644
+index e7b9eca..ce403c2 100644
 --- a/internal/logging/codex_dump.go
 +++ b/internal/logging/codex_dump.go
-@@ -336,21 +336,26 @@ func addPayloadView(fields log.Fields, payload []byte) {
+@@ -42,8 +42,8 @@ func IsLinuxOS() bool {
+ }
+ 
+ // ConfigureCodexDump controls explicit raw capture. Capture is available only
+-// on Linux and only while TRACE logging is selected. It never changes the
+-// process-wide logging level.
++// on Linux and preserves payload dumps to restore payload and response.
++// It never changes the process-wide logging level.
+ func ConfigureCodexDump(enabled bool, logDir string) {
+ 	codexDumpConfigMu.Lock()
+ 	codexDumpEnabled = enabled && IsLinuxOS()
+@@ -52,7 +52,7 @@ func ConfigureCodexDump(enabled bool, logDir string) {
+ }
+ 
+ // CodexDumpEnabled reports whether explicit raw capture has been authorized.
+-// TRACE logging is an independent requirement and does not authorize capture.
++// It operates independently of TRACE logging.
+ func CodexDumpEnabled() bool {
+ 	enabled, _ := codexDumpConfiguration()
+ 	return enabled && IsLinuxOS()
+@@ -69,7 +69,7 @@ func codexDumpConfiguration() (bool, string) {
+ // CodexDumpFrame records safe WebSocket boundary metadata and, when explicitly
+ // enabled, stores the exact frame bytes in a separate private artifact.
+ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) {
++	if !CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel) {
+ 		return
+ 	}
+ 
+@@ -91,7 +91,7 @@ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+ // CodexDumpBinaryFrame records binary frame metadata. Raw bytes are never
+ // base64-encoded into the application log.
+ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) || len(payload) == 0 {
++	if (!CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel)) || len(payload) == 0 {
+ 		return
+ 	}
+ 	fields := log.Fields{
+@@ -107,9 +107,9 @@ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+ 
+ // CodexDumpHTTPRequest records safe request metadata and a classified JSON
+ // view. The original body is only written to a separate artifact when capture
+-// was explicitly enabled and TRACE is selected.
++// was explicitly enabled.
+ func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.Header, body []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) {
++	if !CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel) {
+ 		return
+ 	}
+ 	fields := log.Fields{
+@@ -127,9 +127,9 @@ func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.He
+ 
+ // CodexDumpHTTPResponse records safe response metadata and a classified JSON
+ // view. The original body is only written to a separate artifact when capture
+-// was explicitly enabled and TRACE is selected.
++// was explicitly enabled.
+ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) {
++	if !CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel) {
+ 		return
+ 	}
+ 	fields := log.Fields{
+@@ -147,7 +147,7 @@ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Heade
+ // CodexDumpHTTPChunk records chunk metadata. It never puts the raw stream chunk
+ // into the application log.
+ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) || len(chunk) == 0 {
++	if (!CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel)) || len(chunk) == 0 {
+ 		return
+ 	}
+ 	fields := log.Fields{
+@@ -162,23 +162,36 @@ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ 
+ func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, includePayloadView bool) {
+ 	enabled, logDir := codexDumpConfiguration()
++	var capturePath string
++	var captureBytes int
++	var capturePruned int
++	var captureErr error
++
+ 	if enabled && IsLinuxOS() && len(payload) > 0 {
+-		path, pruned, err := captureCodexDumpArtifact(logDir, sessionID, leg, payload)
+-		if err != nil {
++		capturePath, capturePruned, captureErr = captureCodexDumpArtifact(logDir, sessionID, leg, payload)
++		if captureErr != nil {
+ 			log.WithFields(log.Fields{
+ 				"codex_event":    "codex.capture.failed",
+ 				"session_id":     strings.TrimSpace(sessionID),
+ 				"leg":            strings.TrimSpace(leg),
+ 				"size":           len(payload),
+-				"capture_pruned": pruned,
+-			}).WithError(err).Warn("Codex raw capture failed")
++				"capture_pruned": capturePruned,
++			}).WithError(captureErr).Warn("Codex raw capture failed")
+ 		} else {
+-			fields["capture_path"] = path
+-			fields["capture_bytes"] = len(payload)
+-			fields["capture_fidelity"] = "received-exact"
+-			if pruned > 0 {
+-				fields["capture_pruned"] = pruned
+-			}
++			captureBytes = len(payload)
++		}
++	}
++
++	if !log.IsLevelEnabled(log.TraceLevel) {
++		return
++	}
++
++	if capturePath != "" {
++		fields["capture_path"] = capturePath
++		fields["capture_bytes"] = captureBytes
++		fields["capture_fidelity"] = "received-exact"
++		if capturePruned > 0 {
++			fields["capture_pruned"] = capturePruned
+ 		}
+ 	}
+ 	if includePayloadView {
+@@ -336,21 +349,26 @@ func addPayloadView(fields log.Fields, payload []byte) {
  }
  
  func classifiedTraceView(value any) any {
@@ -47,13 +195,21 @@ index e7b9eca..1f14d3e 100644
  		}
  		return redacted
  	default:
-@@ -358,12 +363,54 @@ func classifiedTraceView(value any) any {
+@@ -358,12 +376,68 @@ func classifiedTraceView(value any) any {
  	}
  }
  
 +func isMetadataContainer(name string) bool {
 +	n := strings.ToLower(strings.TrimSpace(name))
-+	return strings.Contains(n, "metadata") || strings.Contains(n, "context") || strings.Contains(n, "session") || strings.Contains(n, "thread")
++	return strings.Contains(n, "metadata") ||
++		strings.Contains(n, "context") ||
++		strings.Contains(n, "session") ||
++		strings.Contains(n, "thread") ||
++		strings.Contains(n, "state") ||
++		strings.Contains(n, "usage") ||
++		strings.Contains(n, "cache") ||
++		strings.Contains(n, "details") ||
++		strings.Contains(n, "decision")
 +}
 +
 +func hashTraceString(s string) string {
@@ -99,11 +255,17 @@ index e7b9eca..1f14d3e 100644
  		"id", "request_id", "correlation_id", "response_id", "conversation_id",
 -		"thread_id", "session_id", "routing_token", "x-codex-turn-state", "x-models-etag":
 +		"thread_id", "session_id", "routing_token", "x-codex-turn-state", "x-models-etag",
-+		"metadata", "client_metadata", "turn_metadata", "headers", "x-codex-turn-metadata":
++		"metadata", "client_metadata", "turn_metadata", "headers", "x-codex-turn-metadata",
++		"finish_reason", "reasoning_effort", "turn_id", "turn_state", "turn_index",
++		"usage", "prompt_tokens", "completion_tokens", "total_tokens",
++		"input_tokens", "output_tokens", "cached_tokens",
++		"cache_creation_input_tokens", "cache_read_input_tokens",
++		"prompt_tokens_details", "completion_tokens_details", "cached_tokens_details",
++		"error", "code", "decision":
  		return true
  	default:
  		return false
-@@ -373,7 +420,7 @@ func publicTracePayloadField(name string) bool {
+@@ -373,7 +447,7 @@ func publicTracePayloadField(name string) bool {
  func sensitiveTraceField(name string) bool {
  	normalized := strings.ToLower(strings.TrimSpace(name))
  	normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
@@ -112,7 +274,7 @@ index e7b9eca..1f14d3e 100644
  		return false
  	}
  	for _, marker := range []string{"authorization", "credential", "password", "secret", "cookie", "apikey", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken", "token"} {
-@@ -384,6 +431,140 @@ func sensitiveTraceField(name string) bool {
+@@ -384,6 +458,140 @@ func sensitiveTraceField(name string) bool {
  	return false
  }
  
@@ -253,7 +415,7 @@ index e7b9eca..1f14d3e 100644
  func addHeaderView(fields log.Fields, headers http.Header) {
  	if len(headers) == 0 {
  		return
-@@ -395,15 +576,13 @@ func addHeaderView(fields log.Fields, headers http.Header) {
+@@ -395,15 +603,13 @@ func addHeaderView(fields log.Fields, headers http.Header) {
  	sort.Strings(keys)
  	parts := make([]string, 0, len(keys))
  	for _, key := range keys {
@@ -276,10 +438,36 @@ index e7b9eca..1f14d3e 100644
  	fields["headers"] = strings.Join(parts, " ")
  }
 diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
-index 719f0f2..8b332f5 100644
+index 719f0f2..f5e2a11 100644
 --- a/internal/logging/codex_dump_test.go
 +++ b/internal/logging/codex_dump_test.go
-@@ -64,8 +64,8 @@ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *te
+@@ -40,7 +40,8 @@ func TestCodexDumpDefaultsOff(t *testing.T) {
+ func TestCodexDumpDoesNotChangeSelectedLogLevel(t *testing.T) {
+ 	output := captureCodexDumpLogs(t)
+ 	log.SetLevel(log.DebugLevel)
+-	ConfigureCodexDump(true, t.TempDir())
++	logDir := t.TempDir()
++	ConfigureCodexDump(true, logDir)
+ 	if log.GetLevel() != log.DebugLevel {
+ 		t.Fatalf("log level = %v, want DebugLevel", log.GetLevel())
+ 	}
+@@ -48,6 +49,15 @@ func TestCodexDumpDoesNotChangeSelectedLogLevel(t *testing.T) {
+ 	if output.Len() != 0 {
+ 		t.Fatalf("debug selection emitted trace diagnostics: %s", output.String())
+ 	}
++	if runtime.GOOS == "linux" {
++		files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++		if err != nil {
++			t.Fatalf("read capture directory: %v", err)
++		}
++		if len(files) != 1 {
++			t.Fatalf("capture files = %d, want 1", len(files))
++		}
++	}
+ }
+ 
+ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *testing.T) {
+@@ -64,8 +74,8 @@ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *te
  			t.Fatalf("trace view exposed classified or unclassified payload data %q: %s", secret, view)
  		}
  	}
@@ -290,7 +478,7 @@ index 719f0f2..8b332f5 100644
  	}
  	if !strings.Contains(view, "opaque-public") || !strings.Contains(view, "Bearer") {
  		t.Fatalf("trace view changed public fields: %s", view)
-@@ -127,24 +127,46 @@ func TestCodexDumpHTTPViewRedactsHeadersAndPayload(t *testing.T) {
+@@ -127,24 +137,94 @@ func TestCodexDumpHTTPViewRedactsHeadersAndPayload(t *testing.T) {
  		"Authorization":    []string{"Bearer header-secret"},
  		"Content-Type":     []string{"application/json"},
  		"X-Correlation-Id": []string{"a%252Fb"},
@@ -317,6 +505,54 @@ index 719f0f2..8b332f5 100644
  	}
  }
  
++func TestCodexTraceAndDumpAreIndependentSettings(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	payload := []byte(`{"type":"response.create","model":"gpt-6-astra","usage":{"prompt_tokens":42}}`)
++
++	// 1. Trace ON, Dump OFF: trace logs decision & metadata, but no dump artifacts on disk.
++	log.SetLevel(log.TraceLevel)
++	logDir1 := t.TempDir()
++	ConfigureCodexDump(false, logDir1)
++	CodexDumpFrame("session-1", "client_in", payload)
++	if output.Len() == 0 {
++		t.Fatal("trace on want log output, got empty")
++	}
++	if !strings.Contains(output.String(), "response.create") || !strings.Contains(output.String(), "gpt-6-astra") {
++		t.Fatalf("trace view missing decision metadata: %s", output.String())
++	}
++	if _, err := os.Stat(filepath.Join(logDir1, "codex-dumps")); !os.IsNotExist(err) {
++		t.Fatalf("dump off should not create codex-dumps directory, stat error = %v", err)
++	}
++
++	if runtime.GOOS != "linux" {
++		return
++	}
++
++	// 2. Trace OFF (InfoLevel), Dump ON: suppresses trace log output, preserves payload dump on disk.
++	output.Reset()
++	log.SetLevel(log.InfoLevel)
++	logDir2 := t.TempDir()
++	ConfigureCodexDump(true, logDir2)
++	CodexDumpFrame("session-2", "client_in", payload)
++	if output.Len() != 0 {
++		t.Fatalf("trace off should not emit trace logs, got: %s", output.String())
++	}
++	files, err := os.ReadDir(filepath.Join(logDir2, "codex-dumps"))
++	if err != nil {
++		t.Fatalf("read capture directory: %v", err)
++	}
++	if len(files) != 1 {
++		t.Fatalf("dump on should preserve 1 artifact, got %d", len(files))
++	}
++	captured, err := os.ReadFile(filepath.Join(logDir2, "codex-dumps", files[0].Name()))
++	if err != nil {
++		t.Fatalf("read capture artifact: %v", err)
++	}
++	if !bytes.Equal(captured, payload) {
++		t.Fatalf("captured payload mismatch: got %q, want %q", captured, payload)
++	}
++}
++
 +func TestCodexDumpMetadataUsesHashNotRedacted(t *testing.T) {
 +	output := captureCodexDumpLogs(t)
 +	log.SetLevel(log.TraceLevel)
@@ -352,31 +588,18 @@ index 328da2f..c147fd6 100644
  		return
  	}
 diff --git a/internal/util/util.go b/internal/util/util.go
-index 385877a..f44445e 100644
+index 385877a..66ae261 100644
 --- a/internal/util/util.go
 +++ b/internal/util/util.go
-@@ -9,6 +9,7 @@ import (
- 	"os"
- 	"path/filepath"
- 	"regexp"
-+	"runtime"
- 	"strings"
- 
- 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-@@ -55,11 +56,11 @@ func SanitizeFunctionName(name string) string {
+@@ -55,7 +55,7 @@ func SanitizeFunctionName(name string) string {
  }
  
  // SetLogLevel configures the logrus log level based on the selected verbosity.
 -// Raw capture authorization is separate and never raises the process log level.
-+// Trace mode or codex-dump (Linux only) sets logrus to TraceLevel.
++// Trace mode sets logrus to TraceLevel.
  func SetLogLevel(cfg *config.Config) {
  	currentLevel := log.GetLevel()
  	var newLevel log.Level
--	if cfg.Trace {
-+	if cfg.Trace || (cfg.CodexDump && runtime.GOOS == "linux") {
- 		newLevel = log.TraceLevel
- 	} else if cfg.Debug {
- 		newLevel = log.DebugLevel
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
 index 6ea5e01..696cede 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
