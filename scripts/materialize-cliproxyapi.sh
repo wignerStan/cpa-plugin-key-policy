@@ -33,6 +33,8 @@ print(value)
 PY
 }
 
+python3 "${repo_root}/scripts/vendor-infra-diagnostics.py" --check
+
 source_url="${CLIPROXYAPI_SOURCE_URL:-$(manifest_value upstream.url)}"
 source_commit="${CLIPROXYAPI_SOURCE_COMMIT:-$(manifest_value upstream.commit)}"
 
@@ -81,7 +83,8 @@ while IFS=$'\t' read -r patch_path expected_sha; do
     printf 'patch checksum mismatch for %s: %s != %s\n' "${patch_path}" "${actual_sha}" "${expected_sha}" >&2
     exit 1
   fi
-  git -C "${work_dir}" am --3way --keep-cr "${patch_file}"
+  git -C "${work_dir}" apply --check "${patch_file}"
+  git -C "${work_dir}" am --keep-cr "${patch_file}"
   patch_count=$((patch_count + 1))
 done < <(python3 - "${manifest}" <<'PY'
 import json
@@ -94,6 +97,16 @@ for entry in sorted(manifest["patches"], key=lambda item: item["order"]):
     print(f'{entry["path"]}\t{entry["sha256"]}')
 PY
 )
+
+# The verified stdlib-only infra snapshot compiles under CPA's internal vendor
+# path; its upstream module identity is retained as provenance, not imported as
+# a dependency that would change unrelated CPA versions through module selection.
+if [[ -e "${work_dir}/internal/infra" ]]; then
+  printf 'upstream/patches unexpectedly provide internal/infra\n' >&2
+  exit 1
+fi
+mkdir -p "${work_dir}/internal/infra"
+cp -R "${repo_root}/third_party/infra/go/observability/." "${work_dir}/internal/infra/"
 
 if [[ -e "${output}" && -L "${output}" ]]; then
   printf 'refusing to replace symlink: %s\n' "${output}" >&2
