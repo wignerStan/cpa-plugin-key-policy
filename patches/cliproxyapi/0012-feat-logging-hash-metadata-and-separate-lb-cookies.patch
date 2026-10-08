@@ -1,18 +1,18 @@
-From fbfe28107bb018503659c9427c544c05456b682e Mon Sep 17 00:00:00 2001
+From 3d4d0737792d2cd580bab3df0e7d66b0b3de1fb5 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
-Date: Sun, 4 Oct 2026 22:24:46 -0700
-Subject: [PATCH] feat(logging): separate trace and dump settings and preserve
- lb cookies
+Date: Thu, 8 Oct 2026 02:41:24 -0700
+Subject: [PATCH] feat(logging): separate trace and dump settings, optimize
+ streaming tps, preserve lb cookies
 
 ---
  config.example.yaml                           |   4 +-
  internal/config/sdk_config.go                 |   2 +-
- internal/logging/codex_dump.go                | 274 +++++++++++++++---
- internal/logging/codex_dump_test.go           |  90 +++++-
+ internal/logging/codex_dump.go                | 372 ++++++++++++++----
+ internal/logging/codex_dump_test.go           |  90 ++++-
  .../runtime/executor/helps/logging_helpers.go |   1 +
  internal/util/util.go                         |   2 +-
  .../openai/openai_responses_websocket.go      |   1 +
- 7 files changed, 331 insertions(+), 43 deletions(-)
+ 7 files changed, 397 insertions(+), 75 deletions(-)
 
 diff --git a/config.example.yaml b/config.example.yaml
 index 60b2861..ebf7dbd 100644
@@ -43,10 +43,45 @@ index 4787100..d52f0c7 100644
  	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
  
 diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
-index e7b9eca..ce403c2 100644
+index e7b9eca..69da3f4 100644
 --- a/internal/logging/codex_dump.go
 +++ b/internal/logging/codex_dump.go
-@@ -42,8 +42,8 @@ func IsLinuxOS() bool {
+@@ -29,21 +29,38 @@ const (
+ )
+ 
+ var (
+-	codexDumpConfigMu sync.RWMutex
+-	codexDumpEnabled  bool
+-	codexDumpLogDir   string
+-	codexDumpWriteMu  sync.Mutex
+-	codexDumpSequence atomic.Uint64
++	codexDumpConfigMu   sync.RWMutex
++	codexDumpEnabled    bool
++	codexDumpLogDir     string
++	codexDumpWriteMu    sync.Mutex
++	codexDumpSequence   atomic.Uint64
++	codexDumpTotalBytes atomic.Int64
++	codexDumpDirInited  atomic.Bool
+ )
+ 
++func isDumpablePayload(eventType string, isChunk bool) bool {
++	if isChunk {
++		return false
++	}
++	if eventType != "" {
++		if strings.HasSuffix(eventType, ".delta") ||
++			eventType == "response.in_progress" ||
++			eventType == "response.output_item.added" ||
++			eventType == "responsesapi.websocket_timing" {
++			return false
++		}
++	}
++	return true
++}
++
+ // IsLinuxOS reports whether the runtime operating system is Linux.
+ func IsLinuxOS() bool {
+ 	return runtime.GOOS == "linux"
  }
  
  // ConfigureCodexDump controls explicit raw capture. Capture is available only
@@ -57,7 +92,7 @@ index e7b9eca..ce403c2 100644
  func ConfigureCodexDump(enabled bool, logDir string) {
  	codexDumpConfigMu.Lock()
  	codexDumpEnabled = enabled && IsLinuxOS()
-@@ -52,7 +52,7 @@ func ConfigureCodexDump(enabled bool, logDir string) {
+@@ -52,7 +69,7 @@ func ConfigureCodexDump(enabled bool, logDir string) {
  }
  
  // CodexDumpEnabled reports whether explicit raw capture has been authorized.
@@ -66,7 +101,7 @@ index e7b9eca..ce403c2 100644
  func CodexDumpEnabled() bool {
  	enabled, _ := codexDumpConfiguration()
  	return enabled && IsLinuxOS()
-@@ -69,7 +69,7 @@ func codexDumpConfiguration() (bool, string) {
+@@ -69,7 +86,7 @@ func codexDumpConfiguration() (bool, string) {
  // CodexDumpFrame records safe WebSocket boundary metadata and, when explicitly
  // enabled, stores the exact frame bytes in a separate private artifact.
  func CodexDumpFrame(sessionID, leg string, payload []byte) {
@@ -75,7 +110,15 @@ index e7b9eca..ce403c2 100644
  		return
  	}
  
-@@ -91,7 +91,7 @@ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+@@ -85,13 +102,14 @@ func CodexDumpFrame(sessionID, leg string, payload []byte) {
+ 		"event_type":  eventType,
+ 		"size":        len(payload),
+ 	}
+-	emitCodexDump(fields, sessionID, leg, payload, true)
++	isDumpable := isDumpablePayload(eventType, false)
++	emitCodexDump(fields, sessionID, leg, payload, isDumpable, isDumpable)
+ }
+ 
  // CodexDumpBinaryFrame records binary frame metadata. Raw bytes are never
  // base64-encoded into the application log.
  func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
@@ -84,7 +127,13 @@ index e7b9eca..ce403c2 100644
  		return
  	}
  	fields := log.Fields{
-@@ -107,9 +107,9 @@ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+@@ -102,14 +120,14 @@ func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+ 		"binary":      true,
+ 		"size":        len(payload),
+ 	}
+-	emitCodexDump(fields, sessionID, leg, payload, false)
++	emitCodexDump(fields, sessionID, leg, payload, false, false)
+ }
  
  // CodexDumpHTTPRequest records safe request metadata and a classified JSON
  // view. The original body is only written to a separate artifact when capture
@@ -96,7 +145,13 @@ index e7b9eca..ce403c2 100644
  		return
  	}
  	fields := log.Fields{
-@@ -127,9 +127,9 @@ func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.He
+@@ -122,14 +140,14 @@ func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.He
+ 		"size":        len(body),
+ 	}
+ 	addHeaderView(fields, headers)
+-	emitCodexDump(fields, sessionID, leg, body, true)
++	emitCodexDump(fields, sessionID, leg, body, len(body) > 0, true)
+ }
  
  // CodexDumpHTTPResponse records safe response metadata and a classified JSON
  // view. The original body is only written to a separate artifact when capture
@@ -108,27 +163,35 @@ index e7b9eca..ce403c2 100644
  		return
  	}
  	fields := log.Fields{
-@@ -147,7 +147,7 @@ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Heade
- // CodexDumpHTTPChunk records chunk metadata. It never puts the raw stream chunk
- // into the application log.
- func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
--	if !log.IsLevelEnabled(log.TraceLevel) || len(chunk) == 0 {
-+	if (!CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel)) || len(chunk) == 0 {
- 		return
+@@ -141,7 +159,7 @@ func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Heade
+ 		"size":        len(body),
  	}
- 	fields := log.Fields{
-@@ -162,23 +162,36 @@ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ 	addHeaderView(fields, headers)
+-	emitCodexDump(fields, sessionID, leg, body, true)
++	emitCodexDump(fields, sessionID, leg, body, len(body) > 0, len(body) > 0)
+ }
  
- func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, includePayloadView bool) {
+ // CodexDumpHTTPChunk records chunk metadata. It never puts the raw stream chunk
+@@ -157,28 +175,41 @@ func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+ 		"leg":         strings.TrimSpace(leg),
+ 		"size":        len(chunk),
+ 	}
+-	emitCodexDump(fields, sessionID, leg, chunk, false)
++	emitCodexDump(fields, sessionID, leg, chunk, false, false)
+ }
+ 
+-func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, includePayloadView bool) {
++func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, isDumpable, includePayloadView bool) {
  	enabled, logDir := codexDumpConfiguration()
+-	if enabled && IsLinuxOS() && len(payload) > 0 {
+-		path, pruned, err := captureCodexDumpArtifact(logDir, sessionID, leg, payload)
+-		if err != nil {
 +	var capturePath string
 +	var captureBytes int
 +	var capturePruned int
 +	var captureErr error
 +
- 	if enabled && IsLinuxOS() && len(payload) > 0 {
--		path, pruned, err := captureCodexDumpArtifact(logDir, sessionID, leg, payload)
--		if err != nil {
++	if enabled && IsLinuxOS() && isDumpable && len(payload) > 0 {
 +		capturePath, capturePruned, captureErr = captureCodexDumpArtifact(logDir, sessionID, leg, payload)
 +		if captureErr != nil {
  			log.WithFields(log.Fields{
@@ -164,7 +227,107 @@ index e7b9eca..ce403c2 100644
  		}
  	}
  	if includePayloadView {
-@@ -336,21 +349,26 @@ func addPayloadView(fields log.Fields, payload []byte) {
+@@ -187,6 +218,28 @@ func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, inc
+ 	log.WithFields(fields).Trace(fields["codex_event"])
+ }
+ 
++func initCodexDumpDir(dir string) {
++	if codexDumpDirInited.Load() {
++		return
++	}
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		return
++	}
++	var total int64
++	for _, entry := range entries {
++		if entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".raw") {
++			continue
++		}
++		info, err := entry.Info()
++		if err == nil && info.Mode().IsRegular() {
++			total += info.Size()
++		}
++	}
++	codexDumpTotalBytes.Store(total)
++	codexDumpDirInited.Store(true)
++}
++
+ func captureCodexDumpArtifact(logDir, sessionID, leg string, payload []byte) (string, int, error) {
+ 	if len(payload) > maxCodexDumpArtifactBytes {
+ 		return "", 0, fmt.Errorf("payload is %d bytes; capture limit is %d bytes", len(payload), maxCodexDumpArtifactBytes)
+@@ -202,19 +255,17 @@ func captureCodexDumpArtifact(logDir, sessionID, leg string, payload []byte) (st
+ 	if err := os.MkdirAll(dir, 0o700); err != nil {
+ 		return "", 0, fmt.Errorf("create private capture directory: %w", err)
+ 	}
+-	info, err := os.Lstat(dir)
+-	if err != nil {
+-		return "", 0, fmt.Errorf("inspect private capture directory: %w", err)
+-	}
+-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+-		return "", 0, errors.New("private capture path is not a directory")
+-	}
+-	if err := os.Chmod(dir, 0o700); err != nil {
+-		return "", 0, fmt.Errorf("restrict private capture directory: %w", err)
+-	}
+-	pruned, err := makeRoomForCodexDump(dir, int64(len(payload)))
+-	if err != nil {
+-		return "", pruned, err
++
++	initCodexDumpDir(dir)
++
++	incoming := int64(len(payload))
++	pruned := 0
++	if codexDumpTotalBytes.Load()+incoming > maxCodexDumpTotalBytes {
++		var pruneErr error
++		pruned, pruneErr = pruneCodexDumpDirectory(dir, incoming)
++		if pruneErr != nil {
++			return "", pruned, pruneErr
++		}
+ 	}
+ 
+ 	sessionDigest := sha256.Sum256([]byte(sessionID))
+@@ -242,18 +293,15 @@ func captureCodexDumpArtifact(logDir, sessionID, leg string, payload []byte) (st
+ 		_, captureErr := fail(fmt.Errorf("write raw capture artifact: %w", io.ErrShortWrite))
+ 		return "", pruned, captureErr
+ 	}
+-	if err := f.Sync(); err != nil {
+-		_, captureErr := fail(fmt.Errorf("sync raw capture artifact: %w", err))
+-		return "", pruned, captureErr
+-	}
+ 	if err := f.Close(); err != nil {
+ 		_ = os.Remove(path)
+ 		return "", pruned, fmt.Errorf("close raw capture artifact: %w", err)
+ 	}
++	codexDumpTotalBytes.Add(incoming)
+ 	return path, pruned, nil
+ }
+ 
+-func makeRoomForCodexDump(dir string, incoming int64) (int, error) {
++func pruneCodexDumpDirectory(dir string, incoming int64) (int, error) {
+ 	if incoming > maxCodexDumpTotalBytes {
+ 		return 0, fmt.Errorf("capture is %d bytes; total capture limit is %d bytes", incoming, maxCodexDumpTotalBytes)
+ 	}
+@@ -280,6 +328,7 @@ func makeRoomForCodexDump(dir string, incoming int64) (int, error) {
+ 		total += info.Size()
+ 	}
+ 	if total+incoming <= maxCodexDumpTotalBytes {
++		codexDumpTotalBytes.Store(total)
+ 		return 0, nil
+ 	}
+ 	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
+@@ -294,9 +343,7 @@ func makeRoomForCodexDump(dir string, incoming int64) (int, error) {
+ 		total -= file.size
+ 		pruned++
+ 	}
+-	if total+incoming > maxCodexDumpTotalBytes {
+-		return pruned, errors.New("private capture size limit could not be enforced")
+-	}
++	codexDumpTotalBytes.Store(total)
+ 	return pruned, nil
+ }
+ 
+@@ -336,21 +383,26 @@ func addPayloadView(fields log.Fields, payload []byte) {
  }
  
  func classifiedTraceView(value any) any {
@@ -195,7 +358,7 @@ index e7b9eca..ce403c2 100644
  		}
  		return redacted
  	default:
-@@ -358,12 +376,68 @@ func classifiedTraceView(value any) any {
+@@ -358,12 +410,68 @@ func classifiedTraceView(value any) any {
  	}
  }
  
@@ -265,7 +428,7 @@ index e7b9eca..ce403c2 100644
  		return true
  	default:
  		return false
-@@ -373,7 +447,7 @@ func publicTracePayloadField(name string) bool {
+@@ -373,7 +481,7 @@ func publicTracePayloadField(name string) bool {
  func sensitiveTraceField(name string) bool {
  	normalized := strings.ToLower(strings.TrimSpace(name))
  	normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
@@ -274,7 +437,7 @@ index e7b9eca..ce403c2 100644
  		return false
  	}
  	for _, marker := range []string{"authorization", "credential", "password", "secret", "cookie", "apikey", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken", "token"} {
-@@ -384,6 +458,140 @@ func sensitiveTraceField(name string) bool {
+@@ -384,6 +492,140 @@ func sensitiveTraceField(name string) bool {
  	return false
  }
  
@@ -415,7 +578,7 @@ index e7b9eca..ce403c2 100644
  func addHeaderView(fields log.Fields, headers http.Header) {
  	if len(headers) == 0 {
  		return
-@@ -395,15 +603,13 @@ func addHeaderView(fields log.Fields, headers http.Header) {
+@@ -395,15 +637,13 @@ func addHeaderView(fields log.Fields, headers http.Header) {
  	sort.Strings(keys)
  	parts := make([]string, 0, len(keys))
  	for _, key := range keys {
