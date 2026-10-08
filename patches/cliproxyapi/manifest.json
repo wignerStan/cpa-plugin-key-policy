@@ -75,8 +75,8 @@
     {
       "order": 12,
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
-      "commit": "3d4d0737792d2cd580bab3df0e7d66b0b3de1fb5",
-      "sha256": "f1e333058a6281f4d52f464ce4bc04b2af4b0fd8293e693a7c9ca7d73ad30734"
+      "commit": "2d9f6a99d2122088fe465775f50954ed354aafd8",
+      "sha256": "c7696994573ff598cbfbe9a28871921f4840b9c6c051cd7ef8cc2813e5b5d3fa"
     }
   ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",
