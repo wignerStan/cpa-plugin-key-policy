@@ -3,13 +3,10 @@ From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 03:20:44 -0700
 Subject: [PATCH 09/11] feat(logging): dump full raw payload in trace log
 
----
- internal/logging/codex_dump.go                | 53 +++++++++++++------
- .../openai/openai_responses_handlers.go       |  3 +-
- 2 files changed, 39 insertions(+), 17 deletions(-)
 
+---
 diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
-index 35cbabad..b02b07f6 100644
+index 35cbaba..b02b07f 100644
 --- a/internal/logging/codex_dump.go
 +++ b/internal/logging/codex_dump.go
 @@ -43,7 +43,7 @@ func CodexDumpEnabled() bool {
@@ -135,17 +132,3 @@ index 35cbabad..b02b07f6 100644
  }
  
  func bytesTrimSpace(b []byte) []byte {
-diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index 8a11a7a4..c3bab254 100644
---- a/sdk/api/handlers/openai/openai_responses_handlers.go
-+++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -137,8 +137,7 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
- 			return true
- 		}
- 
--		// Official Codex client: codex.response.metadata is normalized to response.metadata
--		// in repairFrame; filter rate limits and other codex.* private events only.
-+		// If official Codex client, preserve codex.response.metadata (normalized in repairFrame) but filter rate limits.
- 		if f != nil && f.isCodexClient {
- 			if name == "codex.rate_limits" {
- 				return true

@@ -28,7 +28,7 @@
     {
       "order": 4,
       "path": "patches/cliproxyapi/0004-feat-codex-normalize-response-metadata-and-tag-execution-session-context.patch",
-      "sha256": "24c3a8d064eb9a94f52118daa9f826064869adddb096fc49caf6e1c3bf5cd8b8"
+      "sha256": "7fa4624c3e8d11c5ca87a69d32162fa871870de914e6633f309a91492d7c994f"
     },
     {
       "order": 5,
@@ -38,7 +38,7 @@
     {
       "order": 6,
       "path": "patches/cliproxyapi/0006-feat-codex-add-websocket-and-https-dump-via-logrus-debug-linux-only-default-off.patch",
-      "sha256": "434efc137cce5ea798db89e3ac3cce3a158cf2eb47ffd9ac21a6e6b3a015a027"
+      "sha256": "3676b3d933bc0cfbb826a474ad0a676593e584625617329c52ff3194f55985aa"
     },
     {
       "order": 7,
@@ -53,7 +53,7 @@
     {
       "order": 9,
       "path": "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
-      "sha256": "55bcee3cc7b215bd63ef10d3d1c506714dd33025464668f9b0140a7ee307c16d"
+      "sha256": "de96d74477aaeed8cc4ea14af399832e6ce1c2a7c621691b0fa2e6659e377c7c"
     },
     {
       "order": 10,
@@ -68,11 +68,11 @@
     {
       "order": 12,
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
-      "sha256": "ff37b87c0b84db2e30f957460fdc6cc550b2c63d7042337c1d9ef720c2fee676"
+      "sha256": "6a2e0a2fab4a311afca9087f976ff9af97e655d9a64d0e387703b86df2d9e571"
     }
   ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
-  "result_tree": "c0322902b0729b07a0a2de4caeebc05c74614ba0",
+  "result_tree": "a6b00f249208be69c9b998546388f18826076933",
   "licenses": [
     "build/cliproxyapi/LICENSE"
   ],
