@@ -77,6 +77,12 @@
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
       "sha256": "077fe91fd0f5cf895fa658dbdcba19339960b83e43b7cdf212535cf71bbcd3d3",
       "provenance": "Revised against patch 0011; generated infra source is independently pinned below."
+    },
+    {
+      "order": 13,
+      "path": "patches/cliproxyapi/0013-fix-codex-forward-native-response-interrupt.patch",
+      "sha256": "fc6dacdb890d420aac60413e8d39d4ed45d442f96456e4f91cb8a148e4f26342",
+      "provenance": "Generated against the verified materialized patch 0012 baseline; no separate upstream fork."
     }
   ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",

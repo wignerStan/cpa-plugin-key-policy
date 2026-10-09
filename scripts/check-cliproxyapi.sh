@@ -17,5 +17,7 @@ fi
     ./internal/config \
     ./internal/logging \
     ./internal/pluginhost \
+    ./internal/runtime/executor \
+    ./sdk/api/handlers/openai \
     ./sdk/cliproxy
 )
