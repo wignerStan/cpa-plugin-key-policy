@@ -68,10 +68,15 @@
       "order": 12,
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
       "sha256": "077fe91fd0f5cf895fa658dbdcba19339960b83e43b7cdf212535cf71bbcd3d3"
+    },
+    {
+      "order": 13,
+      "path": "patches/cliproxyapi/0013-fix-codex-forward-native-response-interrupt.patch",
+      "sha256": "fc6dacdb890d420aac60413e8d39d4ed45d442f96456e4f91cb8a148e4f26342"
     }
   ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
-  "result_tree": "feb1d485a00ed41aaac3465be8e5473b74245ea7",
+  "result_tree": "2d777348a8d985cbfcc1022fce38931c23a61fb4",
   "licenses": [
     "build/cliproxyapi/LICENSE"
   ],
