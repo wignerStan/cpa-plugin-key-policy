@@ -32,5 +32,9 @@ No proxy text filter or synthesized completion was added. Such a filter would
 hide or replace provider output and would not repair the summary generator. The
 metadata compatibility fix is independent of these fragments.
 
-Only short reported summary bodies and hashes are retained in the investigation
-report. Credentials, turn-state values, and private raw payloads are excluded.
+The original investigation report retained short summary bodies and SHA-256
+values to compare transport bytes. It omitted turn-state values from that report.
+Those comparison hashes are integrity evidence; they do not classify summary
+text or turn state as secrets. The TRACE policy records those nonsecret values
+plainly, as described in [Codex TRACE metadata](codex-trace-metadata.md).
+Credentials remain hashed. Raw body capture has its own explicit setting.

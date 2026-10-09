@@ -10,6 +10,7 @@ import (
 	"unicode"
 )
 
+// Fingerprint returns an opt-in integrity identifier. It does not classify secrets.
 func Fingerprint(value string) string {
 	return fmt.Sprintf("sha256:%x len=%d", sha256.Sum256([]byte(value)), len(value))
 }
@@ -204,24 +205,27 @@ func (p CredentialPolicy) cookieValue(name string, value any) any {
 	if p.jwtCookies {
 		return fingerprintCookieJWTs(value)
 	}
-	return value
+	return copyCookieValue(value, false)
 }
-func fingerprintCookieJWTs(value any) any {
+func fingerprintCookieJWTs(value any) any { return copyCookieValue(value, true) }
+
+// Copy ordinary cookie values too, so diagnostic views never share mutable trees.
+func copyCookieValue(value any, detectJWT bool) any {
 	switch v := value.(type) {
 	case string:
-		if compactJWT(v) {
+		if detectJWT && compactJWT(v) {
 			return Fingerprint(v)
 		}
 	case []any:
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = fingerprintCookieJWTs(item)
+			out[i] = copyCookieValue(item, detectJWT)
 		}
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for name, item := range v {
-			out[name] = fingerprintCookieJWTs(item)
+			out[name] = copyCookieValue(item, detectJWT)
 		}
 		return out
 	}
@@ -255,12 +259,15 @@ func (p CredentialPolicy) cookieContainer(value any, set bool) any {
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(v))
-		for name, item := range v {
-			out[name] = item
-		}
 		if name, ok := v["name"].(string); ok {
-			if value, exists := v["value"]; exists {
-				out["value"] = p.cookieValue(name, value)
+			if _, exists := v["value"]; exists {
+				for key, item := range v {
+					if key == "value" {
+						out[key] = p.cookieValue(name, item)
+					} else {
+						out[key] = copyCookieValue(item, false)
+					}
+				}
 				return out
 			}
 		}
