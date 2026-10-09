@@ -180,6 +180,11 @@ patch 0013 and works independently of the response-steering flag. See the
 [Codex 0.162 compatibility notes](docs/codex-0162-interrupt.md) for the protocol
 boundaries and verification.
 
+Patch 0004 preserves native Codex metadata and adds a turn-state-only
+compatibility event when needed. See the
+[metadata compatibility notes](docs/codex-response-metadata.md) for captured
+evidence, event ordering, and the model ETag contract.
+
 Homebrew formulas are maintained in the separate
 [wignerStan/homebrew-tap](https://github.com/wignerStan/homebrew-tap) repository.
 Its `cliproxyapi` formula builds this repository's `main` branch.

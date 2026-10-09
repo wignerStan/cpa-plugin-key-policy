@@ -6,6 +6,7 @@ Subject: [PATCH 06/11] feat(codex): add WS and HTTPS dump via logrus debug
 
 Rebased onto official CLIProxyAPI v8.0.22.
 
+
 ---
 diff --git a/config.example.yaml b/config.example.yaml
 index 3d52ef8..8d482b3 100644
@@ -334,10 +335,18 @@ index e1db297..328da2f 100644
  		return
  	}
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index af0c4a0..da4b4b2 100644
+index 63b9c10..b921f27 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -645,6 +645,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+@@ -22,6 +22,7 @@ import (
+ 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+@@ -650,6 +651,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
  	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
  	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
  
@@ -347,7 +356,7 @@ index af0c4a0..da4b4b2 100644
  	if isCodexThreadTitleRequest(c.Request.Header, rawJSON) && !codexThreadTitleSessionEnabled(h) {
  		log.Infof("responses: blocked thread_title session-naming sidecar remote=%s", c.ClientIP())
  		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
-@@ -708,6 +711,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
+@@ -713,6 +717,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
  		return
  	}
  	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -355,7 +364,7 @@ index af0c4a0..da4b4b2 100644
  	_, _ = c.Writer.Write(resp)
  	cliCancel()
  }
-@@ -1145,6 +1149,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
+@@ -1150,6 +1155,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
  		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
  		Flush:                  func() error { return flushResponsesSSE(c.Writer) },
  		WriteChunk: func(chunk []byte) {
@@ -363,6 +372,19 @@ index af0c4a0..da4b4b2 100644
  			framer.WriteChunk(c.Writer, chunk)
  		},
  		ChunkDone: func() bool {
+diff --git a/sdk/api/handlers/openai/openai_responses_metadata_test.go b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+index e3de8a8..96c7b68 100644
+--- a/sdk/api/handlers/openai/openai_responses_metadata_test.go
++++ b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+@@ -208,7 +208,7 @@ func TestCodexMetadataWebsocketWriterPreservesBytesAndTimeline(t *testing.T) {
+ 			return
+ 		}
+ 		defer conn.Close()
+-		result <- writeResponsesWebsocketPayload(newResponsesWebsocketWriter(conn), timeline, original, time.Now())
++		result <- writeResponsesWebsocketPayload(newResponsesWebsocketWriter(conn), timeline, "metadata-session", original, time.Now())
+ 	}))
+ 	defer server.Close()
+ 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
 index a517372..5509960 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
@@ -452,22 +474,31 @@ index 0950fda..562dc7a 100644
  				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
  				sessionID,
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-index 920f1f1..aa5e8b1 100644
+index 85da707..00cde97 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-@@ -277,11 +277,12 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
+@@ -277,7 +277,7 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
  	c.Set(key, []byte(trimmedBody))
  }
  
 -func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, payload []byte, timestamp time.Time) error {
 +func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, sessionID string, payload []byte, timestamp time.Time) error {
- 	payload = requestlogging.NormalizeCodexResponseMetadataDownstream(payload)
+ 	if writer == nil || writer.conn == nil {
+ 		return fmt.Errorf("responses websocket: writer is nil")
+ 	}
+@@ -290,6 +290,7 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
  	if wsTimelineLog != nil {
  		wsTimelineLog.Append("response", payload, timestamp)
  	}
 +	requestlogging.CodexDumpFrame(sessionID, "client_out", payload)
- 	if writer == nil || writer.conn == nil {
- 		return fmt.Errorf("responses websocket: writer is nil")
+ 	if err := writer.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+ 		return err
  	}
--- 
-2.43.0
+@@ -299,6 +300,7 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
+ 	if wsTimelineLog != nil {
+ 		wsTimelineLog.Append("response", supplement, timestamp)
+ 	}
++	requestlogging.CodexDumpFrame(sessionID, "client_out", supplement)
+ 	return writer.conn.WriteMessage(websocket.TextMessage, supplement)
+ }
+ 

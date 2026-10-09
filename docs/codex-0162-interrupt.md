@@ -72,6 +72,11 @@ the existing upstream request capture helper. It carries the diagnostic session
 ID through the upstream's new local-interrupt error and response writers.
 These changes do not alter interrupt routing, credential selection, or payloads.
 
+Patch 0004 preserves `codex.response.metadata` for Codex model ETag updates.
+When that event carries turn state, a separate, minimal `response.metadata`
+event supplies it to the client. See the [metadata compatibility notes](codex-response-metadata.md)
+for the captured evidence and transport contract.
+
 Thread-title configuration now uses `upstream.codex.thread-title-session`.
 Historical OAuth and legacy spellings keep their meaning. The default remains
 allowed. Native model-list gating remains unchanged. Upstream's new

@@ -16,6 +16,7 @@ Rebased onto official CLIProxyAPI v8.0.22.
 
 Rebased onto official CLIProxyAPI v8.0.22.
 
+
 ---
 diff --git a/config.example.yaml b/config.example.yaml
 index 3d3d2a9..e4d6fe9 100644
@@ -987,10 +988,10 @@ index 385877a..66ae261 100644
  	currentLevel := log.GetLevel()
  	var newLevel log.Level
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index ea6dc78..4dcd2a3 100644
+index c57f149..0d2178e 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -1144,6 +1144,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
+@@ -1160,6 +1160,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
  		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
  	}
  
@@ -1084,6 +1085,62 @@ index 0000000..36e1238
 +		t.Fatal("interrupt callback did not run")
 +	}
 +}
+diff --git a/sdk/api/handlers/openai/openai_responses_metadata_test.go b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+index 144ef39..fbaafbf 100644
+--- a/sdk/api/handlers/openai/openai_responses_metadata_test.go
++++ b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+@@ -4,8 +4,12 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"fmt"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"net/http"
+ 	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
+ 	"strings"
+ 	"sync/atomic"
+ 	"testing"
+@@ -203,6 +207,9 @@ func (m *metadataTimeline) Append(_ string, payload []byte, _ time.Time) {
+ }
+ 
+ func TestCodexMetadataWebsocketWriterPreservesBytesAndTimeline(t *testing.T) {
++	logDir := t.TempDir()
++	requestlogging.ConfigureCodexDump(true, logDir)
++	t.Cleanup(func() { requestlogging.ConfigureCodexDump(false, "") })
+ 	original := []byte(" \n{\"type\":\"codex.response.metadata\",\"headers\":{\"x-models-etag\":\"catalog\",\"x-codex-turn-state\":\"opaque\"},\"future\":true}\t ")
+ 	want := [][]byte{original, codexTurnStateMetadataSupplement(original)}
+ 	result := make(chan error, 1)
+@@ -243,4 +250,28 @@ func TestCodexMetadataWebsocketWriterPreservesBytesAndTimeline(t *testing.T) {
+ 			t.Fatalf("timeline %d changed", i)
+ 		}
+ 	}
++
++	if runtime.GOOS == "linux" {
++		requestlogging.FlushAllStreamBuffers()
++		files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(files) != len(want) {
++			t.Fatalf("capture files = %d, want %d", len(files), len(want))
++		}
++		found := make(map[string]bool)
++		for _, file := range files {
++			data, err := os.ReadFile(filepath.Join(logDir, "codex-dumps", file.Name()))
++			if err != nil {
++				t.Fatal(err)
++			}
++			found[string(data)] = true
++		}
++		for _, expected := range want {
++			if !found[string(expected)] {
++				t.Fatalf("actual outgoing frame missing from capture: %q", expected)
++			}
++		}
++	}
+ }
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
 index 5509960..3c47942 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
@@ -1192,5 +1249,3 @@ index 12855ca..5b50b70 100644
  						StatusCode: http.StatusBadRequest,
  						Error:      errInterrupt,
  					})
--- 
-2.43.0

@@ -1,71 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:33:18 -0700
-Subject: [PATCH 04/11] feat(codex): normalize response.metadata and tag
- execution session context
+Subject: [PATCH 04/12] fix(codex): preserve provider metadata and supplement turn state
 
-Rebased onto official CLIProxyAPI v8.0.22.
+Keep native metadata bytes for catalog ETags. Emit a separate minimal canonical
+metadata event only for usable turn state. Preserve execution session context.
 
 ---
-diff --git a/internal/logging/codex_response_metadata.go b/internal/logging/codex_response_metadata.go
-new file mode 100644
-index 0000000..35aeb35
---- /dev/null
-+++ b/internal/logging/codex_response_metadata.go
-@@ -0,0 +1,25 @@
-+package logging
-+
-+import (
-+	"github.com/tidwall/gjson"
-+	"github.com/tidwall/sjson"
-+)
-+
-+const (
-+	codexResponseMetadataType = "codex.response.metadata"
-+	responseMetadataType      = "response.metadata"
-+)
-+
-+// NormalizeCodexResponseMetadataDownstream rewrites upstream codex.response.metadata
-+// to response.metadata so official Codex clients persist x-codex-turn-state. Only
-+// the JSON "type" field changes; headers and other fields are preserved.
-+func NormalizeCodexResponseMetadataDownstream(payload []byte) []byte {
-+	if gjson.GetBytes(payload, "type").String() != codexResponseMetadataType {
-+		return payload
-+	}
-+	out, err := sjson.SetBytes(payload, "type", responseMetadataType)
-+	if err != nil || len(out) == 0 {
-+		return payload
-+	}
-+	return out
-+}
-diff --git a/internal/logging/codex_response_metadata_test.go b/internal/logging/codex_response_metadata_test.go
-new file mode 100644
-index 0000000..893da2c
---- /dev/null
-+++ b/internal/logging/codex_response_metadata_test.go
-@@ -0,0 +1,22 @@
-+package logging
-+
-+import (
-+	"testing"
-+
-+	"github.com/tidwall/gjson"
-+)
-+
-+func TestNormalizeCodexResponseMetadataDownstream(t *testing.T) {
-+	in := []byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"tok-abc","x-models-etag":"W/\"x\""}}`)
-+	out := NormalizeCodexResponseMetadataDownstream(in)
-+	if gjson.GetBytes(out, "type").String() != responseMetadataType {
-+		t.Fatalf("type=%q want %q", gjson.GetBytes(out, "type").String(), responseMetadataType)
-+	}
-+	if gjson.GetBytes(out, "headers.x-codex-turn-state").String() != "tok-abc" {
-+		t.Fatalf("turn-state changed: %s", out)
-+	}
-+	unchanged := NormalizeCodexResponseMetadataDownstream([]byte(`{"type":"response.created"}`))
-+	if string(unchanged) != `{"type":"response.created"}` {
-+		t.Fatalf("unexpected rewrite: %s", unchanged)
-+	}
-+}
 diff --git a/internal/watcher/synthesizer/file.go b/internal/watcher/synthesizer/file.go
 index 36c5091..fb12588 100644
 --- a/internal/watcher/synthesizer/file.go
@@ -125,24 +66,35 @@ index e95fca9..29bdf4c 100644
  
  // WithDisallowFreeAuth returns a child context that requests skipping known free-tier credentials.
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index a07fffc..7bdfe99 100644
+index a07fffc..827d550 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -22,6 +22,7 @@ import (
- 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
- 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
- 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
-+	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
- 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
- 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
- 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-@@ -151,11 +152,18 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+@@ -70,6 +70,7 @@ type responsesSSEFramer struct {
+ 	terminalError        *interfaces.ErrorMessage
+ 	failureEvent         string
+ 	isCodexClient        bool
++	metadataSupplement   []byte
+ 	dataFrames           int
+ 	writeErr             error
+ 	canComplete          func() bool
+@@ -133,6 +134,11 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
+ func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
+ 	if f.writeErr == nil {
+ 		f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(frame))
++		if f.writeErr == nil && len(f.metadataSupplement) > 0 {
++			f.dataFrames++
++			f.writeErr = writeResponsesSSEChunk(w, responsesSSEFrameWithEventAndData("response.metadata", f.metadataSupplement))
++		}
++		f.metadataSupplement = nil
+ 	}
+ }
+ 
+@@ -151,11 +157,17 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
  			return true
  		}
  
 -		// If official Codex client, preserve codex.response.metadata but filter rate limits.
-+		// Official Codex client: codex.response.metadata is normalized to response.metadata
-+		// in repairFrame; filter rate limits and other codex.* private events only.
++		// Official Codex client: retain metadata; filter other codex.* private events.
  		if f != nil && f.isCodexClient {
  			if name == "codex.rate_limits" {
  				return true
@@ -156,20 +108,28 @@ index a07fffc..7bdfe99 100644
  			return false
  		}
  
-@@ -192,6 +200,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+@@ -171,6 +183,7 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+ }
+ 
+ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
++	f.metadataSupplement = nil
+ 	payload, ok := responsesSSEDataPayload(frame)
+ 	streamEvent := responsesSSEEventName(frame)
+ 	if streamEvent != "" && f.shouldFilterPrivateEvent(streamEvent, "") {
+@@ -192,6 +205,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
  		return nil
  	}
  
 +	if f != nil && f.isCodexClient && payloadType == "codex.response.metadata" {
-+		normalized := requestlogging.NormalizeCodexResponseMetadataDownstream(payload)
++		f.metadataSupplement = codexTurnStateMetadataSupplement(payload)
 +		f.dataFrames++
-+		return responsesSSEFrameWithEventAndData("response.metadata", normalized)
++		return frame
 +	}
 +
  	f.dataFrames++
  
  	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
-@@ -333,6 +347,22 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
+@@ -333,6 +352,22 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
  	return out.Bytes()
  }
  
@@ -192,8 +152,31 @@ index a07fffc..7bdfe99 100644
  func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
  	item := gjson.GetBytes(payload, "item")
  	if !item.Exists() || !item.IsObject() || item.Get("type").String() == "" {
+@@ -443,6 +478,10 @@ func responsesSSEHasField(chunk []byte, prefix []byte) bool {
+ }
+ 
+ func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
++	// Keep provider metadata buffered until its delimiter to preserve frame bytes.
++	if bytes.Contains(chunk, []byte("codex.response.metadata")) && responsesSSEEventName(chunk) == "codex.response.metadata" {
++		return false
++	}
+ 	trimmed := bytes.TrimSpace(chunk)
+ 	if len(trimmed) == 0 || responsesSSENeedsMoreData(trimmed) ||
+ 		!responsesSSEHasField(trimmed, []byte("event:")) || !responsesSSEHasField(trimmed, []byte("data:")) {
+@@ -486,6 +525,11 @@ func responsesSSEDataLinesValid(chunk []byte) bool {
+ }
+ 
+ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
++	if bytes.Contains(pending, []byte("codex.response.metadata")) && responsesSSEEventName(pending) == "codex.response.metadata" {
++		if payload, found := responsesSSEDataPayload(pending); found && len(bytes.TrimSpace(payload)) > 0 {
++			return false
++		}
++	}
+ 	if len(pending) == 0 || len(chunk) == 0 {
+ 		return false
+ 	}
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go b/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
-index 58d1349..f63f17e 100644
+index 58d1349..6ed3310 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
 @@ -601,7 +601,7 @@ func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
@@ -211,8 +194,8 @@ index 58d1349..f63f17e 100644
  	got := output.String()
 -	if !strings.Contains(got, "codex.response.metadata") {
 -		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
-+	if strings.Contains(got, "codex.response.metadata") {
-+		t.Fatalf("expected codex.response.metadata normalized away, got: %q", got)
++	if !strings.HasPrefix(got, string(metadataFrame)) {
++		t.Fatalf("original metadata changed: %q", got)
 +	}
 +	if !strings.Contains(got, "event: response.metadata") {
 +		t.Fatalf("expected response.metadata for official Codex client, got: %q", got)
@@ -228,26 +211,356 @@ index 58d1349..f63f17e 100644
  	}
 -	if !strings.Contains(got, "codex.response.metadata") {
 -		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
-+	if strings.Contains(got, "codex.response.metadata") {
-+		t.Fatalf("expected codex.response.metadata normalized away for Codex client, got: %q", got)
++	if !strings.HasPrefix(got, string(metadataFrame)) {
++		t.Fatalf("provider metadata bytes changed, got: %q", got)
 +	}
-+	if !strings.Contains(got, "event: response.metadata") {
-+		t.Fatalf("expected response.metadata for official Codex client, got: %q", got)
++	if strings.Contains(got, "event: response.metadata") {
++		t.Fatalf("unrelated x-turn-state produced a supplement, got: %q", got)
  	}
  	if !strings.Contains(got, "event: response.created") {
  		t.Fatalf("expected response.created in output, got: %q", got)
+diff --git a/sdk/api/handlers/openai/openai_responses_metadata.go b/sdk/api/handlers/openai/openai_responses_metadata.go
+new file mode 100644
+index 0000000..08f869b
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_metadata.go
+@@ -0,0 +1,47 @@
++package openai
++
++import (
++	"encoding/json"
++	"strings"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
++	"github.com/tidwall/gjson"
++)
++
++// codexTurnStateMetadataSupplement leaves provider metadata intact for ETag
++// updates. Only a valid turn-state header needs a second event for persistence.
++func codexTurnStateMetadataSupplement(payload []byte) []byte {
++	if util.GetGJSONBytesNoCopy(payload, "type").Str != "codex.response.metadata" {
++		return nil
++	}
++	if !json.Valid(payload) {
++		return nil
++	}
++	headers := util.GetGJSONBytesNoCopy(payload, "headers")
++	if !headers.IsObject() {
++		return nil
++	}
++	var raw string
++	headers.ForEach(func(key, value gjson.Result) bool {
++		if !strings.EqualFold(key.Str, "x-codex-turn-state") {
++			return true
++		}
++		first := value
++		for first.IsArray() {
++			first = first.Get("0")
++		}
++		if first.Type != gjson.String || strings.TrimSpace(first.Str) == "" {
++			return true
++		}
++		raw = first.Raw
++		return false
++	})
++	if raw == "" {
++		return nil
++	}
++	const prefix = `{"type":"response.metadata","headers":{"x-codex-turn-state":`
++	out := make([]byte, 0, len(prefix)+len(raw)+2)
++	out = append(out, prefix...)
++	out = append(out, raw...)
++	return append(out, '}', '}')
++}
+diff --git a/sdk/api/handlers/openai/openai_responses_metadata_test.go b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+new file mode 100644
+index 0000000..7bcd95e
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+@@ -0,0 +1,246 @@
++package openai
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/tidwall/gjson"
++)
++
++func TestCodexTurnStateMetadataSupplement(t *testing.T) {
++	for _, test := range []struct{ name, payload, state string }{
++		{"etag_and_state", ` {"type":"codex.response.metadata","headers":{"x-models-etag":"W/\"catalog\"","x-codex-turn-state":"opaque"},"future":true} `, `"opaque"`},
++		{"etag_only", `{"type":"codex.response.metadata","headers":{"x-models-etag":"catalog"}}`, ""},
++		{"mixed_case_array", `{"type":"codex.response.metadata","headers":{"X-Codex-Turn-State":[["opaque"],"later"],"x-models-etag":"catalog"}}`, `"opaque"`},
++		{"array_first_only", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":[null,"later"]}}`, ""},
++		{"empty_array", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":[]}}`, ""},
++		{"empty_string", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":""}}`, ""},
++		{"whitespace_only", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"  \t"}}`, ""},
++		{"opaque_spacing", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":" opaque "}}`, `" opaque "`},
++		{"invalid_number", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":42}}`, ""},
++		{"invalid_object", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":{"opaque":true}}}`, ""},
++		{"malformed_json", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"opaque"}`, ""},
++		{"canonical", `{"type":"response.metadata","headers":{"x-codex-turn-state":"opaque"}}`, ""},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			payload := []byte(test.payload)
++			before := bytes.Clone(payload)
++			got := codexTurnStateMetadataSupplement(payload)
++			if !bytes.Equal(payload, before) {
++				t.Fatal("provider bytes changed")
++			}
++			if test.state == "" {
++				if got != nil {
++					t.Fatalf("unexpected extra frame: %s", got)
++				}
++				return
++			}
++			want := `{"type":"response.metadata","headers":{"x-codex-turn-state":` + test.state + `}}`
++			if string(got) != want {
++				t.Fatalf("supplement = %s, want %s", got, want)
++			}
++		})
++	}
++}
++
++func TestCodexMetadataDeltaPathDoesNotAllocate(t *testing.T) {
++	payload := []byte(`{"type":"response.output_text.delta","delta":"codex.response.metadata is ordinary text"}`)
++	if count := testing.AllocsPerRun(1000, func() {
++		if codexTurnStateMetadataSupplement(payload) != nil {
++			t.Fatal("delta produced metadata")
++		}
++	}); count != 0 {
++		t.Fatalf("delta path allocated %g times", count)
++	}
++}
++
++func TestCodexMetadataSSEPreservesOriginalAndSupplementOrder(t *testing.T) {
++	payload := ` {"type":"codex.response.metadata","headers":{"x-models-etag":"catalog","x-codex-turn-state":["opaque"]},"future":true} `
++	original := []byte(": upstream comment\r\nid: 7\r\nevent: codex.response.metadata\r\ndata: " + payload + "\r\n\r\n")
++	canonical := []byte("event: response.metadata\ndata: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"canonical\"},\"future\":true}\n\n")
++	etagOnly := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-models-etag\":\"catalog\"}}\n\n")
++	supplement := responsesSSEFrameWithEventAndData("response.metadata", codexTurnStateMetadataSupplement([]byte(payload)))
++	for _, official := range []bool{false, true} {
++		wire := bytes.Join([][]byte{original, etagOnly, canonical}, nil)
++		want := canonical
++		if official {
++			want = bytes.Join([][]byte{original, supplement, etagOnly, canonical}, nil)
++		}
++		splits := []int{0, len(wire)}
++		// Fragment every metadata data-body position; complete field names are
++		// required by the existing framer field-recovery contract.
++		for split := bytes.Index(original, []byte("data:")) + len("data:"); split <= len(original); split++ {
++			splits = append(splits, split)
++		}
++		for _, split := range splits {
++			var out bytes.Buffer
++			framer := &responsesSSEFramer{isCodexClient: official}
++			framer.WriteChunk(&out, wire[:split])
++			framer.WriteChunk(&out, wire[split:])
++			framer.Flush(&out)
++			if !bytes.Equal(out.Bytes(), want) {
++				t.Fatalf("official=%t split=%d: SSE changed: %q", official, split, out.Bytes())
++			}
++		}
++	}
++}
++
++// Exercise the actual Gin handler, auth manager and native executor over TCP.
++func TestCodexMetadataWebsocketHandlerPreservesOrder(t *testing.T) {
++	frames := [][]byte{
++		[]byte(`{"type":"codex.response.metadata","headers":{"x-models-etag":"W/\"catalog\"","x-codex-turn-state":"opaque"},"future":[1,true]}`),
++		[]byte(`{"type":"codex.response.metadata","headers":{"x-models-etag":"catalog"}}`),
++		[]byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":[null,"later"]}}`),
++		[]byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"canonical"},"future":true}`),
++		[]byte(`{"type":"response.created","response":{"id":"metadata-response","output":[]}}`),
++		[]byte(`{"type":"response.completed","response":{"id":"metadata-response","output":[]}}`),
++	}
++	var connections atomic.Int32
++	result := make(chan error, 1)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		connections.Add(1)
++		result <- func() error {
++			if r.Header.Get("Authorization") != "Bearer metadata-key" {
++				return fmt.Errorf("wrong upstream credential")
++			}
++			c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++			if err != nil {
++				return err
++			}
++			defer func() { _ = c.Close() }()
++			_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
++			if _, _, err := c.ReadMessage(); err != nil {
++				return err
++			}
++			for _, frame := range frames {
++				if err := c.WriteMessage(websocket.TextMessage, frame); err != nil {
++					return err
++				}
++			}
++			_, _, err = c.ReadMessage()
++			if err == nil {
++				return fmt.Errorf("unexpected follow-up request")
++			}
++			return nil
++		}()
++	}))
++	defer upstream.Close()
++	cfg := &config.Config{}
++	manager := coreauth.NewManager(nil, nil, nil)
++	manager.SetConfig(cfg)
++	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
++	const authID = "metadata-order-auth"
++	if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "metadata-key", "base_url": upstream.URL, "websockets": "true"}}); err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "metadata-order-model"}})
++	defer registry.GetGlobalRegistry().UnregisterClient(authID)
++	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	downstream := httptest.NewServer(router)
++	defer downstream.Close()
++	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = c.Close() }()
++	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
++	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"metadata-order-model","input":[]}`)); err != nil {
++		t.Fatal(err)
++	}
++	want := [][]byte{frames[0], codexTurnStateMetadataSupplement(frames[0]), frames[1], frames[2], frames[3]}
++	for i, expected := range want {
++		_, got, err := c.ReadMessage()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, expected) {
++			t.Fatalf("frame %d changed/order wrong: %s", i, got)
++		}
++	}
++	for _, event := range []string{"response.created", "response.completed"} {
++		_, got, err := c.ReadMessage()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if gjson.GetBytes(got, "type").String() != event {
++			t.Fatalf("unexpected extra metadata frame: %s", got)
++		}
++	}
++	_ = c.Close()
++	select {
++	case err := <-result:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("upstream cleanup stalled")
++	}
++	if connections.Load() != 1 {
++		t.Fatal("connection changed")
++	}
++}
++
++type metadataTimeline struct{ frames [][]byte }
++
++func (m *metadataTimeline) Append(_ string, payload []byte, _ time.Time) {
++	m.frames = append(m.frames, bytes.Clone(payload))
++}
++
++func TestCodexMetadataWebsocketWriterPreservesBytesAndTimeline(t *testing.T) {
++	original := []byte(" \n{\"type\":\"codex.response.metadata\",\"headers\":{\"x-models-etag\":\"catalog\",\"x-codex-turn-state\":\"opaque\"},\"future\":true}\t ")
++	want := [][]byte{original, codexTurnStateMetadataSupplement(original)}
++	result := make(chan error, 1)
++	timeline := &metadataTimeline{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++		if err != nil {
++			result <- err
++			return
++		}
++		defer conn.Close()
++		result <- writeResponsesWebsocketPayload(newResponsesWebsocketWriter(conn), timeline, original, time.Now())
++	}))
++	defer server.Close()
++	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
++	for i, expected := range want {
++		_, got, err := conn.ReadMessage()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, expected) {
++			t.Fatalf("frame %d: %q != %q", i, got, expected)
++		}
++	}
++	if err := <-result; err != nil {
++		t.Fatal(err)
++	}
++	if len(timeline.frames) != len(want) {
++		t.Fatalf("timeline frames: %d", len(timeline.frames))
++	}
++	for i, expected := range want {
++		if !bytes.Equal(timeline.frames[i], expected) {
++			t.Fatalf("timeline %d changed", i)
++		}
++	}
++}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-index 77187a7..920f1f1 100644
+index 77187a7..85da707 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-@@ -278,6 +278,7 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
+@@ -278,18 +278,28 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
  }
  
  func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, payload []byte, timestamp time.Time) error {
-+	payload = requestlogging.NormalizeCodexResponseMetadataDownstream(payload)
- 	if wsTimelineLog != nil {
- 		wsTimelineLog.Append("response", payload, timestamp)
+-	if wsTimelineLog != nil {
+-		wsTimelineLog.Append("response", payload, timestamp)
+-	}
+ 	if writer == nil || writer.conn == nil {
+ 		return fmt.Errorf("responses websocket: writer is nil")
  	}
++	supplement := codexTurnStateMetadataSupplement(payload)
+ 	writer.writeMu.Lock()
+ 	defer writer.writeMu.Unlock()
+ 	if writer.closing.Load() {
+ 		return websocket.ErrCloseSent
+ 	}
+-	return writer.conn.WriteMessage(websocket.TextMessage, payload)
++	if wsTimelineLog != nil {
++		wsTimelineLog.Append("response", payload, timestamp)
++	}
++	if err := writer.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
++		return err
++	}
++	if len(supplement) == 0 {
++		return nil
++	}
++	if wsTimelineLog != nil {
++		wsTimelineLog.Append("response", supplement, timestamp)
++	}
++	return writer.conn.WriteMessage(websocket.TextMessage, supplement)
+ }
+ 
+ func appendWebsocketTimelineDisconnect(timeline websocketTimelineAppender, err error, timestamp time.Time) {
 diff --git a/sdk/cliproxy/executor/context.go b/sdk/cliproxy/executor/context.go
 index 30cbebf..7d05c91 100644
 --- a/sdk/cliproxy/executor/context.go
@@ -299,5 +612,3 @@ index 30cbebf..7d05c91 100644
 +		return ""
 +	}
 +}
--- 
-2.43.0
