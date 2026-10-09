@@ -174,9 +174,11 @@ bash scripts/check-cliproxyapi.sh
 
 To update the host, review a newer official CLIProxyAPI commit, rebase the
 ordered patches, refresh their checksums in the manifest, then run the focused
-check script on a dedicated branch. See the
-[Codex 0.162 compatibility notes](docs/codex-0162-interrupt.md) for the required
-duplex setting and protocol boundaries.
+check script on a dedicated branch. The host currently pins official CLIProxyAPI
+v8.0.22 with local patches 0001–0012. Its official interrupt fix replaces local
+patch 0013 and works independently of the response-steering flag. See the
+[Codex 0.162 compatibility notes](docs/codex-0162-interrupt.md) for the protocol
+boundaries and verification.
 
 Homebrew formulas are maintained in the separate
 [wignerStan/homebrew-tap](https://github.com/wignerStan/homebrew-tap) repository.

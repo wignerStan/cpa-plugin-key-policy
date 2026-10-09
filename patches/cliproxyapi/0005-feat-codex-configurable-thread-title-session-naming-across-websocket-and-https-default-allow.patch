@@ -1,46 +1,32 @@
-From 3e6d3330c39541bf9663775b0e113a4f702abfb9 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:37:50 -0700
 Subject: [PATCH 05/11] feat(codex): configurable thread-title session naming
  across WS and HTTPS (default allow)
 
----
- config.example.yaml                           |   3 +
- internal/api/server_options.go                |   1 +
- internal/api/server_sdk_config_test.go        |  38 +++++
- internal/config/config_types.go               |   3 +
- internal/config/sdk_config.go                 |   3 +
- internal/pluginhost/host.go                   |  22 +--
- .../executor/claude_thinking_replay_test.go   |  22 +--
- .../codex_stream_bootstrap_buffering_test.go  |  22 +--
- .../codex_websockets_executor_test.go         |  77 +++++++++++
- .../executor/codex_websockets_request.go      |  18 +++
- .../executor/codex_websockets_stream.go       |   3 +
- .../openai/openai_responses_handlers.go       |  12 ++
- .../openai/openai_responses_websocket.go      |  50 +++++++
- .../openai/openai_responses_websocket_test.go | 130 ++++++++++++++++++
- 14 files changed, 371 insertions(+), 33 deletions(-)
+Rebased onto official CLIProxyAPI v8.0.22.
 
+---
 diff --git a/config.example.yaml b/config.example.yaml
-index 3b8170b1..fdfdb2dc 100644
+index 2273cb9..3d52ef8 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -848,6 +848,9 @@ oauth:
-       # Experimental full-duplex Codex Responses WebSocket steering (default: false).
-       # Keeps one upstream account/model per socket; accepted input is never replayed.
-       response-steering: false
-+      # Allow Codex thread_source=thread_title websocket upgrades and HTTP /v1/responses naming calls.
-+      # Default is true (allowed). Set to false to disable both WS and HTTPS session naming.
-+      thread-title-session: true
-       # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
-       disable-codex-cloaking: false
-       # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+@@ -310,6 +310,9 @@ upstream:
+     # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+     # Keeps one upstream account/model per socket; accepted input is never replayed.
+     response-steering: false
++    # Allow Codex thread_source=thread_title websocket upgrades and HTTP /v1/responses naming calls.
++    # Default is true (allowed). Set to false to disable both WS and HTTPS session naming.
++    thread-title-session: true
+     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
+     disable-codex-cloaking: false
+     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
 diff --git a/internal/api/server_options.go b/internal/api/server_options.go
-index c19dd24c..ae233e2b 100644
+index f5ea197..c280980 100644
 --- a/internal/api/server_options.go
 +++ b/internal/api/server_options.go
-@@ -48,6 +48,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
- 	sdkCfg.CodexOptimizeMultiAgentV2 = cfg.Codex.OptimizeMultiAgentV2
+@@ -47,6 +47,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
+ 	sdkCfg := cfg.SDKConfig
  	sdkCfg.CodexOrphanDelegationCompatibility = cfg.Codex.OrphanDelegationCompatibility
  	sdkCfg.CodexResponseSteering = cfg.Codex.ResponseSteering
 +	sdkCfg.CodexThreadTitleSession = cfg.Codex.ThreadTitleSession
@@ -48,10 +34,10 @@ index c19dd24c..ae233e2b 100644
  		sdkCfg.RequestLog = false
  	}
 diff --git a/internal/api/server_sdk_config_test.go b/internal/api/server_sdk_config_test.go
-index 77e1fa4d..29973ecd 100644
+index 689bc71..02fa61d 100644
 --- a/internal/api/server_sdk_config_test.go
 +++ b/internal/api/server_sdk_config_test.go
-@@ -34,6 +34,44 @@ func TestEffectiveSDKConfigCopiesCodexResponseSteering(t *testing.T) {
+@@ -55,6 +55,44 @@ func TestEffectiveSDKConfigCopiesCodexResponseSteering(t *testing.T) {
  	}
  }
  
@@ -96,11 +82,34 @@ index 77e1fa4d..29973ecd 100644
  func TestCodexResponseSteeringYAMLUnmarshal(t *testing.T) {
  	yamlContent := []byte(`
  codex:
+@@ -72,3 +110,22 @@ codex:
+ 		t.Fatalf("sdkCfg.CodexResponseSteering = false, want true")
+ 	}
+ }
++
++func TestCodexThreadTitleSessionV8Migration(t *testing.T) {
++	for _, body := range []string{
++		"codex: {thread-title-session: false}\n",
++		"oauth: {providers: {codex: {thread-title-session: false}}}\n",
++		"upstream: {codex: {thread-title-session: false}}\n",
++	} {
++		cfg, err := config.ParseConfigBytes([]byte(body))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if cfg.Codex.ThreadTitleSession == nil || *cfg.Codex.ThreadTitleSession {
++			t.Fatalf("thread-title-session lost during v8 migration: %s", body)
++		}
++		if sdk := effectiveSDKConfig(cfg); sdk.CodexThreadTitleSession == nil || *sdk.CodexThreadTitleSession {
++			t.Fatalf("thread-title-session lost in SDK config: %s", body)
++		}
++	}
++}
 diff --git a/internal/config/config_types.go b/internal/config/config_types.go
-index 4d44bf03..1a1acc31 100644
+index c3584aa..39875e7 100644
 --- a/internal/config/config_types.go
 +++ b/internal/config/config_types.go
-@@ -219,6 +219,9 @@ type CodexConfig struct {
+@@ -217,6 +217,9 @@ type CodexConfig struct {
  	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
  	// upstream model/account/socket for their entire lifetime. Default is false.
  	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
@@ -110,8 +119,28 @@ index 4d44bf03..1a1acc31 100644
  }
  
  // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
+diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
+index 96ad44d..215c9b5 100644
+--- a/internal/config/config_v8.go
++++ b/internal/config/config_v8.go
+@@ -38,6 +38,7 @@ var v8SharedPaths = []configPath{
+ 	{"oauth.providers.codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
+ 	{"oauth.providers.codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+ 	{"oauth.providers.codex.response-steering", "upstream.codex.response-steering"},
++	{"oauth.providers.codex.thread-title-session", "upstream.codex.thread-title-session"},
+ 	{"oauth.providers.claude.model-level-cooling", "upstream.claude.model-level-cooling"},
+ 	{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "upstream.claude.disable-cloaking-model-list"},
+ 	{"oauth.providers.claude.disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
+@@ -92,6 +93,7 @@ func buildV8Paths() []configPath {
+ 		{"codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
+ 		{"codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+ 		{"codex.response-steering", "upstream.codex.response-steering"},
++		{"codex.thread-title-session", "upstream.codex.thread-title-session"},
+ 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
+ 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},
+ 		{"disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
-index c7d3ceab..e7529704 100644
+index e350494..3676598 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
 @@ -56,6 +56,9 @@ type SDKConfig struct {
@@ -125,10 +154,10 @@ index c7d3ceab..e7529704 100644
  	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
  
 diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
-index 5a0ff31c..873fe873 100644
+index a074387..6be21b9 100644
 --- a/internal/pluginhost/host.go
 +++ b/internal/pluginhost/host.go
-@@ -1041,17 +1041,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
+@@ -1110,17 +1110,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
  		return capabilityRecord{}, pluginFile{}, false
  	}
  	return capabilityRecord{
@@ -158,7 +187,7 @@ index 5a0ff31c..873fe873 100644
  
  func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
 diff --git a/internal/runtime/executor/claude_thinking_replay_test.go b/internal/runtime/executor/claude_thinking_replay_test.go
-index 553be9c2..7f04adc2 100644
+index 553be9c..7f04adc 100644
 --- a/internal/runtime/executor/claude_thinking_replay_test.go
 +++ b/internal/runtime/executor/claude_thinking_replay_test.go
 @@ -33,17 +33,17 @@ func claudeReplayTestAuth(baseURL string) *cliproxyauth.Auth {
@@ -191,7 +220,7 @@ index 553be9c2..7f04adc2 100644
  
  func TestClaudeThinkingReplayEnabledRequiresCompatClaudeAPIKey(t *testing.T) {
 diff --git a/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go b/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
-index 8b8cba1b..031c7386 100644
+index 8b8cba1..031c738 100644
 --- a/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
 +++ b/internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
 @@ -46,12 +46,12 @@ func codexTestAuth(baseURL string) *cliproxyauth.Auth {
@@ -231,7 +260,7 @@ index 8b8cba1b..031c7386 100644
  
  // drainChunks collects every payload and the first error from a stream result.
 diff --git a/internal/runtime/executor/codex_websockets_executor_test.go b/internal/runtime/executor/codex_websockets_executor_test.go
-index 47e957f3..d972658b 100644
+index 47e957f..d972658 100644
 --- a/internal/runtime/executor/codex_websockets_executor_test.go
 +++ b/internal/runtime/executor/codex_websockets_executor_test.go
 @@ -3290,3 +3290,80 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
@@ -316,7 +345,7 @@ index 47e957f3..d972658b 100644
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_request.go b/internal/runtime/executor/codex_websockets_request.go
-index cd7bd5f3..abc4b711 100644
+index cd7bd5f..abc4b71 100644
 --- a/internal/runtime/executor/codex_websockets_request.go
 +++ b/internal/runtime/executor/codex_websockets_request.go
 @@ -148,6 +148,24 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
@@ -345,10 +374,10 @@ index cd7bd5f3..abc4b711 100644
  	if target == nil {
  		return
 diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
-index b6bcb49e..b8dbf057 100644
+index 3c92424..4e3f9d0 100644
 --- a/internal/runtime/executor/codex_websockets_stream.go
 +++ b/internal/runtime/executor/codex_websockets_stream.go
-@@ -805,6 +805,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+@@ -807,6 +807,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
  	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
  	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, body, opts.Headers)
  	applyModelHeaderOverrides(wsHeaders, baseModel)
@@ -359,18 +388,18 @@ index b6bcb49e..b8dbf057 100644
  	return &codexWebsocketPrepared{
  		from:                 from,
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index d0acfa98..7fca7caa 100644
+index 7bdfe99..af0c4a0 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -24,6 +24,7 @@ import (
- 	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+@@ -26,6 +26,7 @@ import (
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 +	log "github.com/sirupsen/logrus"
  	"github.com/tidwall/gjson"
  	"github.com/tidwall/sjson"
  )
-@@ -628,6 +629,17 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+@@ -644,6 +645,17 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
  	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
  	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
  
@@ -389,12 +418,12 @@ index d0acfa98..7fca7caa 100644
  	streamResult := gjson.GetBytes(rawJSON, "stream")
  	if streamResult.Type == gjson.True {
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
-index 35bfc336..9d401ca2 100644
+index fc08759..a517372 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
-@@ -266,6 +266,12 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
- // It accepts `response.create` and `response.append` requests and streams
- // response events back as JSON websocket text messages.
+@@ -267,6 +267,12 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
+ // response events back as JSON websocket text messages. `response.interrupt`
+ // is forwarded to the current Codex upstream socket without starting a new turn.
  func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 +	if isCodexThreadTitleSession(c.Request.Header) && !codexThreadTitleSessionEnabled(h) {
 +		log.Infof("responses websocket: blocked thread_title session-naming sidecar remote=%s", websocketClientAddress(c))
@@ -405,7 +434,7 @@ index 35bfc336..9d401ca2 100644
  	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
  	if err != nil {
  		return
-@@ -648,6 +654,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -655,6 +661,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
  		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
  
@@ -422,7 +451,7 @@ index 35bfc336..9d401ca2 100644
  		if isPrewarm {
  			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
  				requestJSON = updated
-@@ -885,6 +901,40 @@ func websocketClientAddress(c *gin.Context) string {
+@@ -892,6 +908,40 @@ func websocketClientAddress(c *gin.Context) string {
  	return strings.TrimSpace(c.ClientIP())
  }
  
@@ -464,7 +493,7 @@ index 35bfc336..9d401ca2 100644
  	headers := http.Header{}
  	if req == nil {
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_test.go b/sdk/api/handlers/openai/openai_responses_websocket_test.go
-index adc84445..164a908b 100644
+index adc8444..164a908 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_test.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_test.go
 @@ -7776,3 +7776,133 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
@@ -601,3 +630,5 @@ index adc84445..164a908b 100644
 +		t.Errorf("close websocket: %v", errClose)
 +	}
 +}
+-- 
+2.43.0

@@ -3,7 +3,9 @@
 Codex 0.162 enables immediate interruption by default. A proxy that rejects
 `response.interrupt` can therefore fail when new input steers an active turn.
 The default change is specific to 0.162; the wire message already existed in
-0.161. Patch 0013 forwards it through the existing native Codex duplex executor.
+0.161. CLIProxyAPI v8.0.22 includes the official interrupt implementation.
+The host now pins commit `67465884ca179a8f9098328d03a361b50003fdd7`.
+Local patch 0013 is retired in favor of the upstream fix.
 
 ## Verified client history
 
@@ -33,42 +35,52 @@ The inspected release has no interrupt capability negotiation or dedicated
 recovery for an unsupported-interrupt 400. This is a compatibility gap exposed
 by the default rollout; it does not establish a fault in the client envelope.
 
-## Required native route
+## Official upstream interrupt route
 
-The pinned v8 host enables its existing concurrent reader through the OAuth
-provider setting:
+The [official interrupt fix](https://github.com/router-for-me/CLIProxyAPI/commit/6331b38)
+uses a concurrent downstream reader. It handles `response.interrupt` independently
+of the response-steering flag. Native Codex WebSocket interruption therefore
+requires an active native upstream socket and an eligible credential, with no
+extra response-steering setting. The frame keeps its response ID, mode, and
+extension fields. The upstream supplies the interrupted terminal boundary.
+
+The interrupt writer checks that the bound credential remains enabled. It rejects
+idle sockets and malformed response IDs without opening a connection. The client
+then sends its own continuation on the same socket. The host also includes the
+official local cancellation path for in-flight HTTP upstream responses and the
+Home execution-session credential lookup. These are upstream behaviors.
+
+Response steering remains a separate opt-in feature. Its canonical v8.0.22
+configuration is:
 
 ```yaml
-oauth:
-  providers:
-    codex:
-      response-steering: true
+upstream:
+  codex:
+    response-steering: true
 ```
 
-This is an opt-in setting. Patch 0013 leaves its default unchanged. It also
-requires a native Codex WebSocket credential and route. API-key groups have
-separate provider options and remain subject to the host's existing eligibility
-rules. Legacy configuration uses `codex.response-steering` before migration.
-Plugin executor and HTTP-only routes do not gain active-response interruption
-from this patch. A serial handler cannot interrupt an active response merely by
-accepting the event type in its normalizer.
+Historical `oauth.providers.codex.response-steering` and
+`codex.response-steering` spellings migrate to that canonical path. The upgrade
+leaves configuration defaults unchanged.
 
-## Patch behavior
+## Local patches and diagnostics
 
-Interrupt and the existing steer control share the native control writer. Each
-write checks that the socket's bound credential remains enabled. It keeps the
-original payload, connection, credential, logging path, and native write-error
-handling. Interrupt does not enter create translation, history reconstruction,
-or automatic steer-successor state.
+The ordered patch set retains patches 0001–0012. Patch 0012 preserves private,
+bounded diagnostic capture through the new reader and interrupt writer. It
+captures the original downstream frame once, including binary frames, and uses
+the existing upstream request capture helper. It carries the diagnostic session
+ID through the upstream's new local-interrupt error and response writers.
+These changes do not alter interrupt routing, credential selection, or payloads.
 
-The upstream owns acknowledgements, discarded-item events, terminal reasons,
-and continuation history. The patch does not synthesize responses, map interrupt
-to steer, select another credential, or replay an accepted turn. It adds no new
-transport, pool, plugin callback, or payload parse tree.
+Thread-title configuration now uses `upstream.codex.thread-title-session`.
+Historical OAuth and legacy spellings keep their meaning. The default remains
+allowed. Native model-list gating remains unchanged. Upstream's new
+`GET /v1/models/*model` detail route retains its official behavior; this upgrade
+does not extend the existing list gate to that new route.
 
-The patch is stored in the ordered, checksummed CLIProxyAPI patch set. The ignored
-materialized source is a build result. The infra translator separately pins SDK
-v7.3.20; this host patch uses the v8 commit in its manifest.
+The ignored materialized source is a build result. The infra translator's separate
+SDK v7.3.20 pin is unchanged. The host uses official v8.0.22 plus the local ordered,
+checksummed patches, with no parallel source fork.
 
 ## Temporary client workaround
 
@@ -80,20 +92,22 @@ feature default:
 instant_interrupt = false
 ```
 
-It disables immediate preemption. No live configuration or deployed service was
-changed during this work.
+It disables immediate preemption. This remains a client fallback when the native
+WebSocket route is unavailable.
 
 ## Verification
 
-The native executor tests passed, including the active-response interrupt
-lifecycle and revoked-credential rejection. The full Gin/auth/executor test
-passed with the exact v8 OAuth configuration above. It checks exact control
-bytes, upstream acknowledgement and discarded-item event order, the incomplete
-boundary with terminal usage, and an explicit client continuation on one socket.
-The handler retains its existing normalization of missing usage detail fields.
+The ordered 12-patch materialization check and CPA module tests passed. Official
+interrupt tests passed for steering disabled and enabled, exact control bytes,
+continuation on one socket, malformed and idle controls, disabled credentials,
+HTTP cancellation, and Home session credentials. The diagnostic regression test
+checks matching session attribution and interrupt visibility with request logging.
+Native interrupt, Home, diagnostic, duplex, and steering race checks passed.
 
-All existing duplex executor and steering handler tests passed. Race checks
-passed for the duplex executor tests and both full-route integration tests.
-The ordered manifest regenerated successfully with 13 patches, and
-`scripts/check-cliproxyapi.sh` passed. The native server compiled successfully.
-The check script now includes the executor and downstream OpenAI handler packages.
+The complete generated upstream suite failed only its multicast discovery
+integration test. Unmodified official v8.0.22 reproduced that failure in this
+environment. The suite passed with only that multicast test excluded.
+The broad interrupt race run also hit the official HTTP cancellation test's
+immediate assertion after the incomplete frame. A repeated run on unmodified
+upstream reproduced this timing failure. Neither run reported a data race.
+Upstream production behavior and those tests remain unchanged.

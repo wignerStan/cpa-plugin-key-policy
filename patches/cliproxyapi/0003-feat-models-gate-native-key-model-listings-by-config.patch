@@ -1,26 +1,19 @@
-From 8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 05:54:58 +0800
 Subject: [PATCH 03/11] feat(models): gate native key model listings by config
 
----
- config.example.yaml                       |  2 +
- internal/api/server_middleware.go         | 23 +++++++++++
- internal/api/server_origin_models_test.go | 49 +++++++++++++++++++++++
- internal/api/server_routes.go             |  4 +-
- internal/api/server_test.go               |  3 +-
- internal/config/config_v8.go              |  1 +
- internal/config/origin_models_test.go     | 29 ++++++++++++++
- internal/config/sdk_config.go             |  7 ++++
- 8 files changed, 115 insertions(+), 3 deletions(-)
- create mode 100644 internal/api/server_origin_models_test.go
- create mode 100644 internal/config/origin_models_test.go
 
+Rebase model-list route and v8 config mapping onto official v8.0.22.
+
+Rebased onto official CLIProxyAPI v8.0.22.
+
+---
 diff --git a/config.example.yaml b/config.example.yaml
-index 0b1d7f87..3b8170b1 100644
+index 1e29f43..2273cb9 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -88,6 +88,8 @@ access:
+@@ -104,6 +104,8 @@ access:
      - "your-api-key-1"
      - "your-api-key-2"
      - "your-api-key-3"
@@ -30,7 +23,7 @@ index 0b1d7f87..3b8170b1 100644
  # Optional credential concurrency and observation contracts.
  
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
-index 3e75beda..6cdb6b9c 100644
+index 3e75bed..6cdb6b9 100644
 --- a/internal/api/server_middleware.go
 +++ b/internal/api/server_middleware.go
 @@ -152,6 +152,29 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
@@ -65,7 +58,7 @@ index 3e75beda..6cdb6b9c 100644
  }
 diff --git a/internal/api/server_origin_models_test.go b/internal/api/server_origin_models_test.go
 new file mode 100644
-index 00000000..b5960233
+index 0000000..b596023
 --- /dev/null
 +++ b/internal/api/server_origin_models_test.go
 @@ -0,0 +1,49 @@
@@ -119,7 +112,7 @@ index 00000000..b5960233
 +	}
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index 546ca731..cfa1d41c 100644
+index 8081670..dc595f5 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
 @@ -63,7 +63,7 @@ func (s *Server) setupRoutes() {
@@ -128,10 +121,10 @@ index 546ca731..cfa1d41c 100644
  	{
 -		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 +		v1.GET("/models", s.originModelsEndpointMiddleware(), s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
- 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
- 		v1.POST("/completions", openaiHandlers.Completions)
- 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
-@@ -122,7 +122,7 @@ func (s *Server) setupRoutes() {
+ 		v1.GET("/models/*model", func(c *gin.Context) {
+ 			c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
+ 			s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
+@@ -128,7 +128,7 @@ func (s *Server) setupRoutes() {
  	v1beta := s.engine.Group("/v1beta")
  	v1beta.Use(AuthMiddleware(s.accessManager))
  	{
@@ -141,10 +134,9 @@ index 546ca731..cfa1d41c 100644
  		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
  		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 diff --git a/internal/api/server_test.go b/internal/api/server_test.go
-index a089f283..45f4339b 100644
 --- a/internal/api/server_test.go
 +++ b/internal/api/server_test.go
-@@ -610,7 +610,8 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
+@@ -614,7 +614,8 @@
  	t.Helper()
  	cfg := &proxyconfig.Config{
  		SDKConfig: sdkconfig.SDKConfig{
@@ -154,12 +146,21 @@ index a089f283..45f4339b 100644
  		},
  	}
  	return newTestServerWithConfig(t, cfg, opts...)
+@@ -2166,7 +2167,7 @@
+ 		modelRegistry.UnregisterClient(clientID)
+ 	})
+ 
+-	cfg := &proxyconfig.Config{SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}}}
++	cfg := &proxyconfig.Config{SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}, AllowOriginModelsEndpoint: true}}
+ 	cfg.Client.Codex.EnableApplyPatch = true
+ 	server := newTestServerWithConfig(t, cfg)
+ 	server.handlers.AuthManager.RegisterExecutor(executor.NewCodexAutoExecutor(&proxyconfig.Config{}))
 diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
-index 388ce34b..5ba3ea60 100644
+index 02781ab..96ad44d 100644
 --- a/internal/config/config_v8.go
 +++ b/internal/config/config_v8.go
-@@ -33,6 +33,7 @@ func buildV8Paths() []configPath {
- 		{"host", "server.host"}, {"port", "server.port"}, {"trusted-proxies", "server.trusted-proxies"},
+@@ -74,6 +74,7 @@ func buildV8Paths() []configPath {
+ 		{"github-token", "server.github-token"},
  		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
  		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
 +		{"allow-origin-models-endpoint", "access.allow-origin-models-endpoint"},
@@ -168,7 +169,7 @@ index 388ce34b..5ba3ea60 100644
  		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
 diff --git a/internal/config/origin_models_test.go b/internal/config/origin_models_test.go
 new file mode 100644
-index 00000000..892aeee7
+index 0000000..892aeee
 --- /dev/null
 +++ b/internal/config/origin_models_test.go
 @@ -0,0 +1,29 @@
@@ -202,7 +203,7 @@ index 00000000..892aeee7
 +	}
 +}
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
-index b2f8db65..c7d3ceab 100644
+index ccac615..e350494 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
 @@ -62,6 +62,13 @@ type SDKConfig struct {
@@ -219,3 +220,5 @@ index b2f8db65..c7d3ceab 100644
  	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
  	// Default is false (disabled).
  	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
+-- 
+2.43.0
