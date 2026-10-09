@@ -1,32 +1,17 @@
-From 7a24ee3b701ba3a7f787957b00c0e615d2a549b3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:42:19 -0700
 Subject: [PATCH 06/11] feat(codex): add WS and HTTPS dump via logrus debug
  (linux only, default off)
 
----
- config.example.yaml                           |   4 +
- internal/api/server.go                        |   1 +
- internal/api/server_reload.go                 |   4 +
- internal/config/config_v8.go                  |   1 +
- internal/config/sdk_config.go                 |   3 +
- internal/logging/codex_dump.go                | 130 ++++++++++++++++++
- internal/logging/codex_dump_test.go           |  62 +++++++++
- .../runtime/executor/helps/logging_helpers.go |   8 ++
- .../openai/openai_responses_handlers.go       |   5 +
- .../openai/openai_responses_websocket.go      |  17 ++-
- .../openai_responses_websocket_forward.go     |   6 +-
- .../openai_responses_websocket_prewarm.go     |   2 +-
- .../openai_responses_websocket_timeline.go    |   3 +-
- 13 files changed, 232 insertions(+), 14 deletions(-)
- create mode 100644 internal/logging/codex_dump.go
- create mode 100644 internal/logging/codex_dump_test.go
+Rebased onto official CLIProxyAPI v8.0.22.
 
+---
 diff --git a/config.example.yaml b/config.example.yaml
-index fdfdb2dc..9ee203cb 100644
+index 3d52ef8..8d482b3 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -1083,6 +1083,10 @@ observability:
+@@ -1109,6 +1109,10 @@ observability:
      # Record proxy request/response logs. Management requests are excluded.
      request-log: false
  
@@ -38,10 +23,10 @@ index fdfdb2dc..9ee203cb 100644
      # When false, disable in-memory usage statistics aggregation
      usage-statistics-enabled: false
 diff --git a/internal/api/server.go b/internal/api/server.go
-index 3cd910b8..6a7b2c03 100644
+index 22c517b..0fbf18c 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
-@@ -217,6 +217,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+@@ -219,6 +219,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
  	}
  	logDir := logging.ResolveLogDirectory(cfg)
  	s.mgmt.SetLogDirectory(logDir)
@@ -50,10 +35,10 @@ index 3cd910b8..6a7b2c03 100644
  		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
  	}
 diff --git a/internal/api/server_reload.go b/internal/api/server_reload.go
-index 64b7ee9b..951d737a 100644
+index a8c55a9..6d289db 100644
 --- a/internal/api/server_reload.go
 +++ b/internal/api/server_reload.go
-@@ -86,6 +86,10 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+@@ -87,6 +87,10 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
  		}
  	}
  
@@ -65,10 +50,10 @@ index 64b7ee9b..951d737a 100644
  		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
  	}
 diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
-index 5ba3ea60..b9ffa905 100644
+index 215c9b5..bf90fcd 100644
 --- a/internal/config/config_v8.go
 +++ b/internal/config/config_v8.go
-@@ -58,6 +58,7 @@ func buildV8Paths() []configPath {
+@@ -107,6 +107,7 @@ func buildV8Paths() []configPath {
  		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
  		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
  		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
@@ -77,22 +62,22 @@ index 5ba3ea60..b9ffa905 100644
  		{"usage-statistics-enabled", "observability.usage.usage-statistics-enabled"},
  		{"redis-usage-queue-retention-seconds", "observability.usage.redis-usage-queue-retention-seconds"}, {"pprof", "observability.pprof"},
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
-index e7529704..fcba1a4e 100644
+index 3676598..ebe5352 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
-@@ -50,6 +50,9 @@ type SDKConfig struct {
+@@ -53,6 +53,9 @@ type SDKConfig struct {
  	// RequestLog enables or disables detailed request logging functionality.
  	RequestLog bool `yaml:"request-log" json:"request-log"`
  
 +	// CodexDump enables Codex WS/HTTPS frame and message dump to logrus debug (linux only, default off).
 +	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
 +
- 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
- 	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
+ 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
+ 	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
  
 diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 new file mode 100644
-index 00000000..c5d39049
+index 0000000..c5d3904
 --- /dev/null
 +++ b/internal/logging/codex_dump.go
 @@ -0,0 +1,130 @@
@@ -228,7 +213,7 @@ index 00000000..c5d39049
 +}
 diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
 new file mode 100644
-index 00000000..09660975
+index 0000000..0966097
 --- /dev/null
 +++ b/internal/logging/codex_dump_test.go
 @@ -0,0 +1,62 @@
@@ -295,7 +280,7 @@ index 00000000..09660975
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
-index e1db2978..328da2fb 100644
+index e1db297..328da2f 100644
 --- a/internal/runtime/executor/helps/logging_helpers.go
 +++ b/internal/runtime/executor/helps/logging_helpers.go
 @@ -15,6 +15,7 @@ import (
@@ -349,10 +334,10 @@ index e1db2978..328da2fb 100644
  		return
  	}
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index 7fca7caa..8a11a7a4 100644
+index af0c4a0..da4b4b2 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -629,6 +629,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+@@ -645,6 +645,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
  	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
  	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
  
@@ -362,7 +347,7 @@ index 7fca7caa..8a11a7a4 100644
  	if isCodexThreadTitleRequest(c.Request.Header, rawJSON) && !codexThreadTitleSessionEnabled(h) {
  		log.Infof("responses: blocked thread_title session-naming sidecar remote=%s", c.ClientIP())
  		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
-@@ -718,6 +721,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
+@@ -708,6 +711,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
  		return
  	}
  	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -370,16 +355,16 @@ index 7fca7caa..8a11a7a4 100644
  	_, _ = c.Writer.Write(resp)
  	cliCancel()
  }
-@@ -1092,6 +1096,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
- 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+@@ -1145,6 +1149,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
  		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
+ 		Flush:                  func() error { return flushResponsesSSE(c.Writer) },
  		WriteChunk: func(chunk []byte) {
 +			requestlogging.CodexDumpHTTPChunk(handlers.ExecutionSessionID(c.Request.Context()), "client_out", chunk)
  			framer.WriteChunk(c.Writer, chunk)
  		},
- 		ChunkError: func() *interfaces.ErrorMessage {
+ 		ChunkDone: func() bool {
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
-index 9d401ca2..6ea5e018 100644
+index a517372..5509960 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
 @@ -16,6 +16,7 @@ import (
@@ -390,7 +375,7 @@ index 9d401ca2..6ea5e018 100644
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
  	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-@@ -438,13 +439,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -445,13 +446,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
  			continue
  		}
@@ -409,7 +394,7 @@ index 9d401ca2..6ea5e018 100644
  		wsTimelineLog.BeginRequest()
  		wsTimelineLog.Append("request", payload, time.Now())
  
-@@ -631,7 +630,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -638,7 +637,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		if errMsg != nil {
  			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
  			markAPIResponseTimestamp(c)
@@ -418,7 +403,7 @@ index 9d401ca2..6ea5e018 100644
  			log.Infof(
  				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
  				passthroughSessionID,
-@@ -660,7 +659,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -667,7 +666,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  				StatusCode: http.StatusForbidden,
  				Error:      fmt.Errorf("thread_title session is disabled"),
  			}
@@ -428,10 +413,10 @@ index 9d401ca2..6ea5e018 100644
  		}
  
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_forward.go b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
-index 4bcdfd68..7efc3b29 100644
+index a6a6084..18cc459 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_forward.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
-@@ -218,7 +218,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+@@ -229,7 +229,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
  				// 	websocketPayloadEventType(payloads[i]),
  				// 	websocketPayloadPreview(payloads[i]),
  				// )
@@ -440,7 +425,7 @@ index 4bcdfd68..7efc3b29 100644
  					log.Warnf(
  						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
  						sessionID,
-@@ -654,10 +654,10 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
+@@ -696,10 +696,10 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
  	return payload, nil
  }
  
@@ -454,7 +439,7 @@ index 4bcdfd68..7efc3b29 100644
 +	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payload, time.Now())
  }
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go b/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
-index 0950fda2..562dc7a6 100644
+index 0950fda..562dc7a 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
 @@ -45,7 +45,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
@@ -467,7 +452,7 @@ index 0950fda2..562dc7a6 100644
  				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
  				sessionID,
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-index 920f1f19..aa5e8b12 100644
+index 920f1f1..aa5e8b1 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 @@ -277,11 +277,12 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
@@ -484,3 +469,5 @@ index 920f1f19..aa5e8b12 100644
  	if writer == nil || writer.conn == nil {
  		return fmt.Errorf("responses websocket: writer is nil")
  	}
+-- 
+2.43.0

@@ -11,12 +11,17 @@ Reconfiguration and shutdown drain independently owned capture generations.
 The materializer supplies the byte-identical pinned infra source under
 internal/infra; no upstream module graph or unrelated dependency changes are
 introduced. Raw capture remains explicit opt-in independently of trace settings.
+Rebased onto official CLIProxyAPI v8.0.22.
+Rebased onto official CLIProxyAPI v8.0.22.
+
+Rebased onto official CLIProxyAPI v8.0.22.
 
 ---
 diff --git a/config.example.yaml b/config.example.yaml
+index 3d3d2a9..e4d6fe9 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -1087,8 +1087,9 @@
+@@ -1113,8 +1113,9 @@ observability:
      request-log: false
  
      # Explicitly capture exact Codex WS/HTTPS bytes into separate private files (Linux only).
@@ -28,11 +33,11 @@ diff --git a/config.example.yaml b/config.example.yaml
      codex-dump: false
  
    usage:
-
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index e3bca96..d33321b 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
-@@ -51,7 +51,7 @@
+@@ -54,7 +54,7 @@ type SDKConfig struct {
  	RequestLog bool `yaml:"request-log" json:"request-log"`
  
  	// CodexDump explicitly authorizes private raw Codex WS/HTTPS capture (Linux only, default off).
@@ -41,11 +46,11 @@ diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
  	// Individual artifacts are limited to 8 MiB and retained artifacts to 64 MiB total.
  	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
  
-
 diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
+index e7b9eca..f0894b5 100644
 --- a/internal/logging/codex_dump.go
 +++ b/internal/logging/codex_dump.go
-@@ -2,14 +2,10 @@
+@@ -2,14 +2,10 @@ package logging
  
  import (
  	"bytes"
@@ -60,7 +65,7 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
  	"path/filepath"
  	"runtime"
  	"sort"
-@@ -18,6 +14,8 @@
+@@ -18,6 +14,8 @@ import (
  	"sync/atomic"
  	"time"
  
@@ -69,7 +74,7 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
  	log "github.com/sirupsen/logrus"
  	"github.com/tidwall/gjson"
  )
-@@ -26,279 +24,170 @@
+@@ -26,280 +24,171 @@ const (
  	maxCodexDumpArtifactBytes = 8 << 20
  	maxCodexDumpTotalBytes    = 64 << 20
  	maxCodexDumpViewBytes     = 8 << 10
@@ -88,138 +93,52 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -func IsLinuxOS() bool {
 -	return runtime.GOOS == "linux"
 -}
--
--// ConfigureCodexDump controls explicit raw capture. Capture is available only
--// on Linux and only while TRACE logging is selected. It never changes the
--// process-wide logging level.
 +// Configuration publication is atomic on the request path. Only configuration
 +// changes and shutdown wait for the explicitly opened background owner.
 +var codexDumpOwner atomic.Pointer[codexCaptureOwner]
 +var codexDumpLifecycle sync.Mutex
 +var codexDumpSequence atomic.Uint64
 +var codexCredentials = diagnosticoutput.DefaultPolicy().WithCredentialField("credential").WithCredentialField("token").WithCredentialField("secret").WithCredentialField("session_token").WithSessionCookie("__Secure-session")
-+
-+type codexCaptureOwner struct {
-+	logDir    string
-+	collector *artifactcapture.Collector
-+}
-+type codexArtifactWriter struct {
-+	directory *artifactcapture.DirectoryWriter
-+}
-+
-+func (w codexArtifactWriter) WriteArtifact(name string, payload []byte) error {
-+	name = fmt.Sprintf("codex-%d-%s-%d.raw", time.Now().UTC().UnixNano(), name, codexDumpSequence.Add(1))
-+	return w.directory.WriteArtifact(name, payload)
-+}
-+
-+func IsLinuxOS() bool { return runtime.GOOS == "linux" }
-+
-+// ConfigureCodexDump is explicit raw-byte consent, independent of trace verbosity.
-+// Reconfiguration withdraws the old generation before draining it; identical
-+// session IDs in different directories/generations never share a buffer.
- func ConfigureCodexDump(enabled bool, logDir string) {
+ 
+-// ConfigureCodexDump controls explicit raw capture. Capture is available only
+-// on Linux and only while TRACE logging is selected. It never changes the
+-// process-wide logging level.
+-func ConfigureCodexDump(enabled bool, logDir string) {
 -	codexDumpConfigMu.Lock()
 -	codexDumpEnabled = enabled && IsLinuxOS()
 -	codexDumpLogDir = strings.TrimSpace(logDir)
 -	codexDumpConfigMu.Unlock()
--}
++type codexCaptureOwner struct {
++	logDir    string
++	collector *artifactcapture.Collector
+ }
 -
 -// CodexDumpEnabled reports whether explicit raw capture has been authorized.
 -// TRACE logging is an independent requirement and does not authorize capture.
 -func CodexDumpEnabled() bool {
 -	enabled, _ := codexDumpConfiguration()
 -	return enabled && IsLinuxOS()
--}
--
++type codexArtifactWriter struct {
++	directory *artifactcapture.DirectoryWriter
+ }
+ 
 -func codexDumpConfiguration() (bool, string) {
 -	codexDumpConfigMu.RLock()
 -	enabled := codexDumpEnabled
 -	logDir := codexDumpLogDir
 -	codexDumpConfigMu.RUnlock()
 -	return enabled, logDir
--}
--
++func (w codexArtifactWriter) WriteArtifact(name string, payload []byte) error {
++	name = fmt.Sprintf("codex-%d-%s-%d.raw", time.Now().UTC().UnixNano(), name, codexDumpSequence.Add(1))
++	return w.directory.WriteArtifact(name, payload)
+ }
+ 
 -// CodexDumpFrame records safe WebSocket boundary metadata and, when explicitly
 -// enabled, stores the exact frame bytes in a separate private artifact.
-+	codexDumpLifecycle.Lock()
-+	defer codexDumpLifecycle.Unlock()
-+	logDir = strings.TrimSpace(logDir)
-+	if old := codexDumpOwner.Load(); old != nil && enabled && IsLinuxOS() && old.logDir == logDir && old.collector.Dropped() == 0 && old.collector.Failures() == 0 {
-+		return
-+	}
-+	old := codexDumpOwner.Swap(nil)
-+	if old != nil {
-+		_ = old.collector.Close()
-+	}
-+	if !enabled || !IsLinuxOS() || logDir == "" {
-+		return
-+	}
-+	directory, err := filepath.Abs(filepath.Join(logDir, "codex-dumps"))
-+	if err != nil {
-+		return
-+	}
-+	writer, err := artifactcapture.NewDirectoryWriter(directory, "", maxCodexDumpTotalBytes)
-+	if err != nil {
-+		log.Warn("Codex diagnostic capture initialization failed")
-+		return
-+	}
-+	collector, err := artifactcapture.NewCollector(codexArtifactWriter{writer}, artifactcapture.Config{
-+		QueueJobs: 256, MaxBytes: 32 << 20, MaxStreams: 128,
-+		MaxArtifactBytes: maxCodexDumpArtifactBytes, IdleTimeout: streamFlushIdleTime,
-+	})
-+	if err != nil {
-+		return
-+	}
-+	codexDumpOwner.Store(&codexCaptureOwner{logDir: logDir, collector: collector})
-+}
-+func CodexDumpEnabled() bool { return codexDumpOwner.Load() != nil }
-+
-+// FlushAllStreamBuffers is an explicit shutdown/control barrier, never a delta
-+// operation. It drains queued jobs and active streams while keeping ownership.
-+func FlushAllStreamBuffers() {
-+	codexDumpLifecycle.Lock()
-+	defer codexDumpLifecycle.Unlock()
-+	owner := codexDumpOwner.Load()
-+	if owner != nil {
-+		_ = owner.collector.Flush()
-+	}
-+}
-+
-+func isStreamingFrame(eventType string) bool {
-+	return strings.HasSuffix(eventType, ".delta") || eventType == "response.in_progress" ||
-+		eventType == "response.output_item.added" || eventType == "response.created" ||
-+		eventType == "responsesapi.websocket_timing" || eventType == "response.completed" || eventType == "response.done"
-+}
-+func queueCodexCapture(sessionID, leg string, payload []byte, delimited, complete bool) bool {
-+	owner := codexDumpOwner.Load()
-+	if owner == nil || (len(payload) == 0 && !complete) {
-+		return false
-+	}
-+	// Hash once for the queued stream identity; no caller metadata enters paths.
-+	name := strings.TrimPrefix(strings.Fields(diagnosticoutput.Fingerprint(sessionID))[0], "sha256:") + "-" + safeCaptureLeg(leg)
-+	var delimiter []byte
-+	if delimited && len(payload) > 0 && payload[len(payload)-1] != '\n' {
-+		delimiter = []byte{'\n'}
-+	}
-+	return owner.collector.TryAppend(name, name, payload, delimiter, complete)
-+}
-+
-+// CodexDumpFrame selects protocol facts; infra owns bounded stream state/effects.
- func CodexDumpFrame(sessionID, leg string, payload []byte) {
-+	if !CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel) {
-+		return
-+	}
-+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
-+	streaming := isStreamingFrame(eventType)
-+	complete := eventType == "response.completed" || eventType == "response.done"
-+	accepted := queueCodexCapture(sessionID, leg, payload, streaming, !streaming || complete)
-+	// Streaming deltas do not create per-chunk trace records or notifier work.
-+	if streaming && !complete {
-+		return
-+	}
- 	if !log.IsLevelEnabled(log.TraceLevel) {
- 		return
- 	}
+-func CodexDumpFrame(sessionID, leg string, payload []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) {
+-		return
+-	}
 -
 -	eventType := ""
 -	if json.Valid(payload) {
@@ -235,20 +154,22 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -	}
 -	emitCodexDump(fields, sessionID, leg, payload, true)
 -}
--
++func IsLinuxOS() bool { return runtime.GOOS == "linux" }
+ 
 -// CodexDumpBinaryFrame records binary frame metadata. Raw bytes are never
 -// base64-encoded into the application log.
-+	fields := log.Fields{"codex_event": "codex.ws.frame", "protocol": "ws", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "event_type": eventType, "size": len(payload)}
-+	if accepted {
-+		fields["capture_queued"] = true
-+	}
-+	addPayloadView(fields, payload)
-+	log.WithFields(fields).Trace(fields["codex_event"])
-+}
- func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
+-func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
 -	if !log.IsLevelEnabled(log.TraceLevel) || len(payload) == 0 {
--		return
--	}
++// ConfigureCodexDump is explicit raw-byte consent, independent of trace verbosity.
++// Reconfiguration withdraws the old generation before draining it; identical
++// session IDs in different directories/generations never share a buffer.
++func ConfigureCodexDump(enabled bool, logDir string) {
++	codexDumpLifecycle.Lock()
++	defer codexDumpLifecycle.Unlock()
++	logDir = strings.TrimSpace(logDir)
++	if old := codexDumpOwner.Load(); old != nil && enabled && IsLinuxOS() && old.logDir == logDir && old.collector.Dropped() == 0 && old.collector.Failures() == 0 {
+ 		return
+ 	}
 -	fields := log.Fields{
 -		"codex_event": "codex.ws.binary_frame",
 -		"protocol":    "websocket",
@@ -256,29 +177,19 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -		"leg":         strings.TrimSpace(leg),
 -		"binary":      true,
 -		"size":        len(payload),
--	}
++	old := codexDumpOwner.Swap(nil)
++	if old != nil {
++		_ = old.collector.Close()
+ 	}
 -	emitCodexDump(fields, sessionID, leg, payload, false)
 -}
 -
 -// CodexDumpHTTPRequest records safe request metadata and a classified JSON
 -// view. The original body is only written to a separate artifact when capture
 -// was explicitly enabled and TRACE is selected.
-+	if len(payload) == 0 {
-+		return
-+	}
-+	accepted := queueCodexCapture(sessionID, leg, payload, false, true)
-+	if !log.IsLevelEnabled(log.TraceLevel) {
-+		return
-+	}
-+	fields := log.Fields{"codex_event": "codex.ws.binary", "protocol": "ws", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "binary": true, "size": len(payload)}
-+	if accepted {
-+		fields["capture_queued"] = true
-+	}
-+	log.WithFields(fields).Trace(fields["codex_event"])
-+}
- func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.Header, body []byte) {
-+	accepted := queueCodexCapture(sessionID, leg, body, false, true)
- 	if !log.IsLevelEnabled(log.TraceLevel) {
+-func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.Header, body []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) {
++	if !enabled || !IsLinuxOS() || logDir == "" {
  		return
  	}
 -	fields := log.Fields{
@@ -289,23 +200,18 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -		"method":      strings.TrimSpace(method),
 -		"host":        safeURLHost(rawURL),
 -		"size":        len(body),
-+	fields := log.Fields{"codex_event": "codex.https.request", "protocol": "https", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "method": method, "host": safeURLHost(rawURL), "size": len(body)}
-+	if accepted {
-+		fields["capture_queued"] = true
- 	}
- 	addHeaderView(fields, headers)
+-	}
+-	addHeaderView(fields, headers)
 -	emitCodexDump(fields, sessionID, leg, body, true)
 -}
 -
 -// CodexDumpHTTPResponse records safe response metadata and a classified JSON
 -// view. The original body is only written to a separate artifact when capture
 -// was explicitly enabled and TRACE is selected.
-+	addPayloadView(fields, body)
-+	log.WithFields(fields).Trace(fields["codex_event"])
-+}
- func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
-+	accepted := queueCodexCapture(sessionID, leg, body, false, true)
- 	if !log.IsLevelEnabled(log.TraceLevel) {
+-func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
+-	if !log.IsLevelEnabled(log.TraceLevel) {
++	directory, err := filepath.Abs(filepath.Join(logDir, "codex-dumps"))
++	if err != nil {
  		return
  	}
 -	fields := log.Fields{
@@ -315,35 +221,38 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -		"leg":         strings.TrimSpace(leg),
 -		"status":      status,
 -		"size":        len(body),
-+	fields := log.Fields{"codex_event": "codex.https.response", "protocol": "https", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "status": status, "size": len(body)}
-+	if accepted {
-+		fields["capture_queued"] = true
- 	}
- 	addHeaderView(fields, headers)
+-	}
+-	addHeaderView(fields, headers)
 -	emitCodexDump(fields, sessionID, leg, body, true)
 -}
 -
 -// CodexDumpHTTPChunk records chunk metadata. It never puts the raw stream chunk
 -// into the application log.
-+	addPayloadView(fields, body)
-+	log.WithFields(fields).Trace(fields["codex_event"])
-+}
-+
-+// Chunks are consumed once by an async owner; EOF/idle/explicit drain settles them.
- func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
+-func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
 -	if !log.IsLevelEnabled(log.TraceLevel) || len(chunk) == 0 {
--		return
--	}
++	writer, err := artifactcapture.NewDirectoryWriter(directory, "", maxCodexDumpTotalBytes)
++	if err != nil {
++		log.Warn("Codex diagnostic capture initialization failed")
+ 		return
+ 	}
 -	fields := log.Fields{
 -		"codex_event": "codex.https.chunk",
 -		"protocol":    "https",
 -		"session_id":  strings.TrimSpace(sessionID),
 -		"leg":         strings.TrimSpace(leg),
 -		"size":        len(chunk),
--	}
++	collector, err := artifactcapture.NewCollector(codexArtifactWriter{writer}, artifactcapture.Config{
++		QueueJobs: 256, MaxBytes: 32 << 20, MaxStreams: 128,
++		MaxArtifactBytes: maxCodexDumpArtifactBytes, IdleTimeout: streamFlushIdleTime,
++	})
++	if err != nil {
++		return
+ 	}
 -	emitCodexDump(fields, sessionID, leg, chunk, false)
--}
--
++	codexDumpOwner.Store(&codexCaptureOwner{logDir: logDir, collector: collector})
+ }
++func CodexDumpEnabled() bool { return codexDumpOwner.Load() != nil }
+ 
 -func emitCodexDump(fields log.Fields, sessionID, leg string, payload []byte, includePayloadView bool) {
 -	enabled, logDir := codexDumpConfiguration()
 -	if enabled && IsLinuxOS() && len(payload) > 0 {
@@ -367,18 +276,42 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -	}
 -	if includePayloadView {
 -		addPayloadView(fields, payload)
--	}
++// FlushAllStreamBuffers is an explicit shutdown/control barrier, never a delta
++// operation. It drains queued jobs and active streams while keeping ownership.
++func FlushAllStreamBuffers() {
++	codexDumpLifecycle.Lock()
++	defer codexDumpLifecycle.Unlock()
++	owner := codexDumpOwner.Load()
++	if owner != nil {
++		_ = owner.collector.Flush()
+ 	}
 -	log.WithFields(fields).Trace(fields["codex_event"])
--}
--
+ }
+ 
 -func captureCodexDumpArtifact(logDir, sessionID, leg string, payload []byte) (string, int, error) {
 -	if len(payload) > maxCodexDumpArtifactBytes {
 -		return "", 0, fmt.Errorf("payload is %d bytes; capture limit is %d bytes", len(payload), maxCodexDumpArtifactBytes)
--	}
++func isStreamingFrame(eventType string) bool {
++	return strings.HasSuffix(eventType, ".delta") || eventType == "response.in_progress" ||
++		eventType == "response.output_item.added" || eventType == "response.created" ||
++		eventType == "responsesapi.websocket_timing" || eventType == "response.completed" || eventType == "response.done"
++}
++func queueCodexCapture(sessionID, leg string, payload []byte, delimited, complete bool) bool {
++	owner := codexDumpOwner.Load()
++	if owner == nil || (len(payload) == 0 && !complete) {
++		return false
+ 	}
 -	if logDir == "" {
 -		return "", 0, errors.New("log directory is not configured")
--	}
--
++	// Hash once for the queued stream identity; no caller metadata enters paths.
++	name := strings.TrimPrefix(strings.Fields(diagnosticoutput.Fingerprint(sessionID))[0], "sha256:") + "-" + safeCaptureLeg(leg)
++	var delimiter []byte
++	if delimited && len(payload) > 0 && payload[len(payload)-1] != '\n' {
++		delimiter = []byte{'\n'}
+ 	}
++	return owner.collector.TryAppend(name, name, payload, delimiter, complete)
++}
+ 
 -	codexDumpWriteMu.Lock()
 -	defer codexDumpWriteMu.Unlock()
 -
@@ -389,17 +322,33 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -	info, err := os.Lstat(dir)
 -	if err != nil {
 -		return "", 0, fmt.Errorf("inspect private capture directory: %w", err)
--	}
++// CodexDumpFrame selects protocol facts; infra owns bounded stream state/effects.
++func CodexDumpFrame(sessionID, leg string, payload []byte) {
++	if !CodexDumpEnabled() && !log.IsLevelEnabled(log.TraceLevel) {
++		return
+ 	}
 -	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 -		return "", 0, errors.New("private capture path is not a directory")
--	}
++	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
++	streaming := isStreamingFrame(eventType)
++	complete := eventType == "response.completed" || eventType == "response.done"
++	accepted := queueCodexCapture(sessionID, leg, payload, streaming, !streaming || complete)
++	// Streaming deltas do not create per-chunk trace records or notifier work.
++	if streaming && !complete {
++		return
+ 	}
 -	if err := os.Chmod(dir, 0o700); err != nil {
 -		return "", 0, fmt.Errorf("restrict private capture directory: %w", err)
--	}
++	if !log.IsLevelEnabled(log.TraceLevel) {
++		return
+ 	}
 -	pruned, err := makeRoomForCodexDump(dir, int64(len(payload)))
 -	if err != nil {
 -		return "", pruned, err
--	}
++	fields := log.Fields{"codex_event": "codex.ws.frame", "protocol": "ws", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "event_type": eventType, "size": len(payload)}
++	if accepted {
++		fields["capture_queued"] = true
+ 	}
 -
 -	sessionDigest := sha256.Sum256([]byte(sessionID))
 -	name := fmt.Sprintf("%d-%x-%s-%d.raw", time.Now().UTC().UnixNano(), sessionDigest[:6], safeCaptureLeg(leg), codexDumpSequence.Add(1))
@@ -407,36 +356,71 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 -	if err != nil {
 -		return "", pruned, fmt.Errorf("create raw capture artifact: %w", err)
--	}
++	addPayloadView(fields, payload)
++	log.WithFields(fields).Trace(fields["codex_event"])
++}
++func CodexDumpBinaryFrame(sessionID, leg string, payload []byte) {
++	if len(payload) == 0 {
++		return
+ 	}
 -	fail := func(err error) (string, error) {
 -		_ = f.Close()
 -		_ = os.Remove(path)
 -		return "", err
--	}
++	accepted := queueCodexCapture(sessionID, leg, payload, false, true)
++	if !log.IsLevelEnabled(log.TraceLevel) {
++		return
+ 	}
 -	if err := f.Chmod(0o600); err != nil {
 -		_, captureErr := fail(fmt.Errorf("restrict raw capture artifact: %w", err))
 -		return "", pruned, captureErr
--	}
++	fields := log.Fields{"codex_event": "codex.ws.binary", "protocol": "ws", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "binary": true, "size": len(payload)}
++	if accepted {
++		fields["capture_queued"] = true
+ 	}
 -	n, err := f.Write(payload)
 -	if err != nil {
 -		_, captureErr := fail(fmt.Errorf("write raw capture artifact: %w", err))
 -		return "", pruned, captureErr
--	}
++	log.WithFields(fields).Trace(fields["codex_event"])
++}
++func CodexDumpHTTPRequest(sessionID, leg, method, rawURL string, headers http.Header, body []byte) {
++	accepted := queueCodexCapture(sessionID, leg, body, false, true)
++	if !log.IsLevelEnabled(log.TraceLevel) {
++		return
+ 	}
 -	if n != len(payload) {
 -		_, captureErr := fail(fmt.Errorf("write raw capture artifact: %w", io.ErrShortWrite))
 -		return "", pruned, captureErr
--	}
++	fields := log.Fields{"codex_event": "codex.https.request", "protocol": "https", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "method": method, "host": safeURLHost(rawURL), "size": len(body)}
++	if accepted {
++		fields["capture_queued"] = true
+ 	}
 -	if err := f.Sync(); err != nil {
 -		_, captureErr := fail(fmt.Errorf("sync raw capture artifact: %w", err))
 -		return "", pruned, captureErr
--	}
++	addHeaderView(fields, headers)
++	addPayloadView(fields, body)
++	log.WithFields(fields).Trace(fields["codex_event"])
++}
++func CodexDumpHTTPResponse(sessionID, leg string, status int, headers http.Header, body []byte) {
++	accepted := queueCodexCapture(sessionID, leg, body, false, true)
++	if !log.IsLevelEnabled(log.TraceLevel) {
++		return
+ 	}
 -	if err := f.Close(); err != nil {
 -		_ = os.Remove(path)
 -		return "", pruned, fmt.Errorf("close raw capture artifact: %w", err)
--	}
++	fields := log.Fields{"codex_event": "codex.https.response", "protocol": "https", "session_id": strings.TrimSpace(sessionID), "leg": strings.TrimSpace(leg), "status": status, "size": len(body)}
++	if accepted {
++		fields["capture_queued"] = true
+ 	}
 -	return path, pruned, nil
--}
--
++	addHeaderView(fields, headers)
++	addPayloadView(fields, body)
++	log.WithFields(fields).Trace(fields["codex_event"])
+ }
+ 
 -func makeRoomForCodexDump(dir string, incoming int64) (int, error) {
 -	if incoming > maxCodexDumpTotalBytes {
 -		return 0, fmt.Errorf("capture is %d bytes; total capture limit is %d bytes", incoming, maxCodexDumpTotalBytes)
@@ -482,17 +466,19 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -		return pruned, errors.New("private capture size limit could not be enforced")
 -	}
 -	return pruned, nil
--}
++// Chunks are consumed once by an async owner; EOF/idle/explicit drain settles them.
++func CodexDumpHTTPChunk(sessionID, leg string, chunk []byte) {
 +	queueCodexCapture(sessionID, leg, chunk, false, false)
-+}
-+
+ }
+ 
 +// CodexDumpHTTPFinish settles the consumed stream without parsing chunk contents.
 +// A terminal-looking string inside an ordinary JSON delta cannot trigger a flush.
 +func CodexDumpHTTPFinish(sessionID, leg string) { queueCodexCapture(sessionID, leg, nil, false, true) }
- 
++
  func safeCaptureLeg(leg string) string {
  	var b strings.Builder
-@@ -317,6 +206,10 @@
+ 	for _, r := range strings.TrimSpace(leg) {
+@@ -317,6 +206,10 @@ func addPayloadView(fields log.Fields, payload []byte) {
  	if len(payload) == 0 {
  		return
  	}
@@ -503,7 +489,7 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
  	var value any
  	if err := json.Unmarshal(payload, &value); err != nil {
  		return
-@@ -336,26 +229,44 @@
+@@ -336,21 +229,26 @@ func addPayloadView(fields log.Fields, payload []byte) {
  }
  
  func classifiedTraceView(value any) any {
@@ -535,10 +521,10 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
  		}
  		return redacted
  	default:
- 		return value
+@@ -358,30 +256,65 @@ func classifiedTraceView(value any) any {
  	}
-+}
-+
+ }
+ 
 +func isMetadataContainer(name string) bool {
 +	n := strings.ToLower(strings.TrimSpace(name))
 +	return strings.Contains(n, "metadata") ||
@@ -550,10 +536,10 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 +		strings.Contains(n, "cache") ||
 +		strings.Contains(n, "details") ||
 +		strings.Contains(n, "decision")
- }
- 
++}
++
  func publicTracePayloadField(name string) bool {
-@@ -363,25 +274,47 @@
+ 	name = strings.ToLower(strings.TrimSpace(name))
  	switch name {
  	case "type", "model", "model_id", "scheme", "status", "role",
  		"id", "request_id", "correlation_id", "response_id", "conversation_id",
@@ -591,9 +577,6 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -	for _, marker := range []string{"authorization", "credential", "password", "secret", "cookie", "apikey", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken", "token"} {
 -		if strings.Contains(normalized, marker) {
 -			return true
--		}
--	}
--	return false
 +}
 +
 +func formatHeaderValue(key string, values []string) (string, bool) {
@@ -602,9 +585,10 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 +		sanitized := make([]string, len(values))
 +		for i, value := range values {
 +			sanitized[i] = codexCredentials.Header(key, value)
-+		}
+ 		}
 +		return strings.Join(sanitized, ", "), true
-+	}
+ 	}
+-	return false
 +	if isLBHeader(key) || publicTraceHeader(key) {
 +		return strings.Join(values, ", "), true
 +	}
@@ -612,7 +596,7 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
  }
  
  func addHeaderView(fields log.Fields, headers http.Header) {
-@@ -395,15 +328,13 @@
+@@ -395,15 +328,13 @@ func addHeaderView(fields log.Fields, headers http.Header) {
  	sort.Strings(keys)
  	parts := make([]string, 0, len(keys))
  	for _, key := range keys {
@@ -623,23 +607,22 @@ diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 -			value = strings.Join(headers.Values(key), ", ")
 -		} else {
 -			continue
--		}
--		parts = append(parts, fmt.Sprintf("%s=%q", key, value))
 +		values := headers[key]
 +		if len(values) == 0 {
 +			values = headers.Values(key)
 +		}
 +		if formatted, ok := formatHeaderValue(key, values); ok && formatted != "" {
 +			parts = append(parts, fmt.Sprintf("%s=%q", key, formatted))
-+		}
+ 		}
+-		parts = append(parts, fmt.Sprintf("%s=%q", key, value))
  	}
  	fields["headers"] = strings.Join(parts, " ")
  }
-
 diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
+index 719f0f2..e2a9902 100644
 --- a/internal/logging/codex_dump_test.go
 +++ b/internal/logging/codex_dump_test.go
-@@ -40,13 +40,25 @@
+@@ -40,7 +40,9 @@ func TestCodexDumpDefaultsOff(t *testing.T) {
  func TestCodexDumpDoesNotChangeSelectedLogLevel(t *testing.T) {
  	output := captureCodexDumpLogs(t)
  	log.SetLevel(log.DebugLevel)
@@ -650,10 +633,10 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
  	if log.GetLevel() != log.DebugLevel {
  		t.Fatalf("log level = %v, want DebugLevel", log.GetLevel())
  	}
- 	CodexDumpFrame("session", "client_in", []byte(`{"type":"response.create"}`))
+@@ -48,6 +50,16 @@ func TestCodexDumpDoesNotChangeSelectedLogLevel(t *testing.T) {
  	if output.Len() != 0 {
  		t.Fatalf("debug selection emitted trace diagnostics: %s", output.String())
-+	}
+ 	}
 +	if runtime.GOOS == "linux" {
 +		FlushAllStreamBuffers()
 +		files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
@@ -663,10 +646,11 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +		if len(files) != 1 {
 +			t.Fatalf("capture files = %d, want 1", len(files))
 +		}
- 	}
++	}
  }
  
-@@ -64,8 +76,8 @@
+ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *testing.T) {
+@@ -64,8 +76,8 @@ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *te
  			t.Fatalf("trace view exposed classified or unclassified payload data %q: %s", secret, view)
  		}
  	}
@@ -677,7 +661,7 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
  	}
  	if !strings.Contains(view, "opaque-public") || !strings.Contains(view, "Bearer") {
  		t.Fatalf("trace view changed public fields: %s", view)
-@@ -84,9 +96,10 @@
+@@ -84,9 +96,10 @@ func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *te
  	if strings.Contains(view, "fixture-secret") {
  		t.Fatalf("captured payload leaked into trace view: %s", view)
  	}
@@ -689,7 +673,7 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
  	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
  	if err != nil {
  		t.Fatalf("read capture directory: %v", err)
-@@ -127,51 +140,222 @@
+@@ -127,51 +140,222 @@ func TestCodexDumpHTTPViewRedactsHeadersAndPayload(t *testing.T) {
  		"Authorization":    []string{"Bearer header-secret"},
  		"Content-Type":     []string{"application/json"},
  		"X-Correlation-Id": []string{"a%252Fb"},
@@ -773,6 +757,8 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +
  	logDir := t.TempDir()
  	ConfigureCodexDump(true, logDir)
+-	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
+-	path, _, err := captureCodexDumpArtifact(logDir, "session", "client_in", payload)
 +	t.Cleanup(func() { ConfigureCodexDump(false, "") })
 +
 +	delta1 := []byte(`{"type":"response.custom_tool_call_input.delta","delta":"hello"}`)
@@ -787,21 +773,27 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +
 +	FlushAllStreamBuffers()
 +	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
-+	if err != nil {
+ 	if err != nil {
+-		t.Fatalf("capture raw bytes: %v", err)
 +		t.Fatalf("read capture directory: %v", err)
-+	}
+ 	}
+-	got, err := os.ReadFile(path)
 +	if len(files) != 1 {
 +		t.Fatalf("expected 1 unified stream file, got %d", len(files))
 +	}
 +
 +	content, err := os.ReadFile(filepath.Join(logDir, "codex-dumps", files[0].Name()))
-+	if err != nil {
+ 	if err != nil {
+-		t.Fatalf("read raw capture: %v", err)
 +		t.Fatalf("read stream file: %v", err)
-+	}
+ 	}
+-	if !bytes.Equal(got, payload) {
+-		t.Fatalf("raw capture changed bytes: got %v, want %v", got, payload)
 +	contentStr := string(content)
 +	if !strings.Contains(contentStr, "hello") || !strings.Contains(contentStr, " world") || !strings.Contains(contentStr, "response.completed") {
 +		t.Fatalf("stream buffer missed deltas, got: %s", contentStr)
-+	}
+ 	}
+-	info, err := os.Stat(path)
 +
 +	// Test HTTP chunks
 +	chunk1 := []byte("data: {\"type\":\"chunk1\"}\n\n")
@@ -814,9 +806,12 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +	FlushAllStreamBuffers()
 +
 +	files2, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
-+	if err != nil {
+ 	if err != nil {
+-		t.Fatalf("stat raw capture: %v", err)
 +		t.Fatalf("read capture directory: %v", err)
-+	}
+ 	}
+-	if info.Mode().Perm() != 0o600 {
+-		t.Fatalf("capture file mode = %o, want 600", info.Mode().Perm())
 +	if len(files2) != 2 {
 +		t.Fatalf("expected 2 files total (1 ws stream + 1 http stream), got %d", len(files2))
 +	}
@@ -849,11 +844,7 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +	ConfigureCodexDump(true, logDir)
 +	t.Cleanup(func() { ConfigureCodexDump(false, "") })
 +	t.Cleanup(func() { ConfigureCodexDump(false, "") })
- 	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
--	path, _, err := captureCodexDumpArtifact(logDir, "session", "client_in", payload)
--	if err != nil {
--		t.Fatalf("capture raw bytes: %v", err)
--	}
++	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
 +	CodexDumpBinaryFrame("session", "client_in", payload)
 +	FlushAllStreamBuffers()
 +	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
@@ -861,35 +852,22 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +		t.Fatalf("artifacts: %v / %v", files, err)
 +	}
 +	path := filepath.Join(logDir, "codex-dumps", files[0].Name())
- 	got, err := os.ReadFile(path)
--	if err != nil {
--		t.Fatalf("read raw capture: %v", err)
--	}
--	if !bytes.Equal(got, payload) {
--		t.Fatalf("raw capture changed bytes: got %v, want %v", got, payload)
++	got, err := os.ReadFile(path)
 +	if err != nil || !bytes.Equal(got, payload) {
 +		t.Fatalf("exact bytes: %v / %v", got, err)
- 	}
- 	info, err := os.Stat(path)
--	if err != nil {
--		t.Fatalf("stat raw capture: %v", err)
--	}
--	if info.Mode().Perm() != 0o600 {
--		t.Fatalf("capture file mode = %o, want 600", info.Mode().Perm())
++	}
++	info, err := os.Stat(path)
 +	if err != nil || info.Mode().Perm() != 0600 {
 +		t.Fatalf("file permissions: %v / %v", info, err)
  	}
  	dirInfo, err := os.Stat(filepath.Dir(path))
 -	if err != nil {
 -		t.Fatalf("stat capture directory: %v", err)
--	}
--	if dirInfo.Mode().Perm() != 0o700 {
--		t.Fatalf("capture directory mode = %o, want 700", dirInfo.Mode().Perm())
--	}
--}
 +	if err != nil || dirInfo.Mode().Perm() != 0700 {
 +		t.Fatalf("directory permissions: %v / %v", dirInfo, err)
-+	}
+ 	}
+-	if dirInfo.Mode().Perm() != 0o700 {
+-		t.Fatalf("capture directory mode = %o, want 700", dirInfo.Mode().Perm())
 +}
 +
 +func TestCodexDumpDirectoryGenerationAndDisableDrain(t *testing.T) {
@@ -934,13 +912,13 @@ diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_t
 +	CodexDumpFrame("session", "client_out", []byte(`{"type":"response.completed","usage":{"cached_tokens":42}}`))
 +	if !strings.Contains(output.String(), "cached_tokens") {
 +		t.Fatal("terminal metadata missing")
-+	}
-+}
-
+ 	}
+ }
 diff --git a/internal/logging/global_logger.go b/internal/logging/global_logger.go
+index f4c1b45..baf53a6 100644
 --- a/internal/logging/global_logger.go
 +++ b/internal/logging/global_logger.go
-@@ -60,7 +60,7 @@
+@@ -61,7 +61,7 @@ var logFieldOrder = []string{
  	"media_session_id", "call_id", "peer", "state", "reason",
  	"codex_event", "protocol", "session_id", "leg", "event_type",
  	"size", "method", "host", "status", "headers", "payload_view", "payload_view_omitted",
@@ -949,11 +927,33 @@ diff --git a/internal/logging/global_logger.go b/internal/logging/global_logger.
  }
  
  var quotedLogFields = map[string]struct{}{
-
+diff --git a/internal/runtime/executor/codex_websockets_executor.go b/internal/runtime/executor/codex_websockets_executor.go
+index c63b5c3..684c692 100644
+--- a/internal/runtime/executor/codex_websockets_executor.go
++++ b/internal/runtime/executor/codex_websockets_executor.go
+@@ -10,6 +10,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	log "github.com/sirupsen/logrus"
+@@ -207,6 +208,9 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
+ 	if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
+ 		return fmt.Errorf("websocket credential is no longer enabled")
+ 	}
++	helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
++		URL: wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: authID,
++	})
+ 	if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+ 		return errWrite
+ 	}
 diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
+index 328da2f..c147fd6 100644
 --- a/internal/runtime/executor/helps/logging_helpers.go
 +++ b/internal/runtime/executor/helps/logging_helpers.go
-@@ -327,6 +327,7 @@
+@@ -327,6 +327,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
  // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
  func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
  	logging.SetResponseHeaders(ctx, headers)
@@ -961,23 +961,23 @@ diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runti
  	if !requestLogCaptureEnabled(cfg) {
  		return
  	}
-
 diff --git a/internal/util/nocopy_invariant_test.go b/internal/util/nocopy_invariant_test.go
+index 9dbfb5c..ff34a91 100644
 --- a/internal/util/nocopy_invariant_test.go
 +++ b/internal/util/nocopy_invariant_test.go
-@@ -104,6 +104,7 @@
+@@ -104,6 +104,7 @@ type reviewedInPlaceByteWrite struct {
  }
  
  var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 +	"internal/infra/artifactcapture/collector.go":           {1, "writes a delimiter into newly allocated diagnostic storage; caller payload slices and borrowed GJSON values are never modified"},
+ 	"internal/translator/common/apply_patch_responses.go":   {1, "shifts [][]byte item references in a private output slice; no byte of any JSON payload is rewritten"},
  	"internal/runtime/executor/claude_signing.go":           {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
  	"internal/runtime/executor/claude_executor_cloaking.go": {1, "shifts []string headers to prepend a block; no byte of any payload is rewritten"},
- 	"internal/runtime/executor/claude_executor_request.go":  {3, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
-
 diff --git a/internal/util/util.go b/internal/util/util.go
+index 385877a..66ae261 100644
 --- a/internal/util/util.go
 +++ b/internal/util/util.go
-@@ -55,7 +55,7 @@
+@@ -55,7 +55,7 @@ func SanitizeFunctionName(name string) string {
  }
  
  // SetLogLevel configures the logrus log level based on the selected verbosity.
@@ -986,11 +986,11 @@ diff --git a/internal/util/util.go b/internal/util/util.go
  func SetLogLevel(cfg *config.Config) {
  	currentLevel := log.GetLevel()
  	var newLevel log.Level
-
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index ea6dc78..4dcd2a3 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -1092,6 +1092,9 @@
+@@ -1144,6 +1144,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
  		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
  	}
  
@@ -999,18 +999,198 @@ diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/hand
 +	defer requestlogging.CodexDumpHTTPFinish(sessionID, "upstream_in")
  	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
  		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
- 		WriteChunk: func(chunk []byte) {
-
+ 		Flush:                  func() error { return flushResponsesSSE(c.Writer) },
+diff --git a/sdk/api/handlers/openai/openai_responses_interrupt_diagnostics_test.go b/sdk/api/handlers/openai/openai_responses_interrupt_diagnostics_test.go
+new file mode 100644
+index 0000000..36e1238
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_interrupt_diagnostics_test.go
+@@ -0,0 +1,78 @@
++package openai
++
++import (
++	"bytes"
++	"context"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++)
++
++type interruptDiagnosticRecord struct {
++	sessionID, contextSessionID string
++	ginContext                  bool
++	timeline                    []byte
++}
++
++type interruptDiagnosticExecutor struct {
++	homeInterruptExecutor
++	cfg     *config.Config
++	records chan interruptDiagnosticRecord
++}
++
++func (e *interruptDiagnosticExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
++	helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{Body: payload, Provider: "codex"})
++	ginCtx, _ := ctx.Value("gin").(*gin.Context)
++	var timeline []byte
++	if ginCtx != nil {
++		if value, ok := ginCtx.Get("API_WEBSOCKET_TIMELINE"); ok {
++			timeline, _ = value.([]byte)
++		}
++	}
++	e.records <- interruptDiagnosticRecord{sessionID, coreexecutor.ExecutionSessionID(ctx), ginCtx != nil, bytes.Clone(timeline)}
++	return nil
++}
++
++// The concurrent interrupt reader must retain the same diagnostic context as
++// normal requests. Without it, upstream capture loses attribution and request logs.
++func TestResponsesInterruptDiagnosticContext(t *testing.T) {
++	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
++	exec := &interruptDiagnosticExecutor{cfg: cfg, records: make(chan interruptDiagnosticRecord, 1)}
++	manager := coreauth.NewManager(nil, nil, nil)
++	manager.SetConfig(cfg)
++	manager.RegisterExecutor(exec)
++	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = client.Close() }()
++	payload := []byte(`{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items"}`)
++	if err := client.WriteMessage(websocket.TextMessage, payload); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case record := <-exec.records:
++		if record.sessionID == "" || record.contextSessionID != record.sessionID {
++			t.Fatalf("interrupt capture session = %q, want %q", record.contextSessionID, record.sessionID)
++		}
++		if !record.ginContext || !bytes.Contains(record.timeline, []byte("api.websocket.request")) || !bytes.Contains(record.timeline, payload) {
++			t.Fatalf("interrupt missing from request log: %s", record.timeline)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("interrupt callback did not run")
++	}
++}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 5509960..3c47942 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
-@@ -286,6 +286,7 @@
+@@ -280,15 +280,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  	}
  	writer := newResponsesWebsocketWriter(conn)
  	passthroughSessionID := uuid.NewString()
 +	requestlogging.CodexDumpHTTPRequest(passthroughSessionID, "client_in", c.Request.Method, c.Request.URL.String(), c.Request.Header, nil)
- 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
- 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
- 	clientIP := websocketClientAddress(c)
+ 	socketCtx, cancelSocket := context.WithCancelCause(c.Request.Context())
+ 	defer cancelSocket(nil)
+ 	c.Request = c.Request.WithContext(socketCtx)
+ 	// The reader owns the client socket so an in-flight interrupt is not stuck
+ 	// behind the response currently being forwarded.
+ 	localInterrupt := newResponsesLocalInterrupt()
++	interruptCtx := handlers.WithExecutionSessionID(context.WithValue(socketCtx, "gin", c), passthroughSessionID)
+ 	input := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, func(payload []byte) error {
+-		return h.forwardResponsesWebsocketInterrupt(socketCtx, passthroughSessionID, payload)
+-	}, localInterrupt, writer)
++		return h.forwardResponsesWebsocketInterrupt(interruptCtx, passthroughSessionID, payload)
++	}, localInterrupt, writer, passthroughSessionID)
+ 	var duplexInput <-chan cliproxyexecutor.WebsocketInput
+ 	if h != nil && h.Cfg != nil && h.Cfg.CodexResponseSteering {
+ 		duplexInput = input
+@@ -446,11 +448,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+ 			continue
+ 		}
+-		if msgType == websocket.BinaryMessage {
+-			requestlogging.CodexDumpBinaryFrame(passthroughSessionID, "client_in", payload)
+-		} else {
+-			requestlogging.CodexDumpFrame(passthroughSessionID, "client_in", payload)
+-		}
+ 		wsTimelineLog.BeginRequest()
+ 		wsTimelineLog.Append("request", payload, time.Now())
+ 
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_forward.go b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+index 18cc459..01eef3f 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_forward.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+@@ -80,7 +80,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ 	for {
+ 		select {
+ 		case interruptPayload := <-localFrames:
+-			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
++			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, sessionID, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
+ 		case <-c.Request.Context().Done():
+ 			cancel(c.Request.Context().Err())
+ 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+@@ -247,6 +247,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ func completeResponsesWebsocketLocalInterrupt(
+ 	writer *responsesWebsocketWriter,
+ 	wsTimelineLog websocketTimelineAppender,
++	sessionID string,
+ 	cancel handlers.APIHandlerCancelFunc,
+ 	payload []byte,
+ 	outputItemsByIndex map[int64][]byte,
+@@ -267,7 +268,7 @@ func completeResponsesWebsocketLocalInterrupt(
+ 		cancel(errSet)
+ 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
+ 	}
+-	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incomplete, time.Now()); errWrite != nil {
++	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, incomplete, time.Now()); errWrite != nil {
+ 		cancel(errWrite)
+ 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+ 	}
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_input.go b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+index 12855ca..5b50b70 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_input.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+@@ -12,6 +12,7 @@ import (
+ 
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"github.com/tidwall/gjson"
+@@ -77,7 +78,7 @@ func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
+ // readResponsesWebsocketInput is the only downstream reader. Interrupts are
+ // handled immediately so they are not queued behind an active response.
+ // The bounded queue backpressures clients instead of retaining unlimited input.
+-func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter) <-chan cliproxyexecutor.WebsocketInput {
++func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, sessionID string) <-chan cliproxyexecutor.WebsocketInput {
+ 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
+ 	go func() {
+ 		defer close(input)
+@@ -90,6 +91,11 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
+ 			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
+ 				continue
+ 			}
++			if kind == websocket.BinaryMessage {
++				requestlogging.CodexDumpBinaryFrame(sessionID, "client_in", payload)
++			} else {
++				requestlogging.CodexDumpFrame(sessionID, "client_in", payload)
++			}
+ 			// Control frames bypass response.create normalization. The original
+ 			// response_id, mode, and extension fields must reach upstream unchanged.
+ 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
+@@ -100,7 +106,7 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
+ 				case errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) && local.deliver(payload):
+ 					continue
+ 				default:
+-					_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
++					_, errWrite := writeResponsesWebsocketError(writer, nil, sessionID, &interfaces.ErrorMessage{
+ 						StatusCode: http.StatusBadRequest,
+ 						Error:      errInterrupt,
+ 					})
 -- 
-2.50.0
+2.43.0

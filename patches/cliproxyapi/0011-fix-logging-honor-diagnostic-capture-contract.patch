@@ -1,26 +1,16 @@
-From 9f52fc90d1aef9992890b246500b5a0c1ce1c499 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Thu, 1 Oct 2026 15:27:51 +0800
 Subject: [PATCH 11/11] fix(logging): honor diagnostic capture contract
 
----
- config.example.yaml                 |   5 +-
- internal/api/server.go              |   2 +-
- internal/api/server_reload.go       |   6 +-
- internal/config/sdk_config.go       |   4 +-
- internal/logging/codex_dump.go      | 468 +++++++++++++++++++++-------
- internal/logging/codex_dump_test.go | 180 ++++++++---
- internal/logging/global_logger.go   |  35 ++-
- internal/util/log_level_test.go     |  44 +++
- internal/util/util.go               |   8 +-
- 9 files changed, 587 insertions(+), 165 deletions(-)
- create mode 100644 internal/util/log_level_test.go
+Rebased onto official CLIProxyAPI v8.0.22.
 
+---
 diff --git a/config.example.yaml b/config.example.yaml
-index cb56fe8..60b2861 100644
+index 61adcdb..3d3d2a9 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -1086,8 +1086,9 @@ observability:
+@@ -1112,8 +1112,9 @@ observability:
      # Record proxy request/response logs. Management requests are excluded.
      request-log: false
  
@@ -33,10 +23,10 @@ index cb56fe8..60b2861 100644
  
    usage:
 diff --git a/internal/api/server.go b/internal/api/server.go
-index 6a7b2c0..b9d2d4f 100644
+index 0fbf18c..471dbab 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
-@@ -217,7 +217,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+@@ -219,7 +219,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
  	}
  	logDir := logging.ResolveLogDirectory(cfg)
  	s.mgmt.SetLogDirectory(logDir)
@@ -46,10 +36,10 @@ index 6a7b2c0..b9d2d4f 100644
  		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
  	}
 diff --git a/internal/api/server_reload.go b/internal/api/server_reload.go
-index 951d737..cea7292 100644
+index 6d289db..aed890c 100644
 --- a/internal/api/server_reload.go
 +++ b/internal/api/server_reload.go
-@@ -86,9 +86,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+@@ -87,9 +87,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
  		}
  	}
  
@@ -60,7 +50,7 @@ index 951d737..cea7292 100644
  
  	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
  		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
-@@ -126,7 +124,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+@@ -127,7 +125,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
  	}
  
  	// Update log level dynamically when debug flag changes
@@ -70,10 +60,10 @@ index 951d737..cea7292 100644
  	}
  
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
-index 6ab1738..4787100 100644
+index f22afa4..e3bca96 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
-@@ -50,7 +50,9 @@ type SDKConfig struct {
+@@ -53,7 +53,9 @@ type SDKConfig struct {
  	// RequestLog enables or disables detailed request logging functionality.
  	RequestLog bool `yaml:"request-log" json:"request-log"`
  
@@ -83,7 +73,7 @@ index 6ab1738..4787100 100644
 +	// Individual artifacts are limited to 8 MiB and retained artifacts to 64 MiB total.
  	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
  
- 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
+ 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
 diff --git a/internal/logging/codex_dump.go b/internal/logging/codex_dump.go
 index 2a35cf1..e7b9eca 100644
 --- a/internal/logging/codex_dump.go
@@ -840,12 +830,12 @@ index 0a29023..719f0f2 100644
  	}
  }
 diff --git a/internal/logging/global_logger.go b/internal/logging/global_logger.go
-index 524fc42..930c0e1 100644
+index 928fc25..f4c1b45 100644
 --- a/internal/logging/global_logger.go
 +++ b/internal/logging/global_logger.go
-@@ -58,19 +58,34 @@ var logFieldOrder = []string{
- 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
- 	"credential", "auth_id", "connection", "proxy_scheme", "remote_transport",
+@@ -59,22 +59,37 @@ var logFieldOrder = []string{
+ 	"credential", "auth_id", "auth_index", "connection", "proxy_scheme", "remote_transport",
+ 	"operation", "upstream_host", "reused", "was_idle", "idle_time",
  	"media_session_id", "call_id", "peer", "state", "reason",
 +	"codex_event", "protocol", "session_id", "leg", "event_type",
 +	"size", "method", "host", "status", "headers", "payload_view", "payload_view_omitted",
@@ -855,6 +845,9 @@ index 524fc42..930c0e1 100644
  var quotedLogFields = map[string]struct{}{
 -	"credential":       {},
 -	"auth_id":          {},
+-	"auth_index":       {},
+-	"upstream_host":    {},
+-	"operation":        {},
 -	"connection":       {},
 -	"proxy_scheme":     {},
 -	"remote_transport": {},
@@ -865,6 +858,9 @@ index 524fc42..930c0e1 100644
 -	"reason":           {},
 +	"credential":           {},
 +	"auth_id":              {},
++	"auth_index":           {},
++	"upstream_host":        {},
++	"operation":            {},
 +	"connection":           {},
 +	"proxy_scheme":         {},
 +	"remote_transport":     {},
@@ -968,5 +964,4 @@ index be55d62..385877a 100644
  	} else if cfg.Debug {
  		newLevel = log.DebugLevel
 -- 
-2.56.0
-
+2.43.0

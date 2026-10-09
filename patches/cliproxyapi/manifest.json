@@ -3,7 +3,8 @@
   "output": "build/cliproxyapi",
   "upstream": {
     "url": "https://github.com/router-for-me/CLIProxyAPI.git",
-    "commit": "fd48ea6840f5572deb53aeb5657740937ac9daaa"
+    "commit": "67465884ca179a8f9098328d03a361b50003fdd7",
+    "version": "v8.0.22"
   },
   "patches": [
     {
@@ -21,38 +22,38 @@
     {
       "order": 3,
       "path": "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
-      "commit": "8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89",
-      "sha256": "b28e2a4a1603415f477dd6f7f7ce3b6f32f86192e641d630db018ef7613b111b"
+      "sha256": "45b15fd4f7eae1dc3f825c03d9264c291c5cffaea9c0afa31818722e3d0c5cfb",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89."
     },
     {
       "order": 4,
       "path": "patches/cliproxyapi/0004-feat-codex-normalize-response-metadata-and-tag-execution-session-context.patch",
-      "commit": "707a6bca6c7108bce950e82105340e03b9903db8",
-      "sha256": "a82a433eb0a6eea700162678b39c3d92bc3d445aaef49723ae679f893b1d20d2"
+      "sha256": "24c3a8d064eb9a94f52118daa9f826064869adddb096fc49caf6e1c3bf5cd8b8",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 707a6bca6c7108bce950e82105340e03b9903db8."
     },
     {
       "order": 5,
       "path": "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-across-websocket-and-https-default-allow.patch",
-      "commit": "3e6d3330c39541bf9663775b0e113a4f702abfb9",
-      "sha256": "1bd0b7587b55befdba584cf00ed1d70e079c1dcd5bed6733b9fe3d2bffe2ce13"
+      "sha256": "cde94249ed034d513d04330eeced434c10101eeeec44d8b2ac68b6d631f17997",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 3e6d3330c39541bf9663775b0e113a4f702abfb9."
     },
     {
       "order": 6,
       "path": "patches/cliproxyapi/0006-feat-codex-add-websocket-and-https-dump-via-logrus-debug-linux-only-default-off.patch",
-      "commit": "7a24ee3b701ba3a7f787957b00c0e615d2a549b3",
-      "sha256": "cf03e5c46730add9f264c298ed96893d7312afa04b7ee6c4a018a0db70e4117b"
+      "sha256": "434efc137cce5ea798db89e3ac3cce3a158cf2eb47ffd9ac21a6e6b3a015a027",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 7a24ee3b701ba3a7f787957b00c0e615d2a549b3."
     },
     {
       "order": 7,
       "path": "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-websocket-and-https-dump-to-trace.patch",
-      "commit": "5dd1fc352c1e34c72ad8af5ad9bc1fc9bb3f5f8b",
-      "sha256": "df0a79765feddaccdfc03dbad208e7c1d091b88bdbd3f2594821bac21c741e05"
+      "sha256": "6f5d422680a275c543d06430e887db07a167d03b0a65987de31746f30ea4f9e2",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 5dd1fc352c1e34c72ad8af5ad9bc1fc9bb3f5f8b."
     },
     {
       "order": 8,
       "path": "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
-      "commit": "7bf71900a8cda6cd3eedcdd03393e0d20574ef43",
-      "sha256": "1bbb6ef3202b13a2f9bcdd698d95c2f97617e589ece401141371704748ed6b36"
+      "sha256": "4346cd64fb690a97d2a7509e79b668cedfe6c68ada3e8f120036c0501975abd9",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 7bf71900a8cda6cd3eedcdd03393e0d20574ef43."
     },
     {
       "order": 9,
@@ -69,20 +70,14 @@
     {
       "order": 11,
       "path": "patches/cliproxyapi/0011-fix-logging-honor-diagnostic-capture-contract.patch",
-      "commit": "9f52fc90d1aef9992890b246500b5a0c1ce1c499",
-      "sha256": "4d314fa968a3334ba30b784e18d2c590d59c5248120558f7745eef81459d68b9"
+      "sha256": "0d997fc620874a8672a99cc4058b713b2e7a32d46c22e7d396dcb9db8ee8fd93",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 9f52fc90d1aef9992890b246500b5a0c1ce1c499."
     },
     {
       "order": 12,
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
-      "sha256": "077fe91fd0f5cf895fa658dbdcba19339960b83e43b7cdf212535cf71bbcd3d3",
-      "provenance": "Revised against patch 0011; generated infra source is independently pinned below."
-    },
-    {
-      "order": 13,
-      "path": "patches/cliproxyapi/0013-fix-codex-forward-native-response-interrupt.patch",
-      "sha256": "fc6dacdb890d420aac60413e8d39d4ed45d442f96456e4f91cb8a148e4f26342",
-      "provenance": "Generated against the verified materialized patch 0012 baseline; no separate upstream fork."
+      "sha256": "ff37b87c0b84db2e30f957460fdc6cc550b2c63d7042337c1d9ef720c2fee676",
+      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7."
     }
   ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",

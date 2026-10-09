@@ -1,25 +1,15 @@
-From 707a6bca6c7108bce950e82105340e03b9903db8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jacob <24017069+wignerStan@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 20:33:18 -0700
 Subject: [PATCH 04/11] feat(codex): normalize response.metadata and tag
  execution session context
 
----
- internal/logging/codex_response_metadata.go   | 25 +++++++++++++++
- .../logging/codex_response_metadata_test.go   | 22 +++++++++++++
- internal/watcher/synthesizer/file.go          | 13 ++++++++
- sdk/api/handlers/handlers_context.go          |  9 +++++-
- .../openai/openai_responses_handlers.go       | 32 ++++++++++++++++++-
- .../openai_responses_handlers_stream_test.go  | 19 ++++++++---
- .../openai_responses_websocket_timeline.go    |  1 +
- sdk/cliproxy/executor/context.go              | 30 +++++++++++++++++
- 8 files changed, 144 insertions(+), 7 deletions(-)
- create mode 100644 internal/logging/codex_response_metadata.go
- create mode 100644 internal/logging/codex_response_metadata_test.go
+Rebased onto official CLIProxyAPI v8.0.22.
 
+---
 diff --git a/internal/logging/codex_response_metadata.go b/internal/logging/codex_response_metadata.go
 new file mode 100644
-index 00000000..35aeb35a
+index 0000000..35aeb35
 --- /dev/null
 +++ b/internal/logging/codex_response_metadata.go
 @@ -0,0 +1,25 @@
@@ -50,7 +40,7 @@ index 00000000..35aeb35a
 +}
 diff --git a/internal/logging/codex_response_metadata_test.go b/internal/logging/codex_response_metadata_test.go
 new file mode 100644
-index 00000000..893da2cd
+index 0000000..893da2c
 --- /dev/null
 +++ b/internal/logging/codex_response_metadata_test.go
 @@ -0,0 +1,22 @@
@@ -77,7 +67,7 @@ index 00000000..893da2cd
 +	}
 +}
 diff --git a/internal/watcher/synthesizer/file.go b/internal/watcher/synthesizer/file.go
-index 36c50915..fb12588b 100644
+index 36c5091..fb12588 100644
 --- a/internal/watcher/synthesizer/file.go
 +++ b/internal/watcher/synthesizer/file.go
 @@ -7,6 +7,7 @@ import (
@@ -108,7 +98,7 @@ index 36c50915..fb12588b 100644
  			a.Attributes["plan_type"] = strings.TrimSpace(ptRaw)
  		} else if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 diff --git a/sdk/api/handlers/handlers_context.go b/sdk/api/handlers/handlers_context.go
-index e95fca91..29bdf4c1 100644
+index e95fca9..29bdf4c 100644
 --- a/sdk/api/handlers/handlers_context.go
 +++ b/sdk/api/handlers/handlers_context.go
 @@ -7,6 +7,7 @@ import (
@@ -135,18 +125,18 @@ index e95fca91..29bdf4c1 100644
  
  // WithDisallowFreeAuth returns a child context that requests skipping known free-tier credentials.
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
-index 99902074..d0acfa98 100644
+index a07fffc..7bdfe99 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -21,6 +21,7 @@ import (
- 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+@@ -22,6 +22,7 @@ import (
  	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 +	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
- 	"github.com/tidwall/gjson"
-@@ -135,11 +136,18 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+@@ -151,11 +152,18 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
  			return true
  		}
  
@@ -166,7 +156,7 @@ index 99902074..d0acfa98 100644
  			return false
  		}
  
-@@ -176,6 +184,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+@@ -192,6 +200,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
  		return nil
  	}
  
@@ -179,7 +169,7 @@ index 99902074..d0acfa98 100644
  	f.dataFrames++
  
  	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
-@@ -317,6 +331,22 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
+@@ -333,6 +347,22 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
  	return out.Bytes()
  }
  
@@ -203,7 +193,7 @@ index 99902074..d0acfa98 100644
  	item := gjson.GetBytes(payload, "item")
  	if !item.Exists() || !item.IsObject() || item.Get("type").String() == "" {
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go b/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
-index 58d1349a..f63f17ee 100644
+index 58d1349..f63f17e 100644
 --- a/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers_stream_test.go
 @@ -601,7 +601,7 @@ func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
@@ -247,7 +237,7 @@ index 58d1349a..f63f17ee 100644
  	if !strings.Contains(got, "event: response.created") {
  		t.Fatalf("expected response.created in output, got: %q", got)
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-index 77187a79..920f1f19 100644
+index 77187a7..920f1f1 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 @@ -278,6 +278,7 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
@@ -259,7 +249,7 @@ index 77187a79..920f1f19 100644
  		wsTimelineLog.Append("response", payload, timestamp)
  	}
 diff --git a/sdk/cliproxy/executor/context.go b/sdk/cliproxy/executor/context.go
-index 30cbebf5..7d05c91a 100644
+index 30cbebf..7d05c91 100644
 --- a/sdk/cliproxy/executor/context.go
 +++ b/sdk/cliproxy/executor/context.go
 @@ -2,12 +2,14 @@ package executor
@@ -309,3 +299,5 @@ index 30cbebf5..7d05c91a 100644
 +		return ""
 +	}
 +}
+-- 
+2.43.0

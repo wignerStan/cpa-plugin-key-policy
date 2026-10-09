@@ -1,20 +1,16 @@
-From 7bf71900a8cda6cd3eedcdd03393e0d20574ef43 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jacob <240170694+wignerStan@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 11:57:49 +0800
 Subject: [PATCH 08/11] fix: use v8 plugin API for model-list interception
 
----
- config.example.yaml                         | 2 +-
- internal/config/sdk_config.go               | 2 +-
- sdk/cliproxy/model_list_interceptor.go      | 2 +-
- sdk/cliproxy/model_list_interceptor_test.go | 2 +-
- 4 files changed, 4 insertions(+), 4 deletions(-)
+Rebased onto official CLIProxyAPI v8.0.22.
 
+---
 diff --git a/config.example.yaml b/config.example.yaml
-index 7a4d5efb..cb56fe83 100644
+index 8b8b55a..61adcdb 100644
 --- a/config.example.yaml
 +++ b/config.example.yaml
-@@ -1086,7 +1086,7 @@ observability:
+@@ -1112,7 +1112,7 @@ observability:
      # Record proxy request/response logs. Management requests are excluded.
      request-log: false
  
@@ -24,10 +20,10 @@ index 7a4d5efb..cb56fe83 100644
      codex-dump: false
  
 diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
-index fcba1a4e..6ab17381 100644
+index ebe5352..f22afa4 100644
 --- a/internal/config/sdk_config.go
 +++ b/internal/config/sdk_config.go
-@@ -50,7 +50,7 @@ type SDKConfig struct {
+@@ -53,7 +53,7 @@ type SDKConfig struct {
  	// RequestLog enables or disables detailed request logging functionality.
  	RequestLog bool `yaml:"request-log" json:"request-log"`
  
@@ -35,9 +31,9 @@ index fcba1a4e..6ab17381 100644
 +	// CodexDump enables Codex WS/HTTPS frame and message dump to logrus trace (linux only, default off).
  	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
  
- 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
+ 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
 diff --git a/sdk/cliproxy/model_list_interceptor.go b/sdk/cliproxy/model_list_interceptor.go
-index b3371098..23956008 100644
+index b337109..2395600 100644
 --- a/sdk/cliproxy/model_list_interceptor.go
 +++ b/sdk/cliproxy/model_list_interceptor.go
 @@ -6,7 +6,7 @@ import (
@@ -50,7 +46,7 @@ index b3371098..23956008 100644
  
  const (
 diff --git a/sdk/cliproxy/model_list_interceptor_test.go b/sdk/cliproxy/model_list_interceptor_test.go
-index c51057b5..7cc973fb 100644
+index c51057b..7cc973f 100644
 --- a/sdk/cliproxy/model_list_interceptor_test.go
 +++ b/sdk/cliproxy/model_list_interceptor_test.go
 @@ -8,7 +8,7 @@ import (
@@ -62,3 +58,5 @@ index c51057b5..7cc973fb 100644
  )
  
  type modelListInterceptorFunc func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+-- 
+2.43.0
