@@ -156,7 +156,8 @@ CLIProxyAPI integration patch set. The rebased patches and pinned official
 upstream commit are recorded in
 [`patches/cliproxyapi/manifest.json`](./patches/cliproxyapi/manifest.json).
 The patch series includes plugin lifecycle and model-catalog integration,
-Codex session metadata, and trace-level boundary diagnostics. Explicit raw
+Codex session metadata, interrupt control on the native duplex WebSocket path,
+and trace-level boundary diagnostics. Explicit raw
 capture is Linux-only, requires both `codex-dump: true` and `trace: true`, and
 writes exact bytes to separate private artifacts. Application logs contain a
 classified payload view; they never contain the captured raw bytes.
@@ -173,7 +174,9 @@ bash scripts/check-cliproxyapi.sh
 
 To update the host, review a newer official CLIProxyAPI commit, rebase the
 ordered patches, refresh their checksums in the manifest, then run the focused
-check script on a dedicated branch.
+check script on a dedicated branch. See the
+[Codex 0.162 compatibility notes](docs/codex-0162-interrupt.md) for the required
+duplex setting and protocol boundaries.
 
 Homebrew formulas are maintained in the separate
 [wignerStan/homebrew-tap](https://github.com/wignerStan/homebrew-tap) repository.
