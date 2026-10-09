@@ -12,9 +12,10 @@ copying the selected package source to `build/cliproxyapi/internal/infra`.
 CPA imports that internal source path explicitly. It does not impersonate the
 upstream module, generate a module, or change CPA's unrelated dependency graph.
 
-Patch 0012 retains only CPA-specific metadata projection, protocol event selection,
-header visibility choices, artifact naming and capture consent. Infra owns credential
-classification/hashing, bounded stream storage, queue admission, idle expiration,
+Patch 0012 retains only CPA-specific metadata field selection, protocol event
+selection, header visibility choices, artifact naming and capture consent. Infra
+owns the shared metadata projection, credential classification/hashing, bounded
+stream storage, queue admission, idle expiration,
 shutdown draining, private file writing and retention. CPA selects all regular
 `.raw` files in its dedicated dump directory for the retention budget, including
 legacy artifact names; symlinks and foreign extensions stay outside that ownership.
