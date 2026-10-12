@@ -21,8 +21,13 @@ func jsonRegistrationForTest(t *testing.T, raw []byte) []byte {
 	if cfg.StateFile == policy.DefaultConfig().StateFile {
 		cfg.StateFile = filepath.Join(t.TempDir(), "policy.json")
 	}
+	var source map[string]any
+	if err = yaml.Unmarshal(raw, &source); err != nil {
+		t.Fatal(err)
+	}
+	interval, _ := source["poll_interval"].(string)
 	if _, err := os.Stat(cfg.StateFile); err == nil {
-		out, err := yaml.Marshal(pluginRegistration{StateFile: cfg.StateFile})
+		out, err := yaml.Marshal(pluginRegistration{StateFile: cfg.StateFile, PollInterval: interval})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -37,10 +42,6 @@ func jsonRegistrationForTest(t *testing.T, raw []byte) []byte {
 	}
 	state.Enabled = &cfg.Enabled
 	state.GlobalWeightedRoundRobin = &cfg.GlobalWeightedRoundRobin
-	var source map[string]any
-	if err = yaml.Unmarshal(raw, &source); err != nil {
-		t.Fatal(err)
-	}
 	if groups, ok := source["catalog_groups"]; ok {
 		state.CatalogGroups, err = json.Marshal(groups)
 		if err != nil {
@@ -54,7 +55,7 @@ func jsonRegistrationForTest(t *testing.T, raw []byte) []byte {
 	if err = os.WriteFile(cfg.StateFile, doc, 0600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := yaml.Marshal(pluginRegistration{StateFile: cfg.StateFile})
+	out, err := yaml.Marshal(pluginRegistration{StateFile: cfg.StateFile, PollInterval: interval})
 	if err != nil {
 		t.Fatal(err)
 	}

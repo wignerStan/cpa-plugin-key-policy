@@ -28,7 +28,7 @@ class MigrationTests(unittest.TestCase):
             migration.migrate(config)
             doc = json.loads(state.read_text())
             registration = yaml.safe_load(config.read_text())['plugins']['configs']['cpa-key-policy']
-            self.assertEqual(set(registration), {'enabled', 'priority', 'state_file'})
+            self.assertEqual(set(registration), {'enabled', 'priority', 'state_file', 'poll_interval'})
             self.assertEqual(doc['usage']['k']['daily']['total_usd'], 8)
             self.assertEqual(doc['catalog_groups'], settings['catalog_groups'])
             self.assertTrue(doc['global_weighted_round_robin'])

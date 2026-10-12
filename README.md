@@ -207,6 +207,7 @@ plugins:
       enabled: true
       priority: 10
       state_file: "/absolute/path/cpa-key-policy-state.json"
+      poll_interval: "5s"
 ```
 
 All plugin settings belong to the JSON file selected by `state_file`.
@@ -220,7 +221,7 @@ one trailing `*` prefix wildcard. Their `patch`, `remove`, and explicit
 
 Notes:
 
-- JSON is authoritative for all plugin settings and usage. YAML contains only host registration and the `state_file` path.
+- JSON is authoritative for all plugin settings and usage. YAML contains only host registration, the `state_file` path, and `poll_interval`.
 - `include_models` supports exact names and a single trailing `*` prefix wildcard. `exclude_models` uses the same grammar and always wins across all groups matched by the key.
 - A group-level `patch` / `remove` applies to entries selected by `include_models` or `include_unlisted`, and is inherited by explicit `models`. A model-specific patch is merged afterward and wins on conflicts.
 - `include_unlisted: true` is equivalent to including every source model; group patch/remove and exclusions still apply. The default remains `false` for strict per-key allow-lists.
@@ -382,19 +383,21 @@ see [infra diagnostic source provenance](docs/source-relationships/infra-diagnos
 Raw dumps require explicit opt-in and never perform per-delta file writes or trace
 logging. Capture owners drain on configuration changes and shutdown.
 
-## JSON policy authority and notifications
+## JSON policy authority and fixed-interval checks
 
 This follows the external-store / notification / memory-cache pattern in
 `infra/go/config/dynamic`. JSON replaces the database for this single-worker
 implementation. It owns all plugin settings: keys and hashes, permissions,
 limits, aliases, classification, scheduling, and catalog groups. Usage remains
-in the same document. Host YAML owns plugin enablement, priority, and its file
-locator only.
+in the same document. Host YAML owns plugin enablement, priority, its file locator, and
+`poll_interval`. The default check interval is `5s`; it must be a positive
+duration such as `500ms`, `5s`, or `1m`.
 
 Management writes read the latest JSON policy, validate the change, atomically
 commit it, and then update the query cache. Failed writes do not publish policy.
-Request handling queries memory. File notifications watch the parent directory
-so atomic file replacement and in-place edits both refresh policy and catalogs.
+Request handling queries memory. A fixed-interval timer reads JSON and compares policy content. Both atomic
+replacement and in-place edits refresh policy and catalogs at the next check.
+This JSON backend does not use file notifications.
 Usage-only writes preserve policy and do not trigger a policy cache reload.
 `POST /v0/management/plugins/cpa-key-policy/reload` provides explicit reload.
 Invalid JSON keeps the last valid cache and reports `policy_reload_error` in
@@ -408,6 +411,6 @@ To migrate from either previous layout, stop CPA and run:
 python3 scripts/migrate-policy-state.py /path/to/config.yaml
 ```
 
-The script backs up both files, moves every plugin setting into JSON, preserves
-usage and key hashes, and leaves only registration fields in YAML. Start CPA
+The script backs up both files, moves policy settings into JSON, preserves
+usage and key hashes, and leaves registration plus `poll_interval` in YAML. Start CPA
 with the updated plugin. Version 3 is the authoritative JSON format.

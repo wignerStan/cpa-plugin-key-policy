@@ -15,8 +15,8 @@ import (
 )
 
 type App struct {
-	notificationMu    sync.Mutex
-	notifications     *policyNotifications
+	pollMu            sync.Mutex
+	poller            *policyPoller
 	policyReloadError string
 	reloadMu          sync.Mutex
 	store             *policy.Store
@@ -121,12 +121,12 @@ func (a *App) configure(raw []byte) error {
 	a.clearClassifyCache()
 	a.clearSchedulerState()
 	a.store.StartUsageFlusher()
-	return a.startPolicyNotifications()
+	return a.startPolicyPolling(bootstrap.PollInterval)
 }
 
 // Shutdown flushes usage. Host calls this on plugin unload.
 func (a *App) Shutdown() {
-	a.stopPolicyNotifications()
+	a.stopPolicyPolling()
 	a.store.StopUsageFlusher()
 }
 
@@ -140,6 +140,7 @@ func (a *App) registration() Registration {
 			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
 			ConfigFields: []ConfigField{
 				{Name: "state_file", Type: "string", Description: "Authoritative plugin JSON settings and usage document."},
+				{Name: "poll_interval", Type: "string", Description: "Fixed interval for checking JSON policy changes; default 5s."},
 			},
 		},
 		Capabilities: Capabilities{

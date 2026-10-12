@@ -5,23 +5,22 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"cpa-key-policy/internal/policy"
-	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 )
 
 type pluginRegistration struct {
-	Enabled   *bool  `yaml:"enabled"`
-	Priority  int    `yaml:"priority"`
-	StateFile string `yaml:"state_file"`
+	Enabled      *bool  `yaml:"enabled"`
+	Priority     int    `yaml:"priority"`
+	StateFile    string `yaml:"state_file"`
+	PollInterval string `yaml:"poll_interval"`
 }
 
 func decodeRegistration(raw []byte) (pluginRegistration, error) {
-	cfg := pluginRegistration{StateFile: policy.DefaultConfig().StateFile}
+	cfg := pluginRegistration{StateFile: policy.DefaultConfig().StateFile, PollInterval: "5s"}
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return cfg, nil
 	}
@@ -32,6 +31,12 @@ func decodeRegistration(raw []byte) (pluginRegistration, error) {
 	}
 	if cfg.StateFile == "" {
 		cfg.StateFile = policy.DefaultConfig().StateFile
+	}
+	if cfg.PollInterval == "" {
+		cfg.PollInterval = "5s"
+	}
+	if interval, err := time.ParseDuration(cfg.PollInterval); err != nil || interval <= 0 {
+		return cfg, fmt.Errorf("poll_interval must be a positive duration, such as 5s")
 	}
 	return cfg, nil
 }
@@ -80,59 +85,37 @@ func policyDigest(path string) ([32]byte, error) {
 	return sha256.Sum256(raw), nil
 }
 
-type policyNotifications struct {
-	watcher *fsnotify.Watcher
-	stop    chan struct{}
-	done    chan struct{}
-	once    sync.Once
+type policyPoller struct {
+	stop     chan struct{}
+	done     chan struct{}
+	once     sync.Once
+	interval time.Duration
 }
 
-func (a *App) startPolicyNotifications() error {
+func (a *App) startPolicyPolling(intervalText string) error {
+	interval, err := time.ParseDuration(intervalText)
+	if err != nil || interval <= 0 {
+		return fmt.Errorf("poll_interval must be a positive duration")
+	}
 	path := a.store.StatePath()
 	digest, err := policyDigest(path)
 	if err != nil {
 		return err
 	}
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	if err = watcher.Add(filepath.Dir(path)); err != nil {
-		watcher.Close()
-		return err
-	}
-	n := &policyNotifications{watcher: watcher, stop: make(chan struct{}), done: make(chan struct{})}
-	a.stopPolicyNotifications()
-	a.notificationMu.Lock()
-	a.notifications = n
-	a.notificationMu.Unlock()
+	a.stopPolicyPolling()
+	p := &policyPoller{stop: make(chan struct{}), done: make(chan struct{}), interval: interval}
+	a.pollMu.Lock()
+	a.poller = p
+	a.pollMu.Unlock()
 	go func() {
-		defer close(n.done)
-		timer := time.NewTimer(time.Hour)
-		timer.Stop()
-		defer timer.Stop()
+		defer close(p.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-n.stop:
+			case <-p.stop:
 				return
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if filepath.Clean(event.Name) != path {
-					continue
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
-					continue
-				}
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(30 * time.Millisecond)
-			case <-timer.C:
+			case <-ticker.C:
 				next, err := policyDigest(path)
 				if err != nil {
 					a.setReloadError(err)
@@ -148,35 +131,29 @@ func (a *App) startPolicyNotifications() error {
 				}
 				digest = next
 				a.setReloadError(nil)
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				a.setReloadError(err)
 			}
 		}
 	}()
-	// Close the registration race: a write between initial load and watcher creation
-	// must be reflected before requests proceed.
+	// Startup reads the current document immediately; later checks use the fixed interval.
 	if err = a.reloadJSONPolicy(); err != nil {
-		a.stopPolicyNotifications()
+		a.stopPolicyPolling()
 		return err
 	}
 	return nil
 }
-func (a *App) stopPolicyNotifications() {
-	a.notificationMu.Lock()
-	n := a.notifications
-	a.notifications = nil
-	a.notificationMu.Unlock()
-	if n != nil {
-		n.once.Do(func() { close(n.stop); _ = n.watcher.Close() })
-		<-n.done
+func (a *App) stopPolicyPolling() {
+	a.pollMu.Lock()
+	p := a.poller
+	a.poller = nil
+	a.pollMu.Unlock()
+	if p != nil {
+		p.once.Do(func() { close(p.stop) })
+		<-p.done
 	}
 }
 func (a *App) setReloadError(err error) {
-	a.notificationMu.Lock()
-	defer a.notificationMu.Unlock()
+	a.pollMu.Lock()
+	defer a.pollMu.Unlock()
 	a.policyReloadError = ""
 	if err != nil {
 		a.policyReloadError = err.Error()
@@ -184,8 +161,11 @@ func (a *App) setReloadError(err error) {
 }
 func (a *App) policyStatus() map[string]any {
 	out := a.store.Status()
-	a.notificationMu.Lock()
+	a.pollMu.Lock()
 	out["policy_reload_error"] = a.policyReloadError
-	a.notificationMu.Unlock()
+	if a.poller != nil {
+		out["poll_interval"] = a.poller.interval.String()
+	}
+	a.pollMu.Unlock()
 	return out
 }
