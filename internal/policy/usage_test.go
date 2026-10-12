@@ -606,7 +606,7 @@ func TestAliasUsageBreakdown(t *testing.T) {
 	teamA := store.Keys()[0]
 	teamA.Aliases = []KeyAliasRef{{Alias: "fast"}}
 	teamA.Models = nil
-	if err := store.UpsertKey(teamA, true); err != nil {
+	if err := store.UpsertKey(teamA); err != nil {
 		t.Fatal(err)
 	}
 
@@ -695,7 +695,7 @@ func TestAliasUsageLegacyStateMigrates(t *testing.T) {
 	now := time.Date(2026, 6, 29, 10, 0, 0, 0, time.UTC)
 	store := NewStore()
 	store.SetClock(func() time.Time { return now })
-	if err := store.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{{ID: "team-a", Enabled: true, KeyHash: hashForUsageTest(t, "cpa_usage"), Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}}}); err != nil {
+	if err := store.Configure(Config{Enabled: true, StateFile: path}); err != nil {
 		t.Fatal(err)
 	}
 

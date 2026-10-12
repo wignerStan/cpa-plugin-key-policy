@@ -9,6 +9,7 @@ import (
 
 func TestBuildCatalogManagementRoute(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	yaml := []byte(`
 enabled: true
 state_file: "` + filepath.ToSlash(filepath.Join(t.TempDir(), "state.json")) + `"
@@ -20,7 +21,7 @@ classify_rules:
     enabled: true
 keys: []
 `)
-	reqCfg, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	reqCfg, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, reqCfg); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +87,7 @@ keys: []
 
 func TestBuildCatalogRegisteredInManagement(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	reg := app.managementRegistration()
 	found := false
 	for _, r := range reg.Routes {

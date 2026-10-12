@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "enabled": true,
+  "global_weighted_round_robin": false,
+  "keys": [
+    {
+      "id": "demo",
+      "name": "Example key",
+      "enabled": true,
+      "key_hash": "sha256:e5ae8e9946581d38f09ed9a83454ae912998223740a685d66526e0c4d567e581",
+      "rpm": 60,
+      "allow_models_endpoint": true,
+      "include_models": [
+        "gpt-*",
+        "ustc/*"
+      ],
+      "exclude_models": [
+        "ustc/unlimited-ocr"
+      ]
+    }
+  ],
+  "aliases": [],
+  "classify_rules": [],
+  "catalog_groups": [
+    {
+      "name": "gpt",
+      "keys": [
+        "demo"
+      ],
+      "include_models": [
+        "gpt-*"
+      ]
+    },
+    {
+      "name": "ustc",
+      "keys": [
+        "demo"
+      ],
+      "include_models": [
+        "ustc/*"
+      ],
+      "exclude_models": [
+        "ustc/unlimited-ocr"
+      ]
+    }
+  ],
+  "usage": {}
+}

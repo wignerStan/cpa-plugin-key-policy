@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -14,20 +15,23 @@ import (
 )
 
 type App struct {
-	store         *policy.Store
-	classifyMu    sync.RWMutex
-	classifyCache map[string][]string
-	schedulerMu   sync.Mutex
-	schedulerRR   map[string]*smoothWeightedState
-	catalogMu     sync.RWMutex
-	catalog       catalogPolicy
+	notificationMu    sync.Mutex
+	notifications     *policyNotifications
+	policyReloadError string
+	reloadMu          sync.Mutex
+	store             *policy.Store
+	classifyMu        sync.RWMutex
+	classifyCache     map[string][]string
+	schedulerMu       sync.Mutex
+	schedulerRR       map[string]*smoothWeightedState
+	catalogMu         sync.RWMutex
+	catalog           catalogPolicy
 }
 
 const classifyCacheCapacity = 4096
 
 func NewApp() *App {
 	store := policy.NewStore()
-	_ = store.Configure(policy.DefaultConfig())
 	return &App{
 		store:         store,
 		classifyCache: make(map[string][]string),
@@ -86,12 +90,23 @@ func (a *App) configure(raw []byte) error {
 			return err
 		}
 	}
-	catalog, err := decodeCatalogPolicy(req.ConfigYAML)
+	bootstrap, err := decodeRegistration(req.ConfigYAML)
 	if err != nil {
 		return err
 	}
-	cfg, err := policy.DecodeConfig(req.ConfigYAML)
+	cfg := policy.DefaultConfig()
+	cfg.StateFile = bootstrap.StateFile
+	path, err := policy.ResolveStatePath(cfg.StateFile)
 	if err != nil {
+		return err
+	}
+	catalog := catalogPolicy{}
+	if state, err := policy.LoadState(path); err == nil {
+		catalog, err = catalogFromState(state)
+		if err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := a.store.Configure(cfg); err != nil {
@@ -106,11 +121,12 @@ func (a *App) configure(raw []byte) error {
 	a.clearClassifyCache()
 	a.clearSchedulerState()
 	a.store.StartUsageFlusher()
-	return nil
+	return a.startPolicyNotifications()
 }
 
 // Shutdown flushes usage. Host calls this on plugin unload.
 func (a *App) Shutdown() {
+	a.stopPolicyNotifications()
 	a.store.StopUsageFlusher()
 }
 
@@ -123,11 +139,7 @@ func (a *App) registration() Registration {
 			Author:           "cpa-key-policy",
 			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
 			ConfigFields: []ConfigField{
-				{Name: "enabled", Type: "boolean", Description: "Enable or disable this plugin without unloading it."},
-				{Name: "state_file", Type: "string", Description: "JSON runtime usage file; static policy is configured in YAML changes made through the Management API."},
-				{Name: "global_weighted_round_robin", Type: "boolean", Description: "忽略别名目标的 group，对当前 provider/model 的全部候选凭证执行全局加权轮询。"},
-				{Name: "catalog_groups", Type: "array", Description: "Reusable /v1/models catalogs assigned to downstream key IDs; entries can clone, rename, patch, or remove model metadata."},
-				{Name: "keys", Type: "array", Description: "Initial downstream key policy list. State file wins after it exists."},
+				{Name: "state_file", Type: "string", Description: "Authoritative plugin JSON settings and usage document."},
 			},
 		},
 		Capabilities: Capabilities{
@@ -532,6 +544,7 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 	base := "/plugins/" + PluginID
 	return ManagementRegistrationResponse{
 		Routes: []ManagementRoute{
+			{Method: http.MethodPost, Path: base + "/reload", Description: "Reload authoritative JSON policy and invalidate caches."},
 			{Method: http.MethodGet, Path: base + "/keys", Description: "List downstream CPA key policies."},
 			{Method: http.MethodPost, Path: base + "/keys", Description: "Create a downstream CPA key policy."},
 			{Method: http.MethodPatch, Path: base + "/keys", Description: "Update a downstream CPA key policy by id."},
@@ -574,11 +587,12 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 	}
 
 	base := "/v0/management/plugins/" + PluginID
-	staticPath := path == base+"/keys" || path == base+"/keys/rotate" || path == base+"/settings" || path == base+"/aliases" || path == base+"/classify-rules" || path == base+"/classify-rules/reorder"
-	if staticPath && req.Method != http.MethodGet {
-		return OKEnvelope(jsonError(http.StatusMethodNotAllowed, "static_configuration", "Edit cpa-key-policy settings in config.yaml; JSON stores runtime usage only."))
-	}
 	switch {
+	case req.Method == http.MethodPost && path == base+"/reload":
+		if err := a.reloadJSONPolicy(); err != nil {
+			return OKEnvelope(jsonError(http.StatusBadRequest, "reload_failed", err.Error()))
+		}
+		return OKEnvelope(jsonResponse(http.StatusOK, map[string]bool{"reloaded": true}))
 	case req.Method == http.MethodGet && path == base+"/keys":
 		return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"keys": a.publicKeys(a.store.Keys())}))
 	case req.Method == http.MethodPost && path == base+"/keys":
@@ -594,7 +608,7 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 	case req.Method == http.MethodGet && path == base+"/keys/usage":
 		return OKEnvelope(a.keyUsage(idFromRequest(req.Query, req.Body)))
 	case req.Method == http.MethodGet && path == base+"/status":
-		return OKEnvelope(jsonResponse(http.StatusOK, a.store.Status()))
+		return OKEnvelope(jsonResponse(http.StatusOK, a.policyStatus()))
 	case req.Method == http.MethodGet && path == base+"/settings":
 		return OKEnvelope(a.schedulerSettings())
 	case req.Method == http.MethodPatch && path == base+"/settings":
@@ -728,7 +742,7 @@ func (a *App) createKey(body []byte) ManagementResponse {
 		WeeklyLimitUSD:      applyFloat64(req.WeeklyLimitUSD, 0),
 		AllowModelsEndpoint: applyBool(req.AllowModelsEndpoint, false),
 	}
-	if err := a.store.UpsertKey(item, true); err != nil {
+	if err := a.store.UpsertKey(item); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
 	}
 	stored := item
@@ -755,61 +769,52 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 	if id == "" {
 		return jsonError(http.StatusBadRequest, "missing_id", "id is required")
 	}
-	keys := a.store.Keys()
-	var current *policy.KeyConfig
-	for i := range keys {
-		if keys[i].ID == id {
-			copy := keys[i]
-			current = &copy
-			break
+	err := a.store.PatchKey(id, func(current *policy.KeyConfig) error {
+		if req.Name != nil {
+			current.Name = strings.TrimSpace(*req.Name)
 		}
-	}
-	if current == nil {
-		return jsonError(http.StatusNotFound, "not_found", "key not found")
-	}
-	if req.Name != nil {
-		current.Name = strings.TrimSpace(*req.Name)
-	}
-	if req.Enabled != nil {
-		current.Enabled = *req.Enabled
-	}
-	if req.RPM != nil {
-		current.RPM = *req.RPM
-	}
-	if req.DailyLimitUSD != nil {
-		current.DailyLimitUSD = *req.DailyLimitUSD
-	}
-	if req.WeeklyLimitUSD != nil {
-		current.WeeklyLimitUSD = *req.WeeklyLimitUSD
-	}
-	if req.AllowModelsEndpoint != nil {
-		current.AllowModelsEndpoint = *req.AllowModelsEndpoint
-	}
-	if req.Models != nil {
-		current.Models = req.Models
-	}
-	if req.Aliases != nil {
-		current.Aliases = req.Aliases
-	}
-	if req.IncludeModels != nil {
-		current.IncludeModels = append([]string(nil), (*req.IncludeModels)...)
-	}
-	if req.ExcludeModels != nil {
-		current.ExcludeModels = append([]string(nil), (*req.ExcludeModels)...)
-	}
-	if strings.TrimSpace(req.Key) != "" {
-		hash, err := policy.HashKey(req.Key)
-		if err != nil {
-			return jsonError(http.StatusBadRequest, "invalid_key", err.Error())
+		if req.Enabled != nil {
+			current.Enabled = *req.Enabled
 		}
-		current.KeyHash = hash
+		if req.RPM != nil {
+			current.RPM = *req.RPM
+		}
+		if req.DailyLimitUSD != nil {
+			current.DailyLimitUSD = *req.DailyLimitUSD
+		}
+		if req.WeeklyLimitUSD != nil {
+			current.WeeklyLimitUSD = *req.WeeklyLimitUSD
+		}
+		if req.AllowModelsEndpoint != nil {
+			current.AllowModelsEndpoint = *req.AllowModelsEndpoint
+		}
+		if req.Models != nil {
+			current.Models = req.Models
+		}
+		if req.Aliases != nil {
+			current.Aliases = req.Aliases
+		}
+		if req.IncludeModels != nil {
+			current.IncludeModels = append([]string(nil), (*req.IncludeModels)...)
+		}
+		if req.ExcludeModels != nil {
+			current.ExcludeModels = append([]string(nil), (*req.ExcludeModels)...)
+		}
+		if strings.TrimSpace(req.Key) != "" {
+			hash, err := policy.HashKey(req.Key)
+			if err != nil {
+				return err
+			}
+			current.KeyHash = hash
+		}
+		return nil
+	})
+	if err != nil {
+		return storeError(err)
 	}
-	if err := a.store.UpsertKey(*current, true); err != nil {
-		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
-	}
-	stored := *current
+	var stored policy.KeyConfig
 	for _, candidate := range a.store.Keys() {
-		if candidate.ID == current.ID {
+		if candidate.ID == id {
 			stored = candidate
 			break
 		}

@@ -2,15 +2,40 @@ package plugin
 
 import (
 	"encoding/json"
+	"net/http"
 	"path/filepath"
 	"testing"
 )
 
+func TestSchedulerSettingsManagementAndRestartPersistence(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	app := configureSettingsApp(t, statePath)
+
+	patchResponse := callManagementForTest(t, app, http.MethodPatch, "/v0/management/plugins/cpa-key-policy/settings", []byte(`{"global_weighted_round_robin":true}`))
+	assertGlobalWeightedSetting(t, patchResponse, http.StatusOK, true)
+
+	getResponse := callManagementForTest(t, app, http.MethodGet, "/v0/management/plugins/cpa-key-policy/settings", nil)
+	assertGlobalWeightedSetting(t, getResponse, http.StatusOK, true)
+
+	restarted := configureSettingsApp(t, statePath)
+	restartedResponse := callManagementForTest(t, restarted, http.MethodGet, "/v0/management/plugins/cpa-key-policy/settings", nil)
+	assertGlobalWeightedSetting(t, restartedResponse, http.StatusOK, true)
+}
+
+func TestSchedulerSettingsRejectsMissingValue(t *testing.T) {
+	app := configureSettingsApp(t, filepath.Join(t.TempDir(), "state.json"))
+	response := callManagementForTest(t, app, http.MethodPatch, "/v0/management/plugins/cpa-key-policy/settings", []byte(`{}`))
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺少设置时状态码 = %d，期望 %d，响应体 = %s", response.StatusCode, http.StatusBadRequest, response.Body)
+	}
+}
+
 func configureSettingsApp(t *testing.T, statePath string) *App {
 	t.Helper()
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	configYAML := []byte("enabled: true\nstate_file: \"" + filepath.ToSlash(statePath) + "\"\nglobal_weighted_round_robin: false\n")
-	request, err := json.Marshal(LifecycleRequest{ConfigYAML: configYAML})
+	request, err := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, configYAML)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -111,7 +111,7 @@ Two sources of “which auth file may serve this request”:
 - If no custom rule matches → built-in tier (for Codex/Antigravity) or flat (no group) for other auth-file providers.
 - OpenAI-compat / API-key channels stay **flat** (no groups).
 
-Configure classification rules in YAML. Management APIs provide read-only inspection and previews.
+Configure classification rules through the Web UI or management API. Writes commit to JSON and refresh the memory cache.
 
 ### OpenAI-compatibility providers
 
@@ -196,7 +196,7 @@ combined checksum file through the release workflow.
 
 ## Config
 
-Minimal shape (see also [`config.example.yaml`](./config.example.yaml)):
+Host registration (see [`config.example.yaml`](config.example.yaml)):
 
 ```yaml
 plugins:
@@ -206,50 +206,21 @@ plugins:
     cpa-key-policy:
       enabled: true
       priority: 10
-      state_file: "cpa-key-policy-state.json"
-      global_weighted_round_robin: true
+      state_file: "/absolute/path/cpa-key-policy-state.json"
 ```
 
-`catalog_groups` are operator-owned plugin config. Each group matches one or more downstream **key IDs** (exact IDs, shell-style globs, or `*`) and defines the catalog those keys see. `include_models` and `exclude_models` accept exact model IDs or one trailing `*` prefix wildcard. The group-level `patch` deep-merges model-catalog JSON fields into every automatically included entry; `remove` deletes top-level fields. Exact `models` entries can still clone/rename a `source` and add a model-specific patch.
+All plugin settings belong to the JSON file selected by `state_file`.
+See [`policy.example.json`](policy.example.json) for keys, aliases,
+classification, scheduling, catalog groups, and usage. The plugin rejects those
+settings in host YAML, so there is no competing policy source.
 
-```yaml
-catalog_groups:
-  - name: pi-coding
-    keys: ["team-*", "dev"]
-
-    # Keep model families without enumerating every generated catalog entry.
-    # Matching is case-insensitive; only exact or one trailing "*" is valid.
-    include_models:
-      - "gpt-5-*"
-      - "claude-*"
-    exclude_models:
-      - "gpt-5-codex-*"
-
-    # Deep-merge these fields into every retained source catalog model.
-    # This is catalog metadata patching, not an HTTP PATCH operation.
-    patch:
-      context_window: 262144
-      max_context_window: 262144
-      max_tokens: 32768
-    remove:
-      - upgrade
-
-    models:
-      # Explicit entries still clone/rename a source. Their patch is merged
-      # after the group patch, so the model-specific value wins.
-      - id: fast
-        source: gemini-3.8-flash-high
-        patch:
-          max_tokens: 16384
-          display_name: "Fast"
-
-      # source defaults to id when omitted.
-      - id: gpt-5.4
-```
+Catalog groups match downstream key IDs and select models by exact name or
+one trailing `*` prefix wildcard. Their `patch`, `remove`, and explicit
+`models` fields keep the same semantics inside JSON.
 
 Notes:
 
-- YAML is authoritative for all static policy. JSON restores only runtime usage.
+- JSON is authoritative for all plugin settings and usage. YAML contains only host registration and the `state_file` path.
 - `include_models` supports exact names and a single trailing `*` prefix wildcard. `exclude_models` uses the same grammar and always wins across all groups matched by the key.
 - A group-level `patch` / `remove` applies to entries selected by `include_models` or `include_unlisted`, and is inherited by explicit `models`. A model-specific patch is merged afterward and wins on conflicts.
 - `include_unlisted: true` is equivalent to including every source model; group patch/remove and exclusions still apply. The default remains `false` for strict per-key allow-lists.
@@ -259,7 +230,7 @@ Notes:
 - Catalog filtering requires a CPA host that exposes `GET /v1/models` through the existing `response.intercept_after` plugin hook. Without that host patch, the old binary behavior remains.
 - `global_weighted_round_robin: true` ignores the selected alias target group and places every current provider/model candidate in one global pool. Distribution then follows the Weight values on CPA's credential page. The default is `false`.
 - With this option enabled, alias-level group rotation no longer restricts the final credential. Native CPA keys remain unaffected.
-- Define keys and aliases in YAML. Management APIs can inspect policy but cannot change it.
+- Create keys and aliases through the Web UI or management API, or edit the authoritative JSON document.
 - Never commit real key hashes, management secrets, or live host URLs into public docs.
 
 ---
@@ -301,6 +272,7 @@ Exact paths (no path templates). Auth: CPA management bearer token.
 
 - `GET/POST/PATCH/DELETE …/keys` (`id` in query or body for mutate)
 - key `PATCH` may independently update `include_models` and `exclude_models`; `[]` clears only that list
+- `POST …/reload` (explicit JSON reload notification)
 - `POST …/keys/rotate?id=…`
 - `POST …/keys/reset-rpm?id=…`
 - `GET …/keys/usage?id=…`
@@ -386,10 +358,9 @@ For Pi/Codex clients (`/v1/models?client_version=...`) the plugin preserves the 
 ## Setup checklist
 
 1. Build / install the `.so` into CPA `plugins.dir`.
-2. Enable `plugins` + `cpa-key-policy` in CPA config; set `state_file`.
-   Seed keys use one `key: "cpa_…"` value. The plugin hashes it at startup and
-   stores key hashes in YAML and runtime usage in JSON; plaintext secrets do not enter usage JSON.
-   are never written there. Existing `key_hash` state entries remain valid.
+2. Register the plugin in host YAML and set an absolute `state_file` path.
+   Put all plugin settings in that JSON document. A one-time `key` value is
+   hashed on load and rewritten as `key_hash`; plaintext is not serialized.
 3. Open the Web UI with the management secret.
 4. (Optional) Define **classify rules** if you need custom credential buckets.
 5. Create **aliases** (multi-target / pricing) and/or pick models per key (with tier or Custom group).
@@ -411,22 +382,32 @@ see [infra diagnostic source provenance](docs/source-relationships/infra-diagnos
 Raw dumps require explicit opt-in and never perform per-delta file writes or trace
 logging. Capture owners drain on configuration changes and shutdown.
 
-## Static policy and runtime state
+## JSON policy authority and notifications
 
-The plugin follows the static-file / dynamic-store pattern in infra/go/config.
-CPA YAML reload replaces the entire policy. JSON cannot restore or override keys,
-permissions, aliases, classification rules, scheduling, or catalog metadata.
-JSON version 2 contains only version, updated_at, and usage (dollar totals,
-tokens, calls, and usage windows). No database is required.
+This follows the external-store / notification / memory-cache pattern in
+`infra/go/config/dynamic`. JSON replaces the database for this single-worker
+implementation. It owns all plugin settings: keys and hashes, permissions,
+limits, aliases, classification, scheduling, and catalog groups. Usage remains
+in the same document. Host YAML owns plugin enablement, priority, and its file
+locator only.
 
-Static management API writes return HTTP 405; read APIs and runtime RPM reset
-remain available. Edit YAML through CPA configuration and reload it.
+Management writes read the latest JSON policy, validate the change, atomically
+commit it, and then update the query cache. Failed writes do not publish policy.
+Request handling queries memory. File notifications watch the parent directory
+so atomic file replacement and in-place edits both refresh policy and catalogs.
+Usage-only writes preserve policy and do not trigger a policy cache reload.
+`POST /v0/management/plugins/cpa-key-policy/reload` provides explicit reload.
+Invalid JSON keeps the last valid cache and reports `policy_reload_error` in
+status; a valid edit clears the error. Usage counters in flight survive policy
+refresh. Use one worker per JSON document; shared multi-worker policy needs a
+database-backed writer and notification source.
 
-Before upgrading from legacy state, stop CPA and run:
+To migrate from either previous layout, stop CPA and run:
 
 ```sh
 python3 scripts/migrate-policy-state.py /path/to/config.yaml
 ```
 
-The migration backs up both files, moves key hashes and policy to YAML, and
-retains usage in JSON. Start CPA with the new plugin after migration.
+The script backs up both files, moves every plugin setting into JSON, preserves
+usage and key hashes, and leaves only registration fields in YAML. Start CPA
+with the updated plugin. Version 3 is the authoritative JSON format.

@@ -33,9 +33,8 @@ type KeyConfig struct {
 	ID      string `yaml:"id" json:"id"`
 	Name    string `yaml:"name" json:"name"`
 	Enabled bool   `yaml:"enabled" json:"enabled"`
-	// Key is the single user-facing seed value. It may be a plaintext cpa_…
-	// key or an existing sha256:… hash. It is never serialized to state JSON;
-	// normalizeConfig stores the resulting hash in KeyHash.
+	// Key accepts a one-time plaintext value when importing JSON policy.
+	// Only KeyHash is serialized; successful loading rewrites the JSON without plaintext.
 	Key     string      `yaml:"key,omitempty" json:"-"`
 	KeyHash string      `yaml:"key_hash,omitempty" json:"key_hash"`
 	RPM     int         `yaml:"rpm" json:"rpm"`
@@ -280,15 +279,15 @@ type UsageWindow struct {
 }
 
 type State struct {
+	needsRewrite             bool
+	Enabled                  *bool                  `json:"enabled,omitempty"`
+	CatalogGroups            json.RawMessage        `json:"catalog_groups,omitempty"`
 	Version                  int                    `json:"version"`
 	Keys                     []KeyConfig            `json:"keys,omitempty"`
 	Usage                    map[string]*UsageState `json:"usage,omitempty"`
 	UpdatedAt                time.Time              `json:"updated_at"`
 	GlobalWeightedRoundRobin *bool                  `json:"global_weighted_round_robin,omitempty"`
-	// Aliases is the global alias mapping table, persisted so that key alias
-	// references survive restarts even when config.yaml is not re-read. On
-	// Configure, the config.yaml Aliases take precedence; state Aliases are a
-	// fallback for the state-only reload path (e.g. FlushUsage recovery).
+	// Aliases and classification rules are authoritative JSON policy.
 	Aliases       []AliasMapping `json:"aliases,omitempty"`
 	ClassifyRules []ClassifyRule `json:"classify_rules,omitempty"`
 }
@@ -681,6 +680,24 @@ func LoadState(path string) (*State, error) {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return nil, err
 	}
+	for i := range state.Keys {
+		key := &state.Keys[i]
+		if key.Key == "" {
+			continue
+		}
+		secret := strings.TrimSpace(key.Key)
+		if strings.HasPrefix(secret, HashPrefix) {
+			key.KeyHash = secret
+		} else {
+			hash, err := HashKey(secret)
+			if err != nil {
+				return nil, err
+			}
+			key.KeyHash = hash
+		}
+		key.Key = ""
+		state.needsRewrite = true
+	}
 	if state.Version == 0 {
 		state.Version = 1
 	}
@@ -690,21 +707,43 @@ func LoadState(path string) (*State, error) {
 	return &state, nil
 }
 
-// SaveState writes runtime usage only. Static policy arguments are never persisted.
+// SaveState commits policy and usage to the authoritative JSON document.
 func SaveState(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule) error {
-	return saveStateDocument(path, keys, usage, aliases, rules, nil)
+	return saveStateDocument(path, keys, usage, aliases, rules, nil, nil)
 }
 
-func saveStateWithSettings(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule, globalWeightedRoundRobin bool) error {
+func saveStateWithSettings(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule, globalWeightedRoundRobin, enabled bool) error {
 	value := globalWeightedRoundRobin
-	return saveStateDocument(path, keys, usage, aliases, rules, &value)
+	return saveStateDocument(path, keys, usage, aliases, rules, &value, &enabled)
 }
 
-func saveStateDocument(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule, globalWeightedRoundRobin *bool) error {
+func saveStateDocument(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule, globalWeightedRoundRobin, enabled *bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	state := State{Version: 2, Usage: usage, UpdatedAt: time.Now().UTC()}
+	state, err := LoadState(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if state == nil {
+		state = &State{}
+	}
+	state.Version = 3
+	state.Keys = canonicalKeys(keys)
+	state.Aliases = aliases
+	state.ClassifyRules = rules
+	state.Usage = usage
+	state.UpdatedAt = time.Now().UTC()
+	if globalWeightedRoundRobin != nil {
+		state.GlobalWeightedRoundRobin = globalWeightedRoundRobin
+	}
+	if enabled != nil {
+		state.Enabled = enabled
+	}
+	if state.Enabled == nil {
+		value := true
+		state.Enabled = &value
+	}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -712,15 +751,20 @@ func saveStateDocument(path string, keys []KeyConfig, usage map[string]*UsageSta
 	return atomicWriteStateFile(path, raw)
 }
 
-// SaveUsageOnly writes runtime usage and discards legacy static policy fields.
+// SaveUsageOnly updates usage without changing authoritative policy.
 func SaveUsageOnly(path string, usage map[string]*UsageState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	if _, err := LoadState(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	state, err := LoadState(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	state := State{Version: 2, Usage: usage, UpdatedAt: time.Now().UTC()}
+	if state == nil {
+		state = &State{Version: 3}
+	}
+	state.Usage = usage
+	state.UpdatedAt = time.Now().UTC()
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

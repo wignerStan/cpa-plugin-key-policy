@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"cpa-key-policy/internal/policy"
@@ -11,6 +12,7 @@ import (
 // against credential descriptors and returns correct group mappings.
 func TestClassifyPreview(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	cfg := policy.Config{
 		Enabled: true,
 		ClassifyRules: []policy.ClassifyRule{
@@ -18,6 +20,7 @@ func TestClassifyPreview(t *testing.T) {
 			{Name: "free-rule", Field: "tier", Pattern: "^free$", Group: "free", Enabled: true},
 		},
 	}
+	cfg.StateFile = filepath.Join(t.TempDir(), "policy.json")
 	if err := app.store.Configure(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +67,14 @@ func TestClassifyPreview(t *testing.T) {
 // field name work correctly.
 func TestClassifyPreviewCustomField(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	cfg := policy.Config{
 		Enabled: true,
 		ClassifyRules: []policy.ClassifyRule{
 			{Name: "email-rule", Field: "email", Pattern: "@company\\.com$", Group: "company", Enabled: true},
 		},
 	}
+	cfg.StateFile = filepath.Join(t.TempDir(), "policy.json")
 	if err := app.store.Configure(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +108,7 @@ func TestClassifyPreviewCustomField(t *testing.T) {
 // rules appears in multiple groups (multi-group semantics).
 func TestClassifyPreviewMultiGroup(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	cfg := policy.Config{
 		Enabled: true,
 		ClassifyRules: []policy.ClassifyRule{
@@ -110,6 +116,7 @@ func TestClassifyPreviewMultiGroup(t *testing.T) {
 			{Name: "by-filename", Field: "filename", Pattern: "^codex-", Group: "codex-files", Enabled: true},
 		},
 	}
+	cfg.StateFile = filepath.Join(t.TempDir(), "policy.json")
 	if err := app.store.Configure(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -141,12 +148,14 @@ func TestClassifyPreviewMultiGroup(t *testing.T) {
 // respects custom classify rules (multi-group, override built-in).
 func TestSchedulerCustomClassifyRule(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	cfg := policy.Config{
 		Enabled: true,
 		ClassifyRules: []policy.ClassifyRule{
 			{Name: "override-team", Field: "plan_type", Pattern: "^team$", Group: "custom-team", Enabled: true},
 		},
 	}
+	cfg.StateFile = filepath.Join(t.TempDir(), "policy.json")
 	if err := app.store.Configure(cfg); err != nil {
 		t.Fatal(err)
 	}

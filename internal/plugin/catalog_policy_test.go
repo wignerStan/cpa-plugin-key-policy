@@ -157,6 +157,7 @@ func TestRewriteCatalogBodyPatchesSelectedAndKeepsUnlisted(t *testing.T) {
 
 func TestRewriteModelCatalogUsesAuthenticatedKeyMetadata(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{
 		{
 			Name: "team",
@@ -212,6 +213,7 @@ func TestCatalogProviderMatchesPlugin(t *testing.T) {
 
 func TestRewriteModelCatalogUnmatchedPluginKeyGetsEmptyCatalog(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "team", Keys: []string{"team-*"}, Models: []CatalogModel{{ID: "fast"}}}}})
 
 	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
@@ -232,6 +234,7 @@ func TestRewriteModelCatalogUnmatchedPluginKeyGetsEmptyCatalog(t *testing.T) {
 
 func TestRewriteModelCatalogLeavesNativeKeysUntouched(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast"}}}}})
 
 	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
@@ -245,6 +248,7 @@ func TestRewriteModelCatalogLeavesNativeKeysUntouched(t *testing.T) {
 
 func TestRewriteModelCatalogLeavesOtherAuthProviderUntouched(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast"}}}}})
 
 	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
@@ -262,6 +266,7 @@ func TestRewriteModelCatalogLeavesOtherAuthProviderUntouched(t *testing.T) {
 
 func TestRewriteModelCatalogFailsClosedOnUnexpectedHostShape(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{Name: "all", Keys: []string{"*"}, Models: []CatalogModel{{ID: "fast"}}}}})
 
 	body, changed := app.rewriteModelCatalog(ResponseInterceptRequest{
@@ -282,6 +287,7 @@ func TestRewriteModelCatalogFailsClosedOnUnexpectedHostShape(t *testing.T) {
 
 func TestInterceptResponseFiltersModelCatalogBeforeAliasRewrite(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	app.setCatalogPolicy(catalogPolicy{Groups: []CatalogGroup{{
 		Name: "pi",
 		Keys: []string{"team-a"},

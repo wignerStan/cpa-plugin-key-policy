@@ -23,6 +23,7 @@ func nearly(a, b float64) bool {
 func configureTestApp(t *testing.T) (*App, string) {
 	t.Helper()
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	plain := "cpa_plugin_test"
 	hash := hashForTest(t, plain)
 	yaml := []byte(`
@@ -39,7 +40,7 @@ keys:
         provider: codex
         target_model: gpt-5-codex
 `)
-	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, req); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -101,6 +102,7 @@ func TestAppAuthenticationAndRoute(t *testing.T) {
 
 func TestAppNativeRouteDelegatesToHost(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	plain := "cpa_native_route_test"
 	hash := hashForTest(t, plain)
 	yaml := []byte(`
@@ -115,7 +117,7 @@ keys:
         provider: native
         target_model: gpt-6-astra
 `)
-	reconfigure, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	reconfigure, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, reconfigure); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -208,6 +210,41 @@ func TestAppResponseInterceptorRewritesModel(t *testing.T) {
 	}
 	if string(resp.Body) != `{"id":"resp","model":"fast"}` {
 		t.Fatalf("response body = %s", resp.Body)
+	}
+}
+
+func TestAppManagementCreateAndRotate(t *testing.T) {
+	app, _ := configureTestApp(t)
+	createBody := []byte(`{"id":"team-b","models":[{"alias":"sonnet","provider":"claude","target_model":"claude-sonnet"}]}`)
+	req, _ := json.Marshal(ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/plugins/cpa-key-policy/keys",
+		Body:   createBody,
+	})
+	raw, err := app.HandleMethod(MethodManagementHandle, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := managementResponseFromEnvelope(t, raw)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", resp.StatusCode, resp.Body)
+	}
+	if !json.Valid(resp.Body) {
+		t.Fatalf("create body is not json: %s", resp.Body)
+	}
+
+	rotateReq, _ := json.Marshal(ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/plugins/cpa-key-policy/keys/rotate",
+		Query:  url.Values{"id": {"team-b"}},
+	})
+	raw, err = app.HandleMethod(MethodManagementHandle, rotateReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp = managementResponseFromEnvelope(t, raw)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rotate status = %d, body = %s", resp.StatusCode, resp.Body)
 	}
 }
 
@@ -307,8 +344,42 @@ func TestAppKeysListExposesUsageAndLimits(t *testing.T) {
 	}
 }
 
+func TestAppPatchKeySetsLimits(t *testing.T) {
+	app, _ := configureTestApp(t)
+	f := 1.5
+	patchBody, _ := json.Marshal(map[string]any{
+		"id": "team-a", "daily_limit_usd": f, "weekly_limit_usd": 10.0,
+	})
+	req, _ := json.Marshal(ManagementRequest{
+		Method: http.MethodPatch,
+		Path:   "/v0/management/plugins/cpa-key-policy/keys",
+		Body:   patchBody,
+	})
+	raw, err := app.HandleMethod(MethodManagementHandle, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := managementResponseFromEnvelope(t, raw)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.StatusCode, resp.Body)
+	}
+	var payload struct {
+		Key struct {
+			DailyLimitUSD  float64 `json:"daily_limit_usd"`
+			WeeklyLimitUSD float64 `json:"weekly_limit_usd"`
+		} `json:"key"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Key.DailyLimitUSD != 1.5 || payload.Key.WeeklyLimitUSD != 10.0 {
+		t.Fatalf("limits = %+v", payload.Key)
+	}
+}
+
 func TestManagementRegistrationDeclaresResource(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	resp := app.managementRegistration()
 	if len(resp.Resources) == 0 {
 		t.Fatal("no resources declared")
@@ -326,6 +397,7 @@ func TestManagementRegistrationDeclaresResource(t *testing.T) {
 
 func TestHandleManagementServesResourceUI(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	req, _ := json.Marshal(ManagementRequest{
 		Method: http.MethodGet,
 		Path:   "/v0/resource/plugins/cpa-key-policy/index.html",
@@ -348,6 +420,7 @@ func TestHandleManagementServesResourceUI(t *testing.T) {
 
 func TestHandleManagementResourceUnknownPath404(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	req, _ := json.Marshal(ManagementRequest{
 		Method: http.MethodGet,
 		Path:   "/v0/resource/plugins/cpa-key-policy/assets/app.js",
@@ -367,6 +440,7 @@ func TestHandleManagementResourceUnknownPath404(t *testing.T) {
 func configurePricedApp(t *testing.T) (*App, string) {
 	t.Helper()
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	plain := "cpa_priced"
 	hash := hashForTest(t, plain)
 	yaml := []byte(`
@@ -385,7 +459,7 @@ keys:
         input_price_per_million: 1
         output_price_per_million: 1
 `)
-	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, req); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -487,6 +561,7 @@ func okEnvelope(t *testing.T, raw []byte) bool {
 // cost returned would be 1.0, not 1.05) — the test pins the cache-aware total.
 func TestUsageHandleBillsCacheReadClaude(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	hash := hashForTest(t, "cpa_cache")
 	yaml := []byte(`
 enabled: true
@@ -504,7 +579,7 @@ keys:
         output_price_per_million: 1
         cache_read_price_per_million: 0.10
 `)
-	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, req); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -537,6 +612,7 @@ keys:
 // (ignoring token counts), and a Failed record charges nothing.
 func TestUsageHandlePerCallBills(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	plain := "cpa_percall_app"
 	hash := hashForTest(t, plain)
 	yaml := []byte(`
@@ -556,7 +632,7 @@ keys:
         input_price_per_million: 999
         output_price_per_million: 999
 `)
-	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, req); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -696,6 +772,7 @@ func mustHandle(t *testing.T, app *App, method string, req []byte) []byte {
 // rotation.
 func TestAppMultiTargetAliasRoute(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	plain := "cpa_multi_target_test"
 	hash := hashForTest(t, plain)
 	stateFile := filepath.ToSlash(filepath.Join(t.TempDir(), "state.json"))
@@ -716,7 +793,7 @@ keys:
     aliases:
       - alias: mymulti
 `)
-	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	req, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, req); err != nil {
 		t.Fatalf("configure: %v", err)
 	}

@@ -125,6 +125,7 @@ func TestSchedulerPickGlobalModeDefersNativeKey(t *testing.T) {
 func configureGlobalSchedulerApp(t *testing.T) (*App, string) {
 	t.Helper()
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	plain := "cpa_global_weighted_test"
 	hash := hashForTest(t, plain)
 	configYAML := []byte(`
@@ -141,7 +142,7 @@ keys:
         provider: codex
         target_model: gpt-5-codex
 `)
-	request, err := json.Marshal(LifecycleRequest{ConfigYAML: configYAML})
+	request, err := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, configYAML)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +434,7 @@ func TestSchedulerPickSupportedMatchesUntieredOnly(t *testing.T) {
 // collide with built-in plan_type values like "free".
 func TestSchedulerPickMatchesClassifyPrefix(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	yaml := []byte(`
 enabled: true
 state_file: "` + filepath.ToSlash(filepath.Join(t.TempDir(), "state.json")) + `"
@@ -444,7 +446,7 @@ classify_rules:
     enabled: true
 keys: []
 `)
-	reqCfg, _ := json.Marshal(LifecycleRequest{ConfigYAML: yaml})
+	reqCfg, _ := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, yaml)})
 	if _, err := app.HandleMethod(MethodPluginReconfigure, reqCfg); err != nil {
 		t.Fatal(err)
 	}
@@ -487,6 +489,7 @@ keys: []
 
 func TestCandidateClassifyCacheTracksAttributeChanges(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	free := app.candidateGroups(SchedulerAuthCandidate{ID: "same.json", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}})
 	team := app.candidateGroups(SchedulerAuthCandidate{ID: "same.json", Provider: "codex", Attributes: map[string]string{"plan_type": "team"}})
 	if len(free) != 1 || free[0] != "free" || len(team) != 1 || team[0] != "team" {
@@ -496,6 +499,7 @@ func TestCandidateClassifyCacheTracksAttributeChanges(t *testing.T) {
 
 func TestCandidateClassifyCacheIsBounded(t *testing.T) {
 	app := NewApp()
+	t.Cleanup(app.Shutdown)
 	for index := 0; index < classifyCacheCapacity+25; index++ {
 		app.candidateGroups(SchedulerAuthCandidate{ID: fmt.Sprintf("auth-%d", index), Provider: "codex"})
 	}

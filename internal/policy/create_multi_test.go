@@ -27,7 +27,7 @@ func TestUpsertKeyMultiTargetAliasPopulatesAliases(t *testing.T) {
 			{Alias: "test", Provider: "opencode", TargetModel: "glm-5.2", BillingMode: "tokens"},
 		},
 	}
-	if err := s.UpsertKey(input, true); err != nil {
+	if err := s.UpsertKey(input); err != nil {
 		t.Fatalf("UpsertKey: %v", err)
 	}
 

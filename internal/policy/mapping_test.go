@@ -473,6 +473,52 @@ func TestReorderClassifyRules(t *testing.T) {
 
 // TestAliasStatePersistence verifies that the global alias table is persisted
 // to state and survives a restart (state-only reload).
+func TestAliasStatePersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	mk := func() *Store {
+		s := NewStore()
+		s.SetClock(func() time.Time { return time.Now() })
+		if err := s.Configure(Config{
+			Enabled: true, StateFile: path,
+			Aliases: []AliasMapping{
+				{Alias: "persist-test", Targets: []AliasTarget{{Provider: "openai", TargetModel: "gpt-4o"}}, Dispatch: "round-robin"},
+			},
+			Keys: []KeyConfig{
+				{ID: "k", Enabled: true, KeyHash: "x", Aliases: []KeyAliasRef{{Alias: "persist-test"}}},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	s1 := mk()
+	// Flush to persist state.
+	if err := s1.FlushUsage(); err != nil {
+		t.Fatal(err)
+	}
+	// Restart: a new store with NO Aliases in config — should load from state.
+	s2 := NewStore()
+	s2.SetClock(func() time.Time { return time.Now() })
+	if err := s2.Configure(Config{Enabled: true, StateFile: path}); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	aliases := s2.AliasesSnapshot()
+	if len(aliases) != 1 || aliases[0].Alias != "persist-test" {
+		t.Fatalf("alias not persisted/restored: %+v", aliases)
+	}
+	// Key should still reference it and Models should be populated.
+	key := s2.findByID("k")
+	if key == nil {
+		t.Fatalf("key not found after restart")
+	}
+	if len(key.Aliases) != 1 || key.Aliases[0].Alias != "persist-test" {
+		t.Fatalf("key alias ref not restored: %+v", key.Aliases)
+	}
+	if len(key.Models) != 1 || key.Models[0].Provider != "openai" {
+		t.Fatalf("key Models not resolved from alias: %+v", key.Models)
+	}
+}
 
 // TestMultiTargetAliasNoDuplicateModelError reproduces the bug where a key
 // referencing a multi-target global alias had its Models expanded to multiple
@@ -596,6 +642,40 @@ keys:
 // TestSaveStateStripsDerivedModels verifies that SaveState does NOT persist the
 // derived Models field (so reload never re-triggers validation problems). The
 // Configure path repopulates Models in memory from Aliases + global table.
+func TestSaveStateStripsDerivedModels(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	keys := []KeyConfig{{
+		ID: "k", Enabled: true, KeyHash: "x",
+		Aliases: []KeyAliasRef{{Alias: "test", InputPricePerMillion: ptrF(1.0)}},
+		Models: []ModelRule{
+			{Alias: "test", Provider: "openai", TargetModel: "gpt-4o"},
+			{Alias: "test", Provider: "anthropic", TargetModel: "claude-3"},
+		},
+	}}
+	if err := SaveState(path, keys, nil, []AliasMapping{{
+		Alias: "test", Targets: []AliasTarget{
+			{Provider: "openai", TargetModel: "gpt-4o"},
+			{Provider: "anthropic", TargetModel: "claude-3"},
+		},
+		Dispatch: "round-robin", BillingMode: "tokens",
+	}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(loaded.Keys))
+	}
+	if len(loaded.Keys[0].Models) != 0 {
+		t.Fatalf("SaveState must strip Models, got %+v", loaded.Keys[0].Models)
+	}
+	if len(loaded.Keys[0].Aliases) != 1 {
+		t.Fatalf("SaveState must keep Aliases, got %+v", loaded.Keys[0].Aliases)
+	}
+}
 
 func ptrF(v float64) *float64 { return &v }
 

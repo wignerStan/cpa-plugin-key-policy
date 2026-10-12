@@ -102,9 +102,6 @@ func (s *Store) SetClock(now func() time.Time) {
 func (s *Store) Configure(cfg Config) error {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
-	if err := normalizeConfig(&cfg); err != nil {
-		return err
-	}
 	statePath, err := ResolveStatePath(cfg.StateFile)
 	if err != nil {
 		return err
@@ -120,13 +117,29 @@ func (s *Store) Configure(cfg Config) error {
 	keys := cfg.Keys
 	var loadedUsage map[string]*UsageState
 	firstBoot := false
+	var loadedState *State
 	if state, errLoad := LoadState(statePath); errLoad == nil {
+		loadedState = state
+		cfg = state.Config(statePath)
+		keys = cfg.Keys
 		loadedUsage = state.Usage
 	} else if !errors.Is(errLoad, os.ErrNotExist) {
 		return fmt.Errorf("load usage state: %w", errLoad)
 	} else {
 		firstBoot = true
 	}
+	if err := normalizeConfig(&cfg); err != nil {
+		return err
+	}
+	if loadedState != nil && loadedState.needsRewrite {
+		s.persistMu.Lock()
+		err := rewriteNormalizedState(statePath, loadedState, cfg)
+		s.persistMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	keys = cfg.Keys
 	next := make(map[string]*KeyConfig, len(keys))
 	now := time.Now().UTC()
 	// Build the global alias lookup from the config (post-migration).
@@ -161,7 +174,7 @@ func (s *Store) Configure(cfg Config) error {
 		s.flusher.stop()
 		s.flusher = nil
 	}
-	// YAML policy is authoritative. JSON restores only runtime usage.
+	// JSON is authoritative. Memory is the query cache.
 	s.enabled = cfg.Enabled
 	s.globalWeightedRoundRobin = cfg.GlobalWeightedRoundRobin
 	s.statePath = statePath
@@ -184,7 +197,7 @@ func (s *Store) Configure(cfg Config) error {
 	s.usage = newUsageLedger(clockNow)
 	s.usage.loadFromState(loadedUsage)
 
-	// First boot creates a runtime usage document; YAML owns all policy.
+	// First boot seeds the JSON repository for internal callers.
 	var baseKeys []KeyConfig
 	var baseUsage map[string]*UsageState
 	var baseAliases []AliasMapping
@@ -204,29 +217,6 @@ func (s *Store) Configure(cfg Config) error {
 	return nil
 }
 
-func mergeAliases(configAliases, stateAliases []AliasMapping) []AliasMapping {
-	if len(configAliases) == 0 {
-		return append([]AliasMapping(nil), stateAliases...)
-	}
-	merged := append([]AliasMapping(nil), configAliases...)
-	seen := make(map[string]struct{}, len(merged))
-	for _, alias := range merged {
-		seen[strings.ToLower(strings.TrimSpace(alias.Alias))] = struct{}{}
-	}
-	for _, alias := range stateAliases {
-		name := strings.ToLower(strings.TrimSpace(alias.Alias))
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		merged = append(merged, alias)
-		seen[name] = struct{}{}
-	}
-	return merged
-}
-
 func (s *Store) Enabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -241,32 +231,6 @@ func (s *Store) GlobalWeightedRoundRobin() bool {
 }
 
 // SetGlobalWeightedRoundRobin 更新并持久化全局加权轮询开关。
-func (s *Store) SetGlobalWeightedRoundRobin(enabled bool) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-
-	s.mu.Lock()
-	previous := s.globalWeightedRoundRobin
-	if previous == enabled {
-		s.mu.Unlock()
-		return nil
-	}
-	s.globalWeightedRoundRobin = enabled
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	aliases := s.aliasesSnapshotLocked()
-	rules := s.classifyRulesSnapshotLocked()
-	path := s.statePath
-	s.mu.Unlock()
-
-	if err := s.saveState(path, keys, usage, aliases, rules); err != nil {
-		s.mu.Lock()
-		s.globalWeightedRoundRobin = previous
-		s.mu.Unlock()
-		return err
-	}
-	return nil
-}
 
 func (s *Store) runtimeComponents() (*RateLimiter, *usageLedger) {
 	s.mu.RLock()
@@ -975,136 +939,6 @@ func (s *Store) ClassifyRulesSnapshot() []ClassifyRule {
 	return s.classifyRulesSnapshotLocked()
 }
 
-// updateAliasesLocked replaces the store's global alias table.
-func (s *Store) updateAliasesLocked(aliases []AliasMapping) {
-	s.aliases = make(map[string]*AliasMapping, len(aliases))
-	for i := range aliases {
-		s.aliases[strings.ToLower(aliases[i].Alias)] = &aliases[i]
-	}
-}
-
-func (s *Store) UpsertKey(input KeyConfig, persist bool) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	// Build a config that includes the store's current global alias table
-	// and classify rules, so normalizeConfig can validate the key's alias
-	// references and migrate any per-key Models into existing or new aliases.
-	s.mu.RLock()
-	existingAliases := s.aliasesSnapshotLocked()
-	existingRules := s.classifyRulesSnapshotLocked()
-	s.mu.RUnlock()
-	cfg := Config{Enabled: true, StateFile: s.StatePath(), Keys: []KeyConfig{input}, Aliases: existingAliases, ClassifyRules: existingRules}
-	if err := normalizeConfig(&cfg); err != nil {
-		return err
-	}
-	key := cfg.Keys[0]
-	now := time.Now().UTC()
-	s.mu.Lock()
-	if old := s.keys[key.ID]; old != nil && !old.CreatedAt.IsZero() {
-		key.CreatedAt = old.CreatedAt
-	} else if key.CreatedAt.IsZero() {
-		key.CreatedAt = now
-	}
-	key.UpdatedAt = now
-	// Populate Models from the key's Alias refs + global table for downstream use.
-	if len(key.Aliases) > 0 {
-		aliasLookup := make(map[string]*AliasMapping, len(cfg.Aliases))
-		for i := range cfg.Aliases {
-			aliasLookup[strings.ToLower(cfg.Aliases[i].Alias)] = &cfg.Aliases[i]
-		}
-		key.Models = resolveAliasRefsToModels(key.Aliases, aliasLookup)
-	}
-	s.keys[key.ID] = &key
-	s.rebuildKeysByHashLocked()
-	s.clearPendingPicksForKeyLocked(key.ID)
-	// Update the store's global alias table if migration added new aliases.
-	s.updateAliasesLocked(cfg.Aliases)
-	keys := s.keysSnapshotLocked()
-	path := s.statePath
-	usage := s.usageSnapshotLocked()
-	aliases := s.aliasesSnapshotLocked()
-	rules := s.classifyRulesSnapshotLocked()
-	s.mu.Unlock()
-	if persist {
-		return s.saveState(path, keys, usage, aliases, rules)
-	}
-	return nil
-}
-
-func (s *Store) DeleteKey(id string) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return errors.New("id is required")
-	}
-	s.mu.Lock()
-	if _, ok := s.keys[id]; !ok {
-		s.mu.Unlock()
-		return ErrUnknownKey
-	}
-	delete(s.keys, id)
-	s.rebuildKeysByHashLocked()
-	s.clearPendingPicksForKeyLocked(id)
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	path := s.statePath
-	limiter := s.limiter
-	usageLedger := s.usage
-	s.mu.Unlock()
-	if limiter != nil {
-		limiter.Reset(id)
-	}
-	if usageLedger != nil {
-		usageLedger.resetUsage(id)
-	}
-	return s.saveState(path, keys, usage, s.AliasesSnapshot(), s.ClassifyRulesSnapshot())
-}
-
-func (s *Store) RotateKey(id string) (string, KeyConfig, error) {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", KeyConfig{}, errors.New("id is required")
-	}
-	plain, err := GenerateKey()
-	if err != nil {
-		return "", KeyConfig{}, err
-	}
-	hash, err := HashKey(plain)
-	if err != nil {
-		return "", KeyConfig{}, err
-	}
-	s.mu.Lock()
-	key := s.keys[id]
-	if key == nil {
-		s.mu.Unlock()
-		return "", KeyConfig{}, ErrUnknownKey
-	}
-	key.KeyHash = hash
-	key.UpdatedAt = time.Now().UTC()
-	copy := *key
-	copy.Models = append([]ModelRule(nil), key.Models...)
-	copy.Aliases = append([]KeyAliasRef(nil), key.Aliases...)
-	copy.IncludeModels = append([]string(nil), key.IncludeModels...)
-	copy.ExcludeModels = append([]string(nil), key.ExcludeModels...)
-	s.rebuildKeysByHashLocked()
-	s.clearPendingPicksForKeyLocked(id)
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	path := s.statePath
-	limiter := s.limiter
-	s.mu.Unlock()
-	if limiter != nil {
-		limiter.Reset(id)
-	}
-	if err := s.saveState(path, keys, usage, s.AliasesSnapshot(), s.ClassifyRulesSnapshot()); err != nil {
-		return "", KeyConfig{}, err
-	}
-	return plain, copy, nil
-}
-
 func (s *Store) ResetRPM(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return errors.New("id is required")
@@ -1114,192 +948,6 @@ func (s *Store) ResetRPM(id string) error {
 		limiter.Reset(id)
 	}
 	return nil
-}
-
-// --- Global alias mapping table management ---
-
-// UpsertAlias adds or replaces an alias in the global table. Validates the
-// alias (non-empty name, at least one target, valid dispatch/billing mode).
-// Persists the full state to disk.
-func (s *Store) UpsertAlias(alias AliasMapping) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	// Build a temp config to validate the single alias.
-	existing := s.AliasesSnapshot()
-	// Replace or append.
-	found := false
-	for i, a := range existing {
-		if strings.EqualFold(a.Alias, alias.Alias) {
-			existing[i] = alias
-			found = true
-			break
-		}
-	}
-	if !found {
-		existing = append(existing, alias)
-	}
-	tmp := Config{Enabled: true, StateFile: s.StatePath(), Aliases: existing}
-	if err := normalizeConfig(&tmp); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.updateAliasesLocked(tmp.Aliases)
-	// Re-resolve all keys' Models from the updated alias table.
-	s.resolveAllModelsLocked()
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	path := s.statePath
-	s.mu.Unlock()
-	return s.saveState(path, keys, usage, s.AliasesSnapshot(), s.ClassifyRulesSnapshot())
-}
-
-// DeleteAlias removes an alias from the global table. Returns an error if any
-// key still references it (must remove references first).
-func (s *Store) DeleteAlias(aliasName string) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	aliasName = strings.TrimSpace(aliasName)
-	if aliasName == "" {
-		return errors.New("alias name is required")
-	}
-	// Check for key references.
-	s.mu.RLock()
-	refCount := 0
-	for _, key := range s.keys {
-		for _, ref := range key.Aliases {
-			if strings.EqualFold(ref.Alias, aliasName) {
-				refCount++
-			}
-		}
-	}
-	s.mu.RUnlock()
-	if refCount > 0 {
-		return errors.New("alias is referenced by " + itoa(refCount) + " key(s); remove references first")
-	}
-	existing := s.AliasesSnapshot()
-	filtered := existing[:0]
-	for _, a := range existing {
-		if !strings.EqualFold(a.Alias, aliasName) {
-			filtered = append(filtered, a)
-		}
-	}
-	s.mu.Lock()
-	s.updateAliasesLocked(filtered)
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	path := s.statePath
-	s.mu.Unlock()
-	return s.saveState(path, keys, usage, s.AliasesSnapshot(), s.ClassifyRulesSnapshot())
-}
-
-// --- Classification rule management ---
-
-// UpsertClassifyRule adds or replaces a classification rule. Validates the
-// regex pattern. Persists the full state to disk.
-func (s *Store) UpsertClassifyRule(rule ClassifyRule) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	existing := s.ClassifyRulesSnapshot()
-	found := false
-	for i, r := range existing {
-		if strings.EqualFold(r.Name, rule.Name) {
-			existing[i] = rule
-			found = true
-			break
-		}
-	}
-	if !found {
-		existing = append(existing, rule)
-	}
-	tmp := Config{Enabled: true, StateFile: s.StatePath(), ClassifyRules: existing}
-	if err := normalizeConfig(&tmp); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.classifyRules = tmp.ClassifyRules
-	onChanged := s.onClassifyRulesChanged
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	aliases := s.aliasesSnapshotLocked()
-	rules := s.classifyRulesSnapshotLocked()
-	path := s.statePath
-	s.mu.Unlock()
-	callClassifyRulesChanged(onChanged)
-	return s.saveState(path, keys, usage, aliases, rules)
-}
-
-// DeleteClassifyRule removes a classification rule by name.
-func (s *Store) DeleteClassifyRule(name string) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return errors.New("rule name is required")
-	}
-	existing := s.ClassifyRulesSnapshot()
-	filtered := existing[:0]
-	for _, r := range existing {
-		if !strings.EqualFold(r.Name, name) {
-			filtered = append(filtered, r)
-		}
-	}
-	s.mu.Lock()
-	s.classifyRules = filtered
-	onChanged := s.onClassifyRulesChanged
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	aliases := s.aliasesSnapshotLocked()
-	rules := s.classifyRulesSnapshotLocked()
-	path := s.statePath
-	s.mu.Unlock()
-	callClassifyRulesChanged(onChanged)
-	return s.saveState(path, keys, usage, aliases, rules)
-}
-
-// ReorderClassifyRules reorders the classification rules to match the given
-// name order. Rules not in the list keep their relative order at the end.
-func (s *Store) ReorderClassifyRules(names []string) error {
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	existing := s.ClassifyRulesSnapshot()
-	byName := make(map[string]ClassifyRule)
-	for _, r := range existing {
-		byName[strings.ToLower(r.Name)] = r
-	}
-	var reordered []ClassifyRule
-	used := make(map[string]bool)
-	for _, name := range names {
-		if r, ok := byName[strings.ToLower(name)]; ok {
-			reordered = append(reordered, r)
-			used[strings.ToLower(name)] = true
-		}
-	}
-	for _, r := range existing {
-		if !used[strings.ToLower(r.Name)] {
-			reordered = append(reordered, r)
-		}
-	}
-	s.mu.Lock()
-	s.classifyRules = reordered
-	onChanged := s.onClassifyRulesChanged
-	keys := s.keysSnapshotLocked()
-	usage := s.usageSnapshotLocked()
-	aliases := s.aliasesSnapshotLocked()
-	rules := s.classifyRulesSnapshotLocked()
-	path := s.statePath
-	s.mu.Unlock()
-	callClassifyRulesChanged(onChanged)
-	return s.saveState(path, keys, usage, aliases, rules)
-}
-
-// resolveAllModelsLocked re-populates every key's Models from its Aliases
-// refs + the global alias table. Caller must hold s.mu.
-func (s *Store) resolveAllModelsLocked() {
-	for _, key := range s.keys {
-		if len(key.Aliases) > 0 {
-			key.Models = resolveAliasRefsToModels(key.Aliases, s.aliases)
-		}
-	}
 }
 
 // itoa is a minimal int→string to avoid importing strconv in this file.
@@ -1375,8 +1023,9 @@ func (s *Store) saveState(path string, keys []KeyConfig, usage map[string]*Usage
 	defer s.persistMu.Unlock()
 	s.mu.RLock()
 	globalWeightedRoundRobin := s.globalWeightedRoundRobin
+	enabled := s.enabled
 	s.mu.RUnlock()
-	return saveStateWithSettings(path, keys, usage, aliases, rules, globalWeightedRoundRobin)
+	return saveStateWithSettings(path, keys, usage, aliases, rules, globalWeightedRoundRobin, enabled)
 }
 
 func (s *Store) saveUsageOnly(path string, usage map[string]*UsageState) error {

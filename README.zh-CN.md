@@ -1,5 +1,16 @@
 # cpa-key-policy（中文说明）
 
+## JSON 策略来源与通知
+
+所有插件设置由 `state_file` 指定的 JSON 文件统一管理，包括密钥哈希、权限、限额、别名、分类规则、调度和模型目录。用量数据也保存在同一文件中。
+
+CLIProxyAPI YAML 仅保留插件注册信息：`enabled`、`priority` 和 `state_file`。插件不再接受 YAML 中的策略字段。配置示例见 [config.example.yaml](config.example.yaml) 和 [policy.example.json](policy.example.json)。下文旧版 YAML 策略片段仅说明字段含义；实际策略必须写入 JSON。
+
+管理 API 先提交 JSON，再更新内存查询缓存。文件通知支持直接修改或原子替换 JSON；无需重启 CPA。`POST /v0/management/plugins/cpa-key-policy/reload` 可显式通知重新加载。无效 JSON 不替换已验证的缓存，错误通过状态中的 `policy_reload_error` 显示。
+
+升级前停止 CPA，运行 `python3 scripts/migrate-policy-state.py /path/to/config.yaml`，再启动新版插件。迁移会备份两个文件，并保留密钥哈希和用量。
+
+
 面向 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的**下游 API Key 策略插件**。
 
 用人话说：你可以给客户发自己的 `cpa_…` 钥匙。每把钥匙只能用你允许的模型，还能限速、限额，并转到 CPA 真实上游（Codex、Claude、openai-compatibility 通道等）。CPA 自带的 `api-keys` 仍可留给管理员；**不要把插件下发的 key 再写进 `api-keys`**，否则会绕过本插件策略。
