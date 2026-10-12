@@ -19,7 +19,7 @@ def migrate(config_path):
     if not state_path.is_absolute():
         raise ValueError('Use an absolute state_file path before migration')
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    registration_fields = {'enabled', 'priority', 'state_file', 'poll_interval'}
+    registration_fields = {'enabled', 'priority', 'state_file'}
     settings = {key: value for key, value in plugin.items() if key not in registration_fields}
     if state.get('version', 0) >= 3 and not settings:
         print('Plugin settings already live in JSON')
@@ -58,7 +58,6 @@ def migrate(config_path):
         'enabled': plugin.get('enabled', True),
         'priority': plugin.get('priority', 10),
         'state_file': str(state_path),
-        'poll_interval': plugin.get('poll_interval', '5s'),
     }
     for target, content in [(state_path, json.dumps(state, indent=2) + '\n'),
                             (path, yaml.safe_dump(config, sort_keys=False, allow_unicode=True))]:

@@ -28,7 +28,7 @@ func TestJSONPolicyIsAuthoritativeOnReload(t *testing.T) {
 	if err = os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err = store.RefreshPolicy(state); err != nil {
+	if err = store.ReloadPolicy(nil); err != nil {
 		t.Fatal(err)
 	}
 	if store.FindByAPIKey(secret) != nil {

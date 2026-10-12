@@ -27,19 +27,29 @@ func canonicalKeys(keys []KeyConfig) []KeyConfig {
 	return out
 }
 
-// RefreshPolicy publishes a validated JSON snapshot without replacing usage in flight.
-func (s *Store) RefreshPolicy(state *State) error {
+// ReloadPolicy reads the authoritative document under the policy writer lock.
+// It cannot publish a snapshot captured before a later management commit.
+func (s *Store) ReloadPolicy(validate func(*State) error) error {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
-	cfg := state.Config(s.StatePath())
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	path := s.StatePath()
+	state, err := LoadState(path)
+	if err != nil {
+		return err
+	}
+	cfg := state.Config(path)
 	if err := normalizeConfig(&cfg); err != nil {
 		return err
 	}
+	if validate != nil {
+		if err := validate(state); err != nil {
+			return err
+		}
+	}
 	if state.needsRewrite {
-		s.persistMu.Lock()
-		err := rewriteNormalizedState(s.StatePath(), state, cfg)
-		s.persistMu.Unlock()
-		if err != nil {
+		if err := rewriteNormalizedState(path, state, cfg); err != nil {
 			return err
 		}
 	}

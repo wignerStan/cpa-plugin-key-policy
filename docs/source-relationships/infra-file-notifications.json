@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/wignerStan/infra",
+  "commit": "c1be68e8f818b649e4b66411db76cb8819f6f79b",
+  "source_path": "go/files/notify/file_subscription.go",
+  "generated_path": "internal/infra/files/notify/file_subscription.go",
+  "sha256": "024a726bc22939bbdc0e2f67b22674f83bae4ffe1fd1f4fb338ef0be568fd6c8"
+}

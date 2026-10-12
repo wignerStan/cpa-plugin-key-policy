@@ -34,7 +34,7 @@ func configureSettingsApp(t *testing.T, statePath string) *App {
 	t.Helper()
 	app := NewApp()
 	t.Cleanup(app.Shutdown)
-	configYAML := []byte("enabled: true\nstate_file: \"" + filepath.ToSlash(statePath) + "\"\nglobal_weighted_round_robin: false\npoll_interval: 20ms\n")
+	configYAML := []byte("enabled: true\nstate_file: \"" + filepath.ToSlash(statePath) + "\"\nglobal_weighted_round_robin: false\n")
 	request, err := json.Marshal(LifecycleRequest{ConfigYAML: jsonRegistrationForTest(t, configYAML)})
 	if err != nil {
 		t.Fatal(err)

@@ -7,4 +7,3 @@ plugins:
       enabled: true
       priority: 10
       state_file: "/absolute/path/cpa-key-policy-state.json"
-      poll_interval: "5s"

@@ -8,6 +8,7 @@ GOFLAGS ?= -mod=mod
 .PHONY: test web-build build-linux-amd64 build-linux-arm64 build-linux clean
 
 test:
+	python3 scripts/vendor-infra-file-notifications.py
 	GOFLAGS="$(GOFLAGS)" go test ./...
 
 # Build the single-file web UI and place it where the Go embed expects it.
