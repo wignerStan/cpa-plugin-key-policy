@@ -281,7 +281,7 @@ type UsageWindow struct {
 
 type State struct {
 	Version                  int                    `json:"version"`
-	Keys                     []KeyConfig            `json:"keys"`
+	Keys                     []KeyConfig            `json:"keys,omitempty"`
 	Usage                    map[string]*UsageState `json:"usage,omitempty"`
 	UpdatedAt                time.Time              `json:"updated_at"`
 	GlobalWeightedRoundRobin *bool                  `json:"global_weighted_round_robin,omitempty"`
@@ -690,7 +690,7 @@ func LoadState(path string) (*State, error) {
 	return &state, nil
 }
 
-// SaveState atomically writes the key list plus usage ledger to the state file.
+// SaveState writes runtime usage only. Static policy arguments are never persisted.
 func SaveState(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule) error {
 	return saveStateDocument(path, keys, usage, aliases, rules, nil)
 }
@@ -704,27 +704,7 @@ func saveStateDocument(path string, keys []KeyConfig, usage map[string]*UsageSta
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	// Models is a DERIVED field (resolved from Aliases × global table via
-	// resolveAliasRefsToModels); the canonical source is Aliases. Persisting
-	// it would (a) make the on-disk state drift from the live in-memory copy
-	// when the global alias table is edited, and (b) re-trigger validation
-	// errors on reload — multi-target aliases expand to multiple ModelRules
-	// sharing one alias name, which legacy validation could not tolerate.
-	// Strip Models before marshalling; Configure repopulates it on load.
-	cleanKeys := make([]KeyConfig, len(keys))
-	for i := range keys {
-		cleanKeys[i] = keys[i]
-		cleanKeys[i].Models = nil
-	}
-	state := State{
-		Version:                  1,
-		Keys:                     cleanKeys,
-		Usage:                    usage,
-		UpdatedAt:                time.Now().UTC(),
-		GlobalWeightedRoundRobin: globalWeightedRoundRobin,
-		Aliases:                  aliases,
-		ClassifyRules:            rules,
-	}
+	state := State{Version: 2, Usage: usage, UpdatedAt: time.Now().UTC()}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -732,46 +712,15 @@ func saveStateDocument(path string, keys []KeyConfig, usage map[string]*UsageSta
 	return atomicWriteStateFile(path, raw)
 }
 
-// SaveUsageOnly atomically writes only the usage ledger to the state file,
-// preserving the key list already on disk. The key list is authoritative on
-// disk (management API mutates keys + SaveState synchronously), so the
-// periodic usage flush must not overwrite it with a stale in-memory snapshot
-// (Bug 3: FlushUsage rewriting the whole key list could pin a truncated key
-// set to disk if memory was briefly wrong). It loads the current on-disk
-// state, replaces only Usage, and writes back atomically. If the state file
-// does not exist yet, keys defaults to empty (a subsequent key mutation will
-// create it properly via SaveState).
+// SaveUsageOnly writes runtime usage and discards legacy static policy fields.
 func SaveUsageOnly(path string, usage map[string]*UsageState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	var keys []KeyConfig
-	var aliases []AliasMapping
-	var rules []ClassifyRule
-	var globalWeightedRoundRobin *bool
-	if cur, err := LoadState(path); err == nil {
-		keys = cur.Keys
-		aliases = cur.Aliases
-		rules = cur.ClassifyRules
-		globalWeightedRoundRobin = cur.GlobalWeightedRoundRobin
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if _, err := LoadState(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	// Strip the derived Models field from every key (see SaveState for why).
-	// On-disk Models may contain pre-fix duplicates from multi-target aliases;
-	// repersisting them would re-trigger the bug on the next reload.
-	for i := range keys {
-		keys[i].Models = nil
-	}
-	state := State{
-		Version:                  1,
-		Keys:                     keys,
-		Usage:                    usage,
-		UpdatedAt:                time.Now().UTC(),
-		GlobalWeightedRoundRobin: globalWeightedRoundRobin,
-		Aliases:                  aliases,
-		ClassifyRules:            rules,
-	}
+	state := State{Version: 2, Usage: usage, UpdatedAt: time.Now().UTC()}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

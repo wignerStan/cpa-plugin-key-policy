@@ -121,49 +121,12 @@ func (s *Store) Configure(cfg Config) error {
 	var loadedUsage map[string]*UsageState
 	firstBoot := false
 	if state, errLoad := LoadState(statePath); errLoad == nil {
-		keys = state.Keys
-		// A key in the live YAML is an intentional key update. Apply it over the
-		// persisted state before normalizeConfig hashes it for state persistence.
-		keyByID := make(map[string]string, len(cfg.Keys))
-		for _, seed := range cfg.Keys {
-			if strings.TrimSpace(seed.Key) != "" {
-				keyByID[strings.TrimSpace(seed.ID)] = seed.Key
-			}
-		}
-		for i := range keys {
-			if key := keyByID[keys[i].ID]; key != "" {
-				keys[i].Key = key
-			}
-		}
 		loadedUsage = state.Usage
-		if state.GlobalWeightedRoundRobin != nil {
-			cfg.GlobalWeightedRoundRobin = *state.GlobalWeightedRoundRobin
-		}
-		// Config aliases take precedence, while state aliases fill gaps. This
-		// matters when a compact config keeps only provider-specific mappings:
-		// normalizeConfig may derive a few aliases from those models, but native
-		// aliases persisted by the management API must still resolve on reload.
-		stateAliases := mergeAliases(cfg.Aliases, state.Aliases)
-		stateRules := cfg.ClassifyRules
-		if len(stateRules) == 0 && len(state.ClassifyRules) > 0 {
-			stateRules = state.ClassifyRules
-		}
-		// Validate state keys against the global alias table. normalizeConfig
-		// also auto-migrates any state keys still using per-key Models.
-		merged := Config{Enabled: cfg.Enabled, StateFile: cfg.StateFile, Keys: keys, Aliases: stateAliases, ClassifyRules: stateRules}
-		if errNorm := normalizeConfig(&merged); errNorm != nil {
-			return fmt.Errorf("load state: %w", errNorm)
-		}
-		keys = merged.Keys
-		// Propagate the resolved alias table back to cfg for downstream use.
-		cfg.Aliases = merged.Aliases
-		cfg.ClassifyRules = merged.ClassifyRules
 	} else if !errors.Is(errLoad, os.ErrNotExist) {
-		return fmt.Errorf("load state: %w", errLoad)
+		return fmt.Errorf("load usage state: %w", errLoad)
 	} else {
 		firstBoot = true
 	}
-
 	next := make(map[string]*KeyConfig, len(keys))
 	now := time.Now().UTC()
 	// Build the global alias lookup from the config (post-migration).
@@ -198,9 +161,7 @@ func (s *Store) Configure(cfg Config) error {
 		s.flusher.stop()
 		s.flusher = nil
 	}
-	// The persisted state is authoritative during reconfigure. updateMu
-	// serializes this replacement with management mutations, so a revoked or
-	// deleted key cannot be resurrected from an older in-memory snapshot.
+	// YAML policy is authoritative. JSON restores only runtime usage.
 	s.enabled = cfg.Enabled
 	s.globalWeightedRoundRobin = cfg.GlobalWeightedRoundRobin
 	s.statePath = statePath
@@ -223,12 +184,7 @@ func (s *Store) Configure(cfg Config) error {
 	s.usage = newUsageLedger(clockNow)
 	s.usage.loadFromState(loadedUsage)
 
-	// First boot (no state file existed): persist a baseline state so that the
-	// periodic usage flush (SaveUsageOnly) has keys to preserve on disk. Without
-	// this, the first FlushUsage would LoadState, find nothing, and write a
-	// state containing only usage (no keys) — then the next Configure would
-	// load an empty key list. Keys come from next (cfg.Keys or disk), usage is
-	// freshly loaded (empty on first boot).
+	// First boot creates a runtime usage document; YAML owns all policy.
 	var baseKeys []KeyConfig
 	var baseUsage map[string]*UsageState
 	var baseAliases []AliasMapping

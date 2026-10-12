@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -37,38 +36,6 @@ func newTestStore(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	return store, plain
-}
-
-func TestStoreConfigKeyHashesAndPersistsWithoutPlaintext(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.json")
-	const plain = "cpa_config_seed"
-	store := NewStore()
-	if err := store.Configure(Config{
-		Enabled:   true,
-		StateFile: statePath,
-		Keys: []KeyConfig{{
-			ID:      "config-seed",
-			Name:    "Config seed",
-			Enabled: true,
-			Key:     plain,
-			Models:  []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}},
-		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if store.FindByAPIKey(plain) == nil {
-		t.Fatal("plaintext config key did not authenticate after hashing")
-	}
-	raw, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), plain) || strings.Contains(string(raw), `"key"`) {
-		t.Fatalf("state persisted plaintext config key: %s", raw)
-	}
-	if !strings.Contains(string(raw), `"key_hash": "sha256:`) {
-		t.Fatalf("state did not persist key_hash: %s", raw)
-	}
 }
 
 func TestStoreAuthenticateUnknownKeyFallsThrough(t *testing.T) {
@@ -246,48 +213,6 @@ func TestIsImageVideoEndpoint(t *testing.T) {
 // TestConfigureDoesNotResurrectKeysMissingFromState verifies that persisted
 // state remains authoritative during reconfigure. Retaining an in-memory key
 // that was removed from state would keep a revoked credential usable.
-func TestConfigureDoesNotResurrectKeysMissingFromState(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.json")
-	onDiskHash, err := HashKey("cpa_on_disk")
-	if err != nil {
-		t.Fatal(err)
-	}
-	revokedHash, err := HashKey("cpa_revoked")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Seed initial state with one key on disk.
-	s1 := NewStore()
-	if err := s1.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{
-		{ID: "on-disk", Enabled: true, KeyHash: onDiskHash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	// Add a second key via the management API (persisted to disk).
-	if err := s1.UpsertKey(KeyConfig{ID: "in-mem", Enabled: true, KeyHash: revokedHash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}, true); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a stale disk snapshot: write a state containing only "on-disk".
-	if err := SaveState(path, []KeyConfig{{ID: "on-disk", Enabled: true, KeyHash: onDiskHash, Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}}, nil, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	// Reconfigure with the same path. The persisted state lacks "in-mem", so it
-	// must be removed from the active authentication index.
-	if err := s1.Configure(Config{Enabled: true, StateFile: path}); err != nil {
-		t.Fatal(err)
-	}
-	ids := map[string]bool{}
-	for _, k := range s1.Keys() {
-		ids[k.ID] = true
-	}
-	if !ids["on-disk"] || ids["in-mem"] {
-		t.Fatalf("after reconfigure, keys = %v, want only on-disk", ids)
-	}
-	if s1.FindByAPIKey("cpa_revoked") != nil {
-		t.Fatal("credential removed from persisted state remained authenticatable")
-	}
-}
 
 // TestConfigureFlushesBeforeReload (Bug 2): a reconfigure must flush any
 // un-persisted in-memory usage to the OLD state path before loading, so a
@@ -330,47 +255,6 @@ func TestConfigureFlushesBeforeReload(t *testing.T) {
 // overwrite the on-disk key list. We seed a key on disk, then call FlushUsage
 // on a store whose in-memory key set differs (missing the key). The disk key
 // must survive because FlushUsage only writes usage, not keys.
-func TestFlushUsagePreservesDiskKeys(t *testing.T) {
-	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "state.json")
-	hash, err := HashKey("cpa_p3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Seed state with one key on disk.
-	seed := NewStore()
-	seed.SetClock(func() time.Time { return now })
-	if err := seed.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{
-		{ID: "survivor", Enabled: true, KeyHash: hash, Models: []ModelRule{{Alias: "fast", Provider: "openai", TargetModel: "m", InputPricePerMillion: 3, OutputPricePerMillion: 15}}},
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	// Build a second store pointed at the same path but with NO keys in memory,
-	// then record usage and flush. Bug 3 fix: FlushUsage preserves disk keys.
-	s := NewStore()
-	s.SetClock(func() time.Time { return now })
-	if err := s.Configure(Config{Enabled: true, StateFile: path}); err != nil {
-		t.Fatal(err)
-	}
-	// s now has the disk key (loaded). Remove it from memory to simulate a
-	// truncated in-memory snapshot, then flush usage.
-	s.mu.Lock()
-	delete(s.keys, "survivor")
-	s.mu.Unlock()
-	if err := s.FlushUsage(); err != nil {
-		t.Fatal(err)
-	}
-	// Reload from disk: the key must still be there.
-	chk := NewStore()
-	chk.SetClock(func() time.Time { return now })
-	if err := chk.Configure(Config{Enabled: true, StateFile: path}); err != nil {
-		t.Fatal(err)
-	}
-	if chk.findByID("survivor") == nil {
-		t.Fatalf("disk key 'survivor' was wiped by FlushUsage; Bug 3 regression")
-	}
-}
 
 func TestSaveUsageOnlyDoesNotOverwriteCorruptState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")

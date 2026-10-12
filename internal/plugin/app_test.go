@@ -211,41 +211,6 @@ func TestAppResponseInterceptorRewritesModel(t *testing.T) {
 	}
 }
 
-func TestAppManagementCreateAndRotate(t *testing.T) {
-	app, _ := configureTestApp(t)
-	createBody := []byte(`{"id":"team-b","models":[{"alias":"sonnet","provider":"claude","target_model":"claude-sonnet"}]}`)
-	req, _ := json.Marshal(ManagementRequest{
-		Method: http.MethodPost,
-		Path:   "/v0/management/plugins/cpa-key-policy/keys",
-		Body:   createBody,
-	})
-	raw, err := app.HandleMethod(MethodManagementHandle, req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp := managementResponseFromEnvelope(t, raw)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create status = %d, body = %s", resp.StatusCode, resp.Body)
-	}
-	if !json.Valid(resp.Body) {
-		t.Fatalf("create body is not json: %s", resp.Body)
-	}
-
-	rotateReq, _ := json.Marshal(ManagementRequest{
-		Method: http.MethodPost,
-		Path:   "/v0/management/plugins/cpa-key-policy/keys/rotate",
-		Query:  url.Values{"id": {"team-b"}},
-	})
-	raw, err = app.HandleMethod(MethodManagementHandle, rotateReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp = managementResponseFromEnvelope(t, raw)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("rotate status = %d, body = %s", resp.StatusCode, resp.Body)
-	}
-}
-
 func managementResponseFromEnvelope(t *testing.T, raw []byte) ManagementResponse {
 	t.Helper()
 	var env Envelope
@@ -339,39 +304,6 @@ func TestAppKeysListExposesUsageAndLimits(t *testing.T) {
 	// Usage object must always be present (even when empty).
 	if k.Usage.DailyUSD != 0 {
 		t.Fatalf("expected 0 daily usage, got %v", k.Usage.DailyUSD)
-	}
-}
-
-func TestAppPatchKeySetsLimits(t *testing.T) {
-	app, _ := configureTestApp(t)
-	f := 1.5
-	patchBody, _ := json.Marshal(map[string]any{
-		"id": "team-a", "daily_limit_usd": f, "weekly_limit_usd": 10.0,
-	})
-	req, _ := json.Marshal(ManagementRequest{
-		Method: http.MethodPatch,
-		Path:   "/v0/management/plugins/cpa-key-policy/keys",
-		Body:   patchBody,
-	})
-	raw, err := app.HandleMethod(MethodManagementHandle, req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp := managementResponseFromEnvelope(t, raw)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d body = %s", resp.StatusCode, resp.Body)
-	}
-	var payload struct {
-		Key struct {
-			DailyLimitUSD  float64 `json:"daily_limit_usd"`
-			WeeklyLimitUSD float64 `json:"weekly_limit_usd"`
-		} `json:"key"`
-	}
-	if err := json.Unmarshal(resp.Body, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.Key.DailyLimitUSD != 1.5 || payload.Key.WeeklyLimitUSD != 10.0 {
-		t.Fatalf("limits = %+v", payload.Key)
 	}
 }
 

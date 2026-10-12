@@ -124,7 +124,7 @@ func (a *App) registration() Registration {
 			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
 			ConfigFields: []ConfigField{
 				{Name: "enabled", Type: "boolean", Description: "Enable or disable this plugin without unloading it."},
-				{Name: "state_file", Type: "string", Description: "JSON state file used for key policy changes made through the Management API."},
+				{Name: "state_file", Type: "string", Description: "JSON runtime usage file; static policy is configured in YAML changes made through the Management API."},
 				{Name: "global_weighted_round_robin", Type: "boolean", Description: "忽略别名目标的 group，对当前 provider/model 的全部候选凭证执行全局加权轮询。"},
 				{Name: "catalog_groups", Type: "array", Description: "Reusable /v1/models catalogs assigned to downstream key IDs; entries can clone, rename, patch, or remove model metadata."},
 				{Name: "keys", Type: "array", Description: "Initial downstream key policy list. State file wins after it exists."},
@@ -574,6 +574,10 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 	}
 
 	base := "/v0/management/plugins/" + PluginID
+	staticPath := path == base+"/keys" || path == base+"/keys/rotate" || path == base+"/settings" || path == base+"/aliases" || path == base+"/classify-rules" || path == base+"/classify-rules/reorder"
+	if staticPath && req.Method != http.MethodGet {
+		return OKEnvelope(jsonError(http.StatusMethodNotAllowed, "static_configuration", "Edit cpa-key-policy settings in config.yaml; JSON stores runtime usage only."))
+	}
 	switch {
 	case req.Method == http.MethodGet && path == base+"/keys":
 		return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"keys": a.publicKeys(a.store.Keys())}))

@@ -20,7 +20,7 @@ func newClockedStore(t *testing.T, now time.Time) (*Store, time.Time) {
 		Keys: []KeyConfig{
 			{
 				ID: "team-a", Enabled: true,
-				KeyHash:    hashForUsageTest(t, "cpa_usage"),
+				KeyHash: hashForUsageTest(t, "cpa_usage"),
 				Models: []ModelRule{
 					{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex",
 						InputPricePerMillion: 1, OutputPricePerMillion: 2},
@@ -260,7 +260,7 @@ func newCacheStore(t *testing.T, now time.Time, provider string) *Store {
 		StateFile: filepath.Join(t.TempDir(), "state.json"),
 		Keys: []KeyConfig{{
 			ID: "cache-key", Enabled: true,
-			KeyHash:    hashForUsageTest(t, "cpa_cache"),
+			KeyHash: hashForUsageTest(t, "cpa_cache"),
 			Models: []ModelRule{{
 				Alias: "fast", Provider: provider, TargetModel: "m",
 				InputPricePerMillion:     3,
@@ -695,7 +695,7 @@ func TestAliasUsageLegacyStateMigrates(t *testing.T) {
 	now := time.Date(2026, 6, 29, 10, 0, 0, 0, time.UTC)
 	store := NewStore()
 	store.SetClock(func() time.Time { return now })
-	if err := store.Configure(Config{Enabled: true, StateFile: path}); err != nil {
+	if err := store.Configure(Config{Enabled: true, StateFile: path, Keys: []KeyConfig{{ID: "team-a", Enabled: true, KeyHash: hashForUsageTest(t, "cpa_usage"), Models: []ModelRule{{Alias: "fast", Provider: "codex", TargetModel: "gpt-5-codex"}}}}}); err != nil {
 		t.Fatal(err)
 	}
 
