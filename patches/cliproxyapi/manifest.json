@@ -76,7 +76,7 @@
     {
       "order": 12,
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
-      "sha256": "308ca36c0f77a97f022a4215eacfc70c526244932aa0a4c7b38bbedf6bd46a9c",
+      "sha256": "d0914d5f2e5a21fc9b844a236b8f6d7fc156aff6ee821cf55e688a77f84e4f57",
       "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7."
     }
   ],
@@ -84,7 +84,7 @@
   "update_policy": "Advance the official upstream commit and rebase this repository's ordered patches. Do not maintain a parallel CLIProxyAPI fork. Refresh checksums and run scripts/check-cliproxyapi.sh before merging.",
   "infra_diagnostics": {
     "source_url": "https://github.com/wignerStan/infra.git",
-    "source_commit": "87afb2a7aa982270f11e57fbc1efc8c300c33eab",
+    "source_commit": "dd068415f6229673fa5ef915a7139c883aeefdfa",
     "source_paths": [
       "go/observability/diagnosticoutput",
       "go/observability/artifactcapture"
@@ -117,7 +117,7 @@
       },
       {
         "path": "go/observability/diagnosticoutput/credentials.go",
-        "sha256": "62dea712f53d87e10fb35d4508b14f22dd44d2cf5f87c3f55565776432173cb3"
+        "sha256": "74b748cea1becb96f25405014cd3e6bb806aab542e25e2c2c63d9aa04c252edf"
       },
       {
         "path": "go/observability/diagnosticoutput/projection.go",

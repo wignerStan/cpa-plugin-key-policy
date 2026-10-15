@@ -25,13 +25,15 @@ type CredentialPolicy struct {
 func EmptyPolicy() CredentialPolicy {
 	return CredentialPolicy{fields: map[string]bool{}, cookies: map[string]bool{}}
 }
+
+// DefaultPolicy hashes known credentials. Cookie shape and generic session IDs
+// do not prove authentication; applications can classify their own auth cookies.
 func DefaultPolicy() CredentialPolicy {
 	p := EmptyPolicy()
-	p.jwtCookies = true
-	for _, name := range []string{"authorization", "proxyauthorization", "apikey", "xapikey", "openaiapikey", "accesstoken", "refreshtoken", "idtoken", "authjwt", "jwt", "password", "clientsecret"} {
+	for _, name := range []string{"authorization", "proxyauthorization", "apikey", "xapikey", "openaiapikey", "accesstoken", "refreshtoken", "idtoken", "authjwt", "jwt", "bearertoken", "at", "rt", "password", "clientsecret"} {
 		p.fields[name] = true
 	}
-	for _, name := range []string{"session", "sessionid", "session_id", "sid", "connect.sid", "jwt", "access_token", "refresh_token", "id_token", "next-auth.session-token", "__Secure-next-auth.session-token", "__Host-next-auth.session-token", "authjs.session-token", "__Secure-authjs.session-token", "__Host-authjs.session-token"} {
+	for _, name := range []string{"connect.sid", "jwt", "at", "rt", "access_token", "refresh_token", "id_token", "next-auth.session-token", "__Secure-next-auth.session-token", "__Host-next-auth.session-token", "authjs.session-token", "__Secure-authjs.session-token", "__Host-authjs.session-token"} {
 		p.cookies[name] = true
 	}
 	return p

@@ -68,17 +68,17 @@
     {
       "order": 12,
       "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
-      "sha256": "908813d9c511dc35a4da90507d366dd3f5442256f1345e9de7b44c118210918e"
+      "sha256": "d0914d5f2e5a21fc9b844a236b8f6d7fc156aff6ee821cf55e688a77f84e4f57"
     }
   ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints",
-  "result_tree": "c983347059d80043c5be1cbcb0a14cacab14c180",
+  "result_tree": "8ca97a847b705f73a9cd66d0387ee6302d39a809",
   "licenses": [
     "build/cliproxyapi/LICENSE"
   ],
   "infra_diagnostics": {
     "source_url": "https://github.com/wignerStan/infra.git",
-    "source_commit": "87afb2a7aa982270f11e57fbc1efc8c300c33eab",
+    "source_commit": "dd068415f6229673fa5ef915a7139c883aeefdfa",
     "source_paths": [
       "go/observability/diagnosticoutput",
       "go/observability/artifactcapture"
@@ -111,7 +111,7 @@
       },
       {
         "path": "go/observability/diagnosticoutput/credentials.go",
-        "sha256": "62dea712f53d87e10fb35d4508b14f22dd44d2cf5f87c3f55565776432173cb3"
+        "sha256": "74b748cea1becb96f25405014cd3e6bb806aab542e25e2c2c63d9aa04c252edf"
       },
       {
         "path": "go/observability/diagnosticoutput/projection.go",

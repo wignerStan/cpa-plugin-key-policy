@@ -12,8 +12,11 @@ the protocol field names, permitted metadata containers and event boundaries.
 It does not duplicate the traversal or credential hashing implementation.
 
 Actual API/auth fields and configured credential aliases are hashed. Authorization
-retains its scheme. Secure session cookies and JWT-shaped cookie values are
-hashed; load-balancer cookies and ordinary cookie attributes stay readable.
+retains its scheme. Known authentication cookies are hashed. Generic session IDs, load-balancer
+cookies and cookie attributes stay readable, even when values look like JWTs.
+Cookie JWT-shape detection is opt-in. Explicit `at` and `rt` credentials remain
+hashed in fields and cookie values. Headers and payload metadata use the same
+infra policy; there is no separate application cookie parser.
 SHA-256 comparison values in investigation reports are optional integrity
 identifiers, not a reason to hide nonsecret TRACE fields.
 
