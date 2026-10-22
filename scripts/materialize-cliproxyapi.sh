@@ -35,6 +35,23 @@ PY
 
 source_url="${CLIPROXYAPI_SOURCE_URL:-$(manifest_value upstream.url)}"
 source_commit="${CLIPROXYAPI_SOURCE_COMMIT:-$(manifest_value upstream.commit)}"
+source_checkout="${repo_root}/third_party/cliproxyapi"
+
+# The parent commit owns the source identity. Apply patches only in work_dir.
+source_entry="$(git -C "${repo_root}" ls-tree HEAD -- third_party/cliproxyapi)"
+if [[ "${source_entry}" != "160000 commit ${source_commit}"$'\t'"third_party/cliproxyapi" ]]; then
+  printf 'upstream commit must match the committed third_party/cliproxyapi gitlink\n' >&2
+  exit 1
+fi
+if [[ -L "${source_checkout}" || ! -e "${source_checkout}/.git" ]]; then
+  printf 'initialize the pinned source: git submodule update --init --depth 1 -- third_party/cliproxyapi\n' >&2
+  exit 1
+fi
+if [[ "$(git -C "${source_checkout}" rev-parse HEAD)" != "${source_commit}" ]] ||
+   [[ -n "$(git -C "${source_checkout}" status --porcelain --untracked-files=all)" ]]; then
+  printf 'third_party/cliproxyapi must be pristine at the committed upstream identity\n' >&2
+  exit 1
+fi
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -51,7 +68,7 @@ git init -q "${work_dir}"
 git -C "${work_dir}" config user.name "cpa-key-policy materializer"
 git -C "${work_dir}" config user.email "cpa-key-policy@localhost"
 git -C "${work_dir}" remote add upstream "${source_url}"
-git -C "${work_dir}" fetch --filter=blob:none --no-tags --depth=1 upstream "${source_commit}"
+git -C "${work_dir}" fetch --no-tags --depth=1 "${source_checkout}" "${source_commit}"
 git -C "${work_dir}" checkout -q --detach FETCH_HEAD
 
 actual_commit="$(git -C "${work_dir}" rev-parse HEAD)"

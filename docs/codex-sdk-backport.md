@@ -22,6 +22,12 @@ destination therefore cannot retain earlier usage, headers, or error markers.
 Duplicate usage or headers within one message still produce deferred evidence
 errors. Upstream failures retain their normal priority.
 
+The parent commit pins the pristine upstream at `third_party/cliproxyapi`.
+Initialize it with `git submodule update --init --depth 1 -- third_party/cliproxyapi`.
+The materializer checks that committed gitlink, the manifest commit, and the
+clean submodule checkout agree. It applies the ordered patches in a disposable
+build checkout. The patched output remains at `build/cliproxyapi`.
+
 Run `bash scripts/check-cliproxyapi.sh` to materialize the selected source and
 test both the host and the standalone SDK. SDK tests include the shared usage
 vectors, duplicate evidence, reused messages, metadata, and tool history.
