@@ -31,3 +31,22 @@ build checkout. The patched output remains at `build/cliproxyapi`.
 Run `bash scripts/check-cliproxyapi.sh` to materialize the selected source and
 test both the host and the standalone SDK. SDK tests include the shared usage
 vectors, duplicate evidence, reused messages, metadata, and tool history.
+
+## Codec ownership and nested accounting
+
+The follow-up patch keeps decoded cache constraints in `sdk/protocol/codex`.
+JSON inspection types, envelope decoding, tool history, and metadata rewrites
+move together to `sdk/protocol/codexwire`. Import `Response`, `Event`, `Usage`,
+and the wire operations from `codexwire`. The former wire paths have no aliases.
+Both packages remain in the existing standalone module.
+
+Decoded validation now carries possible write-count bounds through nested rows.
+A known aggregate must fit those bounds even when an intermediate row omits its
+write count. A complete child partition reporting two writes rejects aggregate
+claims of zero or three. A partial partition can retain a wider valid range.
+Validation does not fill missing counters or change the caller's evidence.
+
+The original public SDK decoder accepted the contradictory aggregate claims.
+The new wire tests and shared usage vectors cover these cases, deeper unknown
+rows, valid partial ranges, and missing write counts. The wire decoder retains
+the existing duplicate-field checks and message-local reset behavior.

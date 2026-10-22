@@ -123,10 +123,15 @@
       "order": 23,
       "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__go.mod.patch",
       "sha256": "c57ac2d6d807dc04a4151b518edfacd17b3cc3f32501689782afe413f432cf34"
+    },
+    {
+      "order": 24,
+      "path": "patches/cliproxyapi-sdk/refactor/codex-wire-codec/0024-separate-wire-codec-from-accounting.patch",
+      "sha256": "c77b47b9cb9316a68d2f6caa6a22f596d8f6d61d57978870a307a52c6e81ce69"
     }
   ],
-  "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints; standalone github.com/router-for-me/CLIProxyAPI/sdk/protocol",
-  "result_tree": "b562bcd371f4354fe45398a4f958a2c185de7bb4",
+  "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints; standalone SDK/protocol codex decoded accounting and codexwire JSON codec",
+  "result_tree": "17d361a802730f7ff4f8f17e39a786e892d0b0e4",
   "licenses": [
     "third_party/cliproxyapi/LICENSE",
     "build/cliproxyapi/sdk/protocol/LICENSE"

@@ -1,0 +1,729 @@
+From 70170c6bf7ff96cda25fbca70b0cb516350e0418 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Thu, 22 Oct 2026 03:50:14 -0700
+Subject: [PATCH] refactor(sdk): separate Codex wire codec from decoded
+ accounting
+
+---
+ sdk/protocol/README.md                        |  42 +++---
+ sdk/protocol/codex/BUILD.bazel                |   5 +-
+ sdk/protocol/codex/attribution.go             | 100 +++++++-------
+ sdk/protocol/codex/attribution_test.go        |  45 +++++++
+ sdk/protocol/codex/testdata/usage.json        |  77 -----------
+ sdk/protocol/codexwire/BUILD.bazel            |  16 +++
+ .../{codex => codexwire}/contract_test.go     |   2 +-
+ .../{codex => codexwire}/event_metadata.go    |   2 +-
+ sdk/protocol/{codex => codexwire}/metadata.go |   2 +-
+ sdk/protocol/{codex => codexwire}/response.go |   2 +-
+ sdk/protocol/codexwire/testdata/usage.json    | 122 ++++++++++++++++++
+ sdk/protocol/{codex => codexwire}/tools.go    |   2 +-
+ sdk/protocol/{codex => codexwire}/usage.go    |  21 +--
+ sdk/protocol/codexwire/write_bounds_test.go   |  48 +++++++
+ 14 files changed, 329 insertions(+), 157 deletions(-)
+ create mode 100644 sdk/protocol/codex/attribution_test.go
+ delete mode 100644 sdk/protocol/codex/testdata/usage.json
+ create mode 100644 sdk/protocol/codexwire/BUILD.bazel
+ rename sdk/protocol/{codex => codexwire}/contract_test.go (99%)
+ rename sdk/protocol/{codex => codexwire}/event_metadata.go (99%)
+ rename sdk/protocol/{codex => codexwire}/metadata.go (99%)
+ rename sdk/protocol/{codex => codexwire}/response.go (99%)
+ create mode 100644 sdk/protocol/codexwire/testdata/usage.json
+ rename sdk/protocol/{codex => codexwire}/tools.go (99%)
+ rename sdk/protocol/{codex => codexwire}/usage.go (91%)
+ create mode 100644 sdk/protocol/codexwire/write_bounds_test.go
+
+diff --git a/sdk/protocol/README.md b/sdk/protocol/README.md
+index 3bb637f..409bd5c 100644
+--- a/sdk/protocol/README.md
++++ b/sdk/protocol/README.md
+@@ -1,24 +1,30 @@
+-# Standalone CPA protocol contracts
++# Standalone CPA Codex accounting and wire codec
+ 
+ Module: `github.com/router-for-me/CLIProxyAPI/sdk/protocol`.
+-The canonical location is `sdk/protocol` in the patched CPA source. This module
+-uses only the Go standard library. Importing it does not load the host, plugin
+-runtime, translator, scheduler, or infra cache.
++The canonical source is `sdk/protocol` in the patched CPA checkout. This module
++uses the Go standard library and its own decoded accounting package.
+ 
+-`codex` describes Responses/Lite usage attribution, tool catalogs and completed
+-call/result history, metadata and turn-state transport. `Response` and `Event`
+-are inspection views. Retain the original wire when forwarding opaque or unknown
+-fields. The echoed tool catalog does not prove that tools can execute.
++`codex` owns decoded cache counters, recursive row constraints and complete
++attribution partitions. Its validation reads caller evidence without changing it.
++It does not decode JSON or change transport metadata.
+ 
+-`Usage.Validate()` checks reported counters and complete attribution partitions.
+-Check `InputKnown` separately when explicit accounting is required. Unknown reads
+-and writes remain unknown. Aggregate input minus reads is not a cache-write count.
+-`Usage.EvidenceErr` and `MetadataHeaders.Err` are deferred decoding errors: this
+-lets callers give an upstream failure priority over missing accounting evidence.
+-Callers must check them before using the evidence.
++`codexwire` owns Responses/Lite JSON inspection, envelope decoding, tool catalogs,
++call/result history, metadata parsing and metadata rewrites. Import `Response`,
++`Event`, `Usage` and the wire operations from this package. Their mutable JSON
++decoder methods and metadata setters remain with this complete codec operation.
++No aliases remain at the former wire API location.
+ 
+-The protocol types do not establish model identity, classify BPS, select routes,
+-or authorize release. Those decisions belong to the consumer. The shared JSON
+-vectors under `codex/testdata` test the same accounting cases in Go and Rust.
++`Response` and `Event` are inspection views. Forward the original bytes to retain
++unknown fields and opaque output. Duplicate markers belong to one envelope;
++reusing a decode destination replaces its earlier evidence. `Usage.EvidenceErr`
++and `MetadataHeaders.Err` retain deferred errors. Check them before using evidence
++so an upstream failure can keep priority over incomplete accounting.
+ 
+-Run `GOWORK=off go test -race ./...` from this directory.
++`Usage.Validate()` checks reported counts and complete attribution partitions.
++Check `InputKnown` separately when explicit input accounting is required. Unknown
++reads and writes remain unknown. Input minus reads is not a cache-write count.
++The echoed tool catalog does not establish that a tool can execute.
++
++Run `GOWORK=off go test -race ./...` from this directory. The wire codec tests use
++the shared usage vectors under `codexwire/testdata` and exercise real JSON decoding,
++reused envelopes, duplicate evidence, metadata rewrites and tool history.
+diff --git a/sdk/protocol/codex/BUILD.bazel b/sdk/protocol/codex/BUILD.bazel
+index e420c8c..a231439 100644
+--- a/sdk/protocol/codex/BUILD.bazel
++++ b/sdk/protocol/codex/BUILD.bazel
+@@ -2,14 +2,13 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
+ 
+ go_library(
+     name = "codex",
+-    srcs = ["attribution.go", "event_metadata.go", "metadata.go", "response.go", "tools.go", "usage.go"],
++    srcs = ["attribution.go"],
+     importpath = "github.com/router-for-me/CLIProxyAPI/sdk/protocol/codex",
+     visibility = ["//visibility:public"],
+ )
+ 
+ go_test(
+     name = "codex_test",
+-    srcs = ["contract_test.go"],
+-    data = ["testdata/usage.json"],
++    srcs = ["attribution_test.go"],
+     embed = [":codex"],
+ )
+diff --git a/sdk/protocol/codex/attribution.go b/sdk/protocol/codex/attribution.go
+index 644e412..64a023e 100644
+--- a/sdk/protocol/codex/attribution.go
++++ b/sdk/protocol/codex/attribution.go
+@@ -1,69 +1,81 @@
++// Package codex validates decoded Codex attribution counters and partitions.
+ package codex
+ 
+-// validRowRoot checks a nested breakdown without double counting child rows.
+-// Unknown writes stay unknown; they are not inferred from input minus reads.
+-func validRowRoot(row CacheRow) bool { return validRow(row, 0) }
++// CacheRow retains reported counters and their original write certainty.
++type CacheRow struct {
++	Input, Cached, Written int
++	WriteKnown             bool
++	Content                []CacheRow
++}
+ 
+-func validRow(row CacheRow, depth int) bool {
+-	if depth > 64 || row.Input < 0 || row.Cached < 0 || row.Cached > row.Input || row.Written < 0 || row.Written > row.Input-row.Cached || !row.WriteKnown && row.Written != 0 {
+-		return false
++// CacheDetails holds a complete decoded attribution partition.
++type CacheDetails struct {
++	Input, Cached int
++	Written       *int
++	Items, Fields map[string]CacheRow
++}
++
++// ValidCounts checks reported totals without filling missing counters.
++func ValidCounts(input int, cached, written *int) bool {
++	return !(input < 0 || cached != nil && (*cached < 0 || *cached > input) || written != nil && (*written < 0 || *written > input) || cached != nil && written != nil && *written > input-*cached)
++}
++
++// ValidRow checks nested counters without changing caller-owned evidence.
++func ValidRow(row CacheRow) bool {
++	_, _, ok := writeBounds(row, 0)
++	return ok
++}
++
++// Bounds constrain known claims. They do not turn unknown writes into a report.
++func writeBounds(row CacheRow, depth int) (int, int, bool) {
++	if depth > 64 || !ValidCounts(row.Input, &row.Cached, &row.Written) || !row.WriteKnown && row.Written != 0 {
++		return 0, 0, false
+ 	}
+-	input, cached, written := 0, 0, 0
+-	allWritesKnown := true
++	input, cached, lower, upper := 0, 0, 0, 0
+ 	for _, child := range row.Content {
+-		if !validRow(child, depth+1) || child.Input > row.Input-input || child.Cached > row.Cached-cached || child.Written > row.Input-written || row.WriteKnown && child.Written > row.Written-written {
+-			return false
++		childLower, childUpper, ok := writeBounds(child, depth+1)
++		if !ok || child.Input > row.Input-input || child.Cached > row.Cached-cached || childLower > row.Input-lower || childUpper > row.Input-upper {
++			return 0, 0, false
+ 		}
+ 		input += child.Input
+ 		cached += child.Cached
+-		written += child.Written
+-		allWritesKnown = allWritesKnown && (child.WriteKnown || child.Input == 0)
++		lower += childLower
++		upper += childUpper
+ 	}
+ 	if row.Cached-cached > row.Input-input {
+-		return false
++		return 0, 0, false
+ 	}
+-	if row.WriteKnown && allWritesKnown && row.Written-written > (row.Input-input)-(row.Cached-cached) {
+-		return false
++	remainder := (row.Input - input) - (row.Cached - cached)
++	if remainder > row.Input-upper {
++		return 0, 0, false
++	}
++	upper += remainder
++	if row.WriteKnown {
++		if row.Written < lower || row.Written > upper {
++			return 0, 0, false
++		}
++		return row.Written, row.Written, true
+ 	}
+-	return true
++	return lower, upper, true
+ }
+ 
+-// validDetails requires complete, self-consistent top-level accounting.
+-func validDetails(d cacheDetails) bool {
+-	if validateCounts(d.Input, &d.Cached, d.Written) != nil {
++// ValidDetails checks a complete partition against the reported aggregate.
++func ValidDetails(d CacheDetails) bool {
++	if !ValidCounts(d.Input, &d.Cached, d.Written) {
+ 		return false
+ 	}
+-	input, cached, written := 0, 0, 0
+-	allWritesKnown := true
++	input, cached, lower, upper := 0, 0, 0, 0
+ 	for _, table := range []map[string]CacheRow{d.Items, d.Fields} {
+ 		for _, row := range table {
+-			if !validRowRoot(row) || row.Input > d.Input-input || row.Cached > d.Cached-cached || row.Written > d.Input-written || d.Written != nil && row.Written > *d.Written-written {
++			rowLower, rowUpper, ok := writeBounds(row, 0)
++			if !ok || row.Input > d.Input-input || row.Cached > d.Cached-cached || rowLower > d.Input-lower || rowUpper > d.Input-upper {
+ 				return false
+ 			}
+ 			input += row.Input
+ 			cached += row.Cached
+-			written += row.Written
+-			allWritesKnown = allWritesKnown && (row.WriteKnown || row.Input == 0)
++			lower += rowLower
++			upper += rowUpper
+ 		}
+ 	}
+-	return input == d.Input && cached == d.Cached && (d.Written == nil || !allWritesKnown || written == *d.Written)
+-}
+-
+-// CacheRow is a decoded Codex attribution row, not a continuity decision.
+-type CacheRow struct {
+-	Input, Cached, Written int
+-	WriteKnown             bool
+-	Content                []CacheRow
+-}
+-type cacheDetails struct {
+-	Input, Cached int
+-	Written       *int
+-	Items, Fields map[string]CacheRow
+-}
+-
+-func validateCounts(input int, cached, written *int) error {
+-	if input < 0 || cached != nil && (*cached < 0 || *cached > input) || written != nil && (*written < 0 || *written > input) || cached != nil && written != nil && *written > input-*cached {
+-		return ErrUsage
+-	}
+-	return nil
++	return input == d.Input && cached == d.Cached && (d.Written == nil || *d.Written >= lower && *d.Written <= upper)
+ }
+diff --git a/sdk/protocol/codex/attribution_test.go b/sdk/protocol/codex/attribution_test.go
+new file mode 100644
+index 0000000..ae74aa7
+--- /dev/null
++++ b/sdk/protocol/codex/attribution_test.go
+@@ -0,0 +1,45 @@
++package codex
++
++import (
++	"reflect"
++	"testing"
++)
++
++func TestValidationPreservesUnknownWritesAndCallerRows(t *testing.T) {
++	row := CacheRow{Input: 10, Cached: 5, Content: []CacheRow{
++		{Input: 4, Cached: 4, WriteKnown: true},
++		{Input: 6, Cached: 1, Written: 2, WriteKnown: true},
++	}}
++	before := row
++	before.Content = append([]CacheRow(nil), row.Content...)
++	if !ValidRow(row) {
++		t.Fatal("unknown parent writes must not contradict known child writes")
++	}
++	details := CacheDetails{Input: 10, Cached: 5, Items: map[string]CacheRow{"item": row}}
++	if !ValidDetails(details) {
++		t.Fatal("a complete partition can retain unknown total writes")
++	}
++	zero := 0
++	details.Written = &zero
++	if ValidDetails(details) {
++		t.Fatal("known zero total writes conflict with the known child writes")
++	}
++	two := 2
++	details.Written = &two
++	if !ValidDetails(details) {
++		t.Fatal("the matching known total was rejected")
++	}
++	three := 3
++	details.Written = &three
++	if ValidDetails(details) {
++		t.Fatal("a complete child partition cannot hide extra writes")
++	}
++	known := row
++	known.WriteKnown = true
++	if ValidRow(known) {
++		t.Fatal("known zero parent writes conflict with the known child writes")
++	}
++	if !reflect.DeepEqual(row, before) {
++		t.Fatal("validation changed caller-owned decoded evidence")
++	}
++}
+diff --git a/sdk/protocol/codex/testdata/usage.json b/sdk/protocol/codex/testdata/usage.json
+deleted file mode 100644
+index 2849ab0..0000000
+--- a/sdk/protocol/codex/testdata/usage.json
++++ /dev/null
+@@ -1,77 +0,0 @@
+-[
+-  {
+-    "name": "unknown input",
+-    "wire": "{}",
+-    "valid": false
+-  },
+-  {
+-    "name": "zero input",
+-    "wire": "{\"input_tokens\":0}",
+-    "valid": true
+-  },
+-  {
+-    "name": "unknown reads",
+-    "wire": "{\"input_tokens\":100}",
+-    "valid": true
+-  },
+-  {
+-    "name": "read not write",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":20}}",
+-    "valid": true
+-  },
+-  {
+-    "name": "overlapping writes",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":21}}",
+-    "valid": false
+-  },
+-  {
+-    "name": "negative",
+-    "wire": "{\"input_tokens\":-1}",
+-    "valid": false
+-  },
+-  {
+-    "name": "duplicate input",
+-    "wire": "{\"input_tokens\":100,\"input_tokens\":100}",
+-    "valid": false
+-  },
+-  {
+-    "name": "null write",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cache_write_tokens\":null}}",
+-    "valid": false
+-  },
+-  {
+-    "name": "unrelated attribution extension",
+-    "wire": "{\"input_tokens\":100,\"attribution\":{\"future\":true}}",
+-    "valid": true
+-  },
+-  {
+-    "name": "explicit empty partition",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":0},\"attribution\":{\"items\":{}}}",
+-    "valid": false
+-  },
+-  {
+-    "name": "complete partition",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":80,\"cached_tokens\":50}},\"request_fields\":{\"instructions\":{\"input_tokens\":20,\"cached_tokens\":20}}}}",
+-    "valid": true
+-  },
+-  {
+-    "name": "hidden rows",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":80,\"cached_tokens\":50}}}}",
+-    "valid": false
+-  },
+-  {
+-    "name": "duplicate identity",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70},\"a\":{\"input_tokens\":100,\"cached_tokens\":70}}}}",
+-    "valid": false
+-  },
+-  {
+-    "name": "nested overcount",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70,\"content\":[{\"input_tokens\":101,\"cached_tokens\":70}]}}}}",
+-    "valid": false
+-  },
+-  {
+-    "name": "nested descendant overcount",
+-    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70,\"content\":[{\"input_tokens\":50,\"cached_tokens\":40,\"content\":[{\"input_tokens\":51,\"cached_tokens\":40}]}]}}}}",
+-    "valid": false
+-  }
+-]
+diff --git a/sdk/protocol/codexwire/BUILD.bazel b/sdk/protocol/codexwire/BUILD.bazel
+new file mode 100644
+index 0000000..7c453c5
+--- /dev/null
++++ b/sdk/protocol/codexwire/BUILD.bazel
+@@ -0,0 +1,16 @@
++load("@rules_go//go:def.bzl", "go_library", "go_test")
++
++go_library(
++    name = "codexwire",
++    srcs = ["event_metadata.go", "metadata.go", "response.go", "tools.go", "usage.go"],
++    importpath = "github.com/router-for-me/CLIProxyAPI/sdk/protocol/codexwire",
++    visibility = ["//visibility:public"],
++    deps = ["//sdk/protocol/codex"],
++)
++
++go_test(
++    name = "codexwire_test",
++    srcs = ["contract_test.go", "write_bounds_test.go"],
++    data = ["testdata/usage.json"],
++    embed = [":codexwire"],
++)
+diff --git a/sdk/protocol/codex/contract_test.go b/sdk/protocol/codexwire/contract_test.go
+similarity index 99%
+rename from sdk/protocol/codex/contract_test.go
+rename to sdk/protocol/codexwire/contract_test.go
+index 282e718..4db51ea 100644
+--- a/sdk/protocol/codex/contract_test.go
++++ b/sdk/protocol/codexwire/contract_test.go
+@@ -1,4 +1,4 @@
+-package codex
++package codexwire
+ 
+ import (
+ 	"encoding/json"
+diff --git a/sdk/protocol/codex/event_metadata.go b/sdk/protocol/codexwire/event_metadata.go
+similarity index 99%
+rename from sdk/protocol/codex/event_metadata.go
+rename to sdk/protocol/codexwire/event_metadata.go
+index 101e0dd..6a43b99 100644
+--- a/sdk/protocol/codex/event_metadata.go
++++ b/sdk/protocol/codexwire/event_metadata.go
+@@ -1,4 +1,4 @@
+-package codex
++package codexwire
+ 
+ import (
+ 	"bytes"
+diff --git a/sdk/protocol/codex/metadata.go b/sdk/protocol/codexwire/metadata.go
+similarity index 99%
+rename from sdk/protocol/codex/metadata.go
+rename to sdk/protocol/codexwire/metadata.go
+index 32d11b1..cc29c29 100644
+--- a/sdk/protocol/codex/metadata.go
++++ b/sdk/protocol/codexwire/metadata.go
+@@ -1,4 +1,4 @@
+-package codex
++package codexwire
+ 
+ import (
+ 	"encoding/json"
+diff --git a/sdk/protocol/codex/response.go b/sdk/protocol/codexwire/response.go
+similarity index 99%
+rename from sdk/protocol/codex/response.go
+rename to sdk/protocol/codexwire/response.go
+index 39e1b06..5f6927a 100644
+--- a/sdk/protocol/codex/response.go
++++ b/sdk/protocol/codexwire/response.go
+@@ -1,4 +1,4 @@
+-package codex
++package codexwire
+ 
+ import (
+ 	"encoding/json"
+diff --git a/sdk/protocol/codexwire/testdata/usage.json b/sdk/protocol/codexwire/testdata/usage.json
+new file mode 100644
+index 0000000..540f888
+--- /dev/null
++++ b/sdk/protocol/codexwire/testdata/usage.json
+@@ -0,0 +1,122 @@
++[
++  {
++    "name": "unknown input",
++    "wire": "{}",
++    "valid": false
++  },
++  {
++    "name": "zero input",
++    "wire": "{\"input_tokens\":0}",
++    "valid": true
++  },
++  {
++    "name": "unknown reads",
++    "wire": "{\"input_tokens\":100}",
++    "valid": true
++  },
++  {
++    "name": "read not write",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":20}}",
++    "valid": true
++  },
++  {
++    "name": "overlapping writes",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":21}}",
++    "valid": false
++  },
++  {
++    "name": "negative",
++    "wire": "{\"input_tokens\":-1}",
++    "valid": false
++  },
++  {
++    "name": "duplicate input",
++    "wire": "{\"input_tokens\":100,\"input_tokens\":100}",
++    "valid": false
++  },
++  {
++    "name": "null write",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cache_write_tokens\":null}}",
++    "valid": false
++  },
++  {
++    "name": "unrelated attribution extension",
++    "wire": "{\"input_tokens\":100,\"attribution\":{\"future\":true}}",
++    "valid": true
++  },
++  {
++    "name": "explicit empty partition",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":0},\"attribution\":{\"items\":{}}}",
++    "valid": false
++  },
++  {
++    "name": "complete partition",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":80,\"cached_tokens\":50}},\"request_fields\":{\"instructions\":{\"input_tokens\":20,\"cached_tokens\":20}}}}",
++    "valid": true
++  },
++  {
++    "name": "hidden rows",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":80,\"cached_tokens\":50}}}}",
++    "valid": false
++  },
++  {
++    "name": "duplicate identity",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70},\"a\":{\"input_tokens\":100,\"cached_tokens\":70}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested overcount",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70,\"content\":[{\"input_tokens\":101,\"cached_tokens\":70}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested descendant overcount",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70,\"content\":[{\"input_tokens\":50,\"cached_tokens\":40,\"content\":[{\"input_tokens\":51,\"cached_tokens\":40}]}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested_known_writes_reject_zero_total",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":5,\"cache_write_tokens\":0},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":5,\"content\":[{\"input_tokens\":4,\"cached_tokens\":4,\"cache_write_tokens\":0},{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested_known_writes_accept_matching_total",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":5,\"cache_write_tokens\":2},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":5,\"content\":[{\"input_tokens\":4,\"cached_tokens\":4,\"cache_write_tokens\":0},{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": true
++  },
++  {
++    "name": "complete_nested_partition_rejects_extra_writes",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":5,\"cache_write_tokens\":3},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":5,\"content\":[{\"input_tokens\":4,\"cached_tokens\":4,\"cache_write_tokens\":0},{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "unknown_intermediate_row_retains_known_child_lower_bound",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":5,\"cache_write_tokens\":0},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":5,\"content\":[{\"input_tokens\":10,\"cached_tokens\":5,\"content\":[{\"input_tokens\":4,\"cached_tokens\":4,\"cache_write_tokens\":0},{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "partial_nested_partition_rejects_below_lower_bound",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":1},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":2,\"content\":[{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "partial_nested_partition_accepts_uncertain_middle",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":3},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":2,\"content\":[{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": true
++  },
++  {
++    "name": "partial_nested_partition_accepts_upper_bound",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":5},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":2,\"content\":[{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": true
++  },
++  {
++    "name": "partial_nested_partition_rejects_above_upper_bound",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":6},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":2,\"content\":[{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested_bounds_do_not_require_a_reported_write_count",
++    "wire": "{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":5},\"attribution\":{\"items\":{\"item\":{\"input_tokens\":10,\"cached_tokens\":5,\"content\":[{\"input_tokens\":4,\"cached_tokens\":4,\"cache_write_tokens\":0},{\"input_tokens\":6,\"cached_tokens\":1,\"cache_write_tokens\":2}]}}}}",
++    "valid": true
++  }
++]
+diff --git a/sdk/protocol/codex/tools.go b/sdk/protocol/codexwire/tools.go
+similarity index 99%
+rename from sdk/protocol/codex/tools.go
+rename to sdk/protocol/codexwire/tools.go
+index a9cd820..8fb72fd 100644
+--- a/sdk/protocol/codex/tools.go
++++ b/sdk/protocol/codexwire/tools.go
+@@ -1,4 +1,4 @@
+-package codex
++package codexwire
+ 
+ import (
+ 	"encoding/json"
+diff --git a/sdk/protocol/codex/usage.go b/sdk/protocol/codexwire/usage.go
+similarity index 91%
+rename from sdk/protocol/codex/usage.go
+rename to sdk/protocol/codexwire/usage.go
+index 7d8bced..532115b 100644
+--- a/sdk/protocol/codex/usage.go
++++ b/sdk/protocol/codexwire/usage.go
+@@ -1,9 +1,10 @@
+-package codex
++package codexwire
+ 
+ import (
+ 	"bytes"
+ 	"encoding/json"
+ 	"errors"
++	accounting "github.com/router-for-me/CLIProxyAPI/sdk/protocol/codex"
+ 	"io"
+ 	"strings"
+ )
+@@ -129,7 +130,7 @@ func ValidateAttribution(raw json.RawMessage, input int, cached, written *int) e
+ 	if cached == nil {
+ 		return ErrUsage
+ 	}
+-	decode := func(raw json.RawMessage) (map[string]CacheRow, bool) {
++	decode := func(raw json.RawMessage) (map[string]accounting.CacheRow, bool) {
+ 		if len(raw) == 0 {
+ 			return nil, true
+ 		}
+@@ -144,7 +145,7 @@ func ValidateAttribution(raw json.RawMessage, input int, cached, written *int) e
+ 		return ErrUsage
+ 	}
+ 	fieldRows, valid := decode(fields)
+-	if !valid || !validDetails(cacheDetails{
++	if !valid || !accounting.ValidDetails(accounting.CacheDetails{
+ 		Input: input, Cached: *cached, Written: written, Items: itemRows, Fields: fieldRows,
+ 	}) {
+ 		return ErrUsage
+@@ -154,15 +155,15 @@ func ValidateAttribution(raw json.RawMessage, input int, cached, written *int) e
+ 
+ // AttributionRow validates the full breakdown. If content is false, it returns
+ // only aggregate counts after validating any supplied children.
+-func AttributionRow(raw json.RawMessage, content bool) (CacheRow, bool) {
++func AttributionRow(raw json.RawMessage, content bool) (accounting.CacheRow, bool) {
+ 	row, ok := decodeAttributionRow(raw, 0)
+ 	if !content {
+ 		row.Content = nil
+ 	}
+ 	return row, ok
+ }
+-func decodeAttributionRow(raw json.RawMessage, depth int) (CacheRow, bool) {
+-	var row CacheRow
++func decodeAttributionRow(raw json.RawMessage, depth int) (accounting.CacheRow, bool) {
++	var row accounting.CacheRow
+ 	if depth > 64 {
+ 		return row, false
+ 	}
+@@ -192,7 +193,7 @@ func decodeAttributionRow(raw json.RawMessage, depth int) (CacheRow, bool) {
+ 			row.Content = append(row.Content, part)
+ 		}
+ 	}
+-	return row, validRowRoot(row)
++	return row, accounting.ValidRow(row)
+ }
+ 
+ func AttributionTables(raw json.RawMessage) (map[string]json.RawMessage, map[string]json.RawMessage, bool) {
+@@ -213,8 +214,8 @@ func AttributionTables(raw json.RawMessage) (map[string]json.RawMessage, map[str
+ 
+ // DecodeAttributionRows is the Responses usage-attribution adapter. The
+ // infra core consumes decoded counters and knows no upstream field names.
+-func DecodeAttributionRows(table map[string]json.RawMessage) (map[string]CacheRow, bool) {
+-	rows := make(map[string]CacheRow, len(table))
++func DecodeAttributionRows(table map[string]json.RawMessage) (map[string]accounting.CacheRow, bool) {
++	rows := make(map[string]accounting.CacheRow, len(table))
+ 	for key, raw := range table {
+ 		row, valid := AttributionRow(raw, true)
+ 		if !valid {
+@@ -240,7 +241,7 @@ func (u Usage) Validate() error {
+ 	if u.EvidenceErr != nil {
+ 		return u.EvidenceErr
+ 	}
+-	if validateCounts(u.Input, u.Cached, u.Written) != nil {
++	if !accounting.ValidCounts(u.Input, u.Cached, u.Written) {
+ 		return ErrUsage
+ 	}
+ 	return ValidateAttribution(u.Attribution, u.Input, u.Cached, u.Written)
+diff --git a/sdk/protocol/codexwire/write_bounds_test.go b/sdk/protocol/codexwire/write_bounds_test.go
+new file mode 100644
+index 0000000..9e1e1ad
+--- /dev/null
++++ b/sdk/protocol/codexwire/write_bounds_test.go
+@@ -0,0 +1,48 @@
++package codexwire
++
++import (
++	"encoding/json"
++	"fmt"
++	"testing"
++)
++
++func TestNestedWriteBoundsCheckKnownClaimsWithoutFillingUnknowns(t *testing.T) {
++	full := `{"input_tokens":10,"cached_tokens":5,"content":[{"input_tokens":4,"cached_tokens":4,"cache_write_tokens":0},{"input_tokens":6,"cached_tokens":1,"cache_write_tokens":2}]}`
++	nested := `{"input_tokens":10,"cached_tokens":5,"content":[` + full + `]}`
++	partial := `{"input_tokens":10,"cached_tokens":2,"content":[{"input_tokens":6,"cached_tokens":1,"cache_write_tokens":2}]}`
++	var absent Usage
++	rawAbsent := fmt.Sprintf(`{"input_tokens":10,"input_tokens_details":{"cached_tokens":5},"attribution":{"items":{"item":%s}}}`, full)
++	if err := json.Unmarshal([]byte(rawAbsent), &absent); err != nil {
++		t.Fatal(err)
++	}
++	if absent.Validate() != nil || absent.Written != nil {
++		t.Fatal("derived bounds became reported aggregate writes")
++	}
++	decoded, ok := AttributionRow(json.RawMessage(full), true)
++	if !ok || decoded.WriteKnown || decoded.Written != 0 {
++		t.Fatal("derived bounds became reported parent-row writes")
++	}
++	for _, tc := range []struct {
++		name   string
++		cached int
++		row    string
++		claims map[int]bool
++	}{
++		{"complete", 5, full, map[int]bool{0: false, 2: true, 3: false}},
++		{"nested_unknown", 5, nested, map[int]bool{0: false, 2: true, 3: false}},
++		{"partial", 2, partial, map[int]bool{1: false, 2: true, 3: true, 5: true, 6: false}},
++	} {
++		for writes, want := range tc.claims {
++			t.Run(fmt.Sprintf("%s/%d", tc.name, writes), func(t *testing.T) {
++				raw := fmt.Sprintf(`{"input_tokens":10,"input_tokens_details":{"cached_tokens":%d,"cache_write_tokens":%d},"attribution":{"items":{"item":%s}}}`, tc.cached, writes, tc.row)
++				var u Usage
++				if err := json.Unmarshal([]byte(raw), &u); err != nil {
++					t.Fatal(err)
++				}
++				if got := u.Validate() == nil; got != want {
++					t.Fatalf("valid=%v want=%v error=%v", got, want, u.Validate())
++				}
++			})
++		}
++	}
++}
+-- 
+2.56.0
+
