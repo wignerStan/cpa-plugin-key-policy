@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/contract_test.go)
+
+---
+diff --git a/sdk/protocol/codex/contract_test.go b/sdk/protocol/codex/contract_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..282e718b20d11ac94084fd25ecff15a4d45496b9
+--- /dev/null
++++ b/sdk/protocol/codex/contract_test.go
+@@ -0,0 +1,177 @@
++package codex
++
++import (
++	"encoding/json"
++	"net/http"
++	"os"
++	"strings"
++	"testing"
++)
++
++func TestUsageContractVectors(t *testing.T) {
++	data, err := os.ReadFile("testdata/usage.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var cases []struct {
++		Name, Wire string
++		Valid      bool
++	}
++	if err = json.Unmarshal(data, &cases); err != nil {
++		t.Fatal(err)
++	}
++	for _, tc := range cases {
++		t.Run(tc.Name, func(t *testing.T) {
++			var u Usage
++			err := json.Unmarshal([]byte(tc.Wire), &u)
++			valid := err == nil && u.InputKnown && u.Validate() == nil
++			if valid != tc.Valid {
++				t.Fatalf("valid=%v want=%v error=%v evidence=%v", valid, tc.Valid, err, u.EvidenceErr)
++			}
++		})
++	}
++}
++func TestDuplicateEnvelopeEvidence(t *testing.T) {
++	var response Response
++	if err := json.Unmarshal([]byte(`{"usage":{"input_tokens":10},"Usage":{"input_tokens":10}}`), &response); err != nil {
++		t.Fatal(err)
++	}
++	if response.Usage.Validate() == nil {
++		t.Fatal("duplicate usage accepted")
++	}
++	var event Event
++	if err := json.Unmarshal([]byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"a"},"Headers":{"x-codex-turn-state":"a"}}`), &event); err != nil {
++		t.Fatal(err)
++	}
++	if !event.IsMetadata() || event.Headers.Err == nil {
++		t.Fatal("duplicate metadata accepted")
++	}
++}
++func TestTurnStateEvidence(t *testing.T) {
++	for _, raw := range []string{`{"x-codex-turn-state":"a","X-Codex-Turn-State":"b"}`, `{"x-codex-turn-state":[]}`, `{"x-codex-turn-state":null}`, `{"x-codex-turn-state":"\n"}`} {
++		if _, err := MetadataState([]byte(raw)); err == nil {
++			t.Fatalf("accepted %s", raw)
++		}
++	}
++	h, err := MetadataState([]byte(`{"x-codex-turn-state":[["opaque"]],"unrelated":42}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	token, present, err := TurnState(h)
++	if token != "opaque" || !present || err != nil {
++		t.Fatalf("%q %v %v", token, present, err)
++	}
++	if _, present, err = TurnState(http.Header{}); present || err != nil {
++		t.Fatal("absence became invalid or present")
++	}
++}
++func TestMetadataRewritePreservesOpaqueFields(t *testing.T) {
++	body := map[string]json.RawMessage{"client_metadata": json.RawMessage(`{"ws_request_header_x_codex_turn_state":"old","other":9007199254740993,"thread_id":"logical"}`)}
++	if err := SetMetadataTurnState(body, "new"); err != nil {
++		t.Fatal(err)
++	}
++	got := string(body["client_metadata"])
++	for _, text := range []string{`9007199254740993`, `"logical"`, `"new"`} {
++		if !strings.Contains(got, text) {
++			t.Fatalf("lost %s: %s", text, got)
++		}
++	}
++	body["metadata"] = json.RawMessage(`{"thread_id":"a","thread_id":"b"}`)
++	if err := SetMetadataTurnState(body, "new"); err == nil {
++		t.Fatal("duplicate metadata accepted")
++	}
++}
++func TestToolHistoryUsesCallID(t *testing.T) {
++	call := json.RawMessage(`{"type":"function_call","id":"item","call_id":"call","name":"exec","arguments":"{}"}`)
++	result := json.RawMessage(`{"type":"function_call_output","call_id":"call","output":"ok"}`)
++	if _, err := ValidateToolHistory([]json.RawMessage{call, result}); err != nil {
++		t.Fatal(err)
++	}
++	for _, history := range [][]json.RawMessage{{call}, {result}, {call, result, call, result}, {call, json.RawMessage(`{"type":"custom_tool_call_output","call_id":"call","output":"ok"}`)}, {call, json.RawMessage(`{"type":"function_call_output","call_id":"item","output":"ok"}`)}} {
++		if _, err := ValidateToolHistory(history); err == nil {
++			t.Fatal("invalid pair accepted")
++		}
++	}
++	if _, _, err := HistoryItem(json.RawMessage(`{"type":"message","type":"function_call"}`)); err == nil {
++		t.Fatal("duplicate history discriminator accepted")
++	}
++}
++func TestLiteCatalogAndOpaqueResponse(t *testing.T) {
++	raw := []byte(`{"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec"}]}]}]}`)
++	names, ok := RequestToolNames(raw)
++	if !ok || names["functions.exec"] != "function" {
++		t.Fatalf("%v %v", names, ok)
++	}
++	var response Response
++	if err := json.Unmarshal([]byte(`{"output":[{"type":"compaction","encrypted_content":"opaque"}],"tools":[]}`), &response); err != nil {
++		t.Fatal(err)
++	}
++	if string(response.Tools) != "[]" || !strings.Contains(string(response.Output[0]), `"opaque"`) {
++		t.Fatal("evidence lost")
++	}
++}
++
++func TestReusedEnvelopeEvidenceBelongsToCurrentMessage(t *testing.T) {
++	var response Response
++	decoder := json.NewDecoder(strings.NewReader(`{"usage":{"input_tokens":10}} {"usage":{"input_tokens":20}} {}`))
++	for i, want := range []int{10, 20, 0} {
++		if err := decoder.Decode(&response); err != nil {
++			t.Fatal(err)
++		}
++		if response.Usage.EvidenceErr != nil || response.Usage.Input != want || response.Usage.InputKnown != (i < 2) {
++			t.Fatalf("response %d retained evidence from another message: %+v", i, response.Usage)
++		}
++	}
++	var event Event
++	decoder = json.NewDecoder(strings.NewReader(`{"type":"response.metadata","headers":{"x-codex-turn-state":"first"}} {"type":"response.metadata","headers":{"x-codex-turn-state":"second"}} {"type":"response.completed"}`))
++	for i, want := range []string{"first", "second", ""} {
++		if err := decoder.Decode(&event); err != nil {
++			t.Fatal(err)
++		}
++		if event.Headers.Err != nil || event.Headers.State.Get("X-Codex-Turn-State") != want {
++			t.Fatalf("event %d retained evidence from another message: %+v", i, event.Headers)
++		}
++	}
++}
++
++func TestReusedEvidenceValuesResetDecodingState(t *testing.T) {
++	var usage Usage
++	for _, raw := range []string{`{"input_tokens":10}`, `{"input_tokens":20}`, `null`, `{}`} {
++		var fresh Usage
++		if err := json.Unmarshal([]byte(raw), &fresh); err != nil {
++			t.Fatal(err)
++		}
++		if err := json.Unmarshal([]byte(raw), &usage); err != nil {
++			t.Fatal(err)
++		}
++		if usage.Input != fresh.Input || usage.InputKnown != fresh.InputKnown || usage.EvidenceErr != nil {
++			t.Fatalf("reused usage for %s differs from fresh evidence: %+v", raw, usage)
++		}
++	}
++	var headers MetadataHeaders
++	for _, raw := range []string{`{"x-codex-turn-state":"first"}`, `{"x-codex-turn-state":null}`, `{"x-codex-turn-state":"second"}`, `{}`} {
++		var fresh MetadataHeaders
++		if err := json.Unmarshal([]byte(raw), &fresh); err != nil {
++			t.Fatal(err)
++		}
++		if err := json.Unmarshal([]byte(raw), &headers); err != nil {
++			t.Fatal(err)
++		}
++		if headers.State.Get("X-Codex-Turn-State") != fresh.State.Get("X-Codex-Turn-State") || (headers.Err == nil) != (fresh.Err == nil) {
++			t.Fatalf("reused headers for %s differ from fresh evidence: %+v", raw, headers)
++		}
++	}
++}
++
++func TestDuplicateEvidenceRemainsDeferredWithinOneEnvelope(t *testing.T) {
++	var response Response
++	if err := json.Unmarshal([]byte(`{"status":"failed","usage":{"input_tokens":10},"Usage":{"input_tokens":20}}`), &response); err != nil {
++		t.Fatal(err)
++	}
++	if response.Status != "failed" || response.Usage.Validate() == nil {
++		t.Fatalf("lost upstream failure or duplicate evidence: %+v", response)
++	}
++	if err := json.Unmarshal([]byte(`{"usage":{"input_tokens":30}}`), &response); err != nil || response.Usage.Validate() != nil {
++		t.Fatalf("duplicate marker escaped its envelope: %+v, %v", response.Usage, err)
++	}
++}

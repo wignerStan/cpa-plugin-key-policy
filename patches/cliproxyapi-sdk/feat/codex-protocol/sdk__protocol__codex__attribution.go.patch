@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/attribution.go)
+
+---
+diff --git a/sdk/protocol/codex/attribution.go b/sdk/protocol/codex/attribution.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..644e41276d9314fc36d567ac09f70c5b4b695747
+--- /dev/null
++++ b/sdk/protocol/codex/attribution.go
+@@ -0,0 +1,69 @@
++package codex
++
++// validRowRoot checks a nested breakdown without double counting child rows.
++// Unknown writes stay unknown; they are not inferred from input minus reads.
++func validRowRoot(row CacheRow) bool { return validRow(row, 0) }
++
++func validRow(row CacheRow, depth int) bool {
++	if depth > 64 || row.Input < 0 || row.Cached < 0 || row.Cached > row.Input || row.Written < 0 || row.Written > row.Input-row.Cached || !row.WriteKnown && row.Written != 0 {
++		return false
++	}
++	input, cached, written := 0, 0, 0
++	allWritesKnown := true
++	for _, child := range row.Content {
++		if !validRow(child, depth+1) || child.Input > row.Input-input || child.Cached > row.Cached-cached || child.Written > row.Input-written || row.WriteKnown && child.Written > row.Written-written {
++			return false
++		}
++		input += child.Input
++		cached += child.Cached
++		written += child.Written
++		allWritesKnown = allWritesKnown && (child.WriteKnown || child.Input == 0)
++	}
++	if row.Cached-cached > row.Input-input {
++		return false
++	}
++	if row.WriteKnown && allWritesKnown && row.Written-written > (row.Input-input)-(row.Cached-cached) {
++		return false
++	}
++	return true
++}
++
++// validDetails requires complete, self-consistent top-level accounting.
++func validDetails(d cacheDetails) bool {
++	if validateCounts(d.Input, &d.Cached, d.Written) != nil {
++		return false
++	}
++	input, cached, written := 0, 0, 0
++	allWritesKnown := true
++	for _, table := range []map[string]CacheRow{d.Items, d.Fields} {
++		for _, row := range table {
++			if !validRowRoot(row) || row.Input > d.Input-input || row.Cached > d.Cached-cached || row.Written > d.Input-written || d.Written != nil && row.Written > *d.Written-written {
++				return false
++			}
++			input += row.Input
++			cached += row.Cached
++			written += row.Written
++			allWritesKnown = allWritesKnown && (row.WriteKnown || row.Input == 0)
++		}
++	}
++	return input == d.Input && cached == d.Cached && (d.Written == nil || !allWritesKnown || written == *d.Written)
++}
++
++// CacheRow is a decoded Codex attribution row, not a continuity decision.
++type CacheRow struct {
++	Input, Cached, Written int
++	WriteKnown             bool
++	Content                []CacheRow
++}
++type cacheDetails struct {
++	Input, Cached int
++	Written       *int
++	Items, Fields map[string]CacheRow
++}
++
++func validateCounts(input int, cached, written *int) error {
++	if input < 0 || cached != nil && (*cached < 0 || *cached > input) || written != nil && (*written < 0 || *written > input) || cached != nil && written != nil && *written > input-*cached {
++		return ErrUsage
++	}
++	return nil
++}

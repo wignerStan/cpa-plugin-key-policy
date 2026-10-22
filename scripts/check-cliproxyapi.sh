@@ -19,3 +19,9 @@ fi
     ./internal/pluginhost \
     ./sdk/cliproxy
 )
+
+# This standard-library-only module has its own boundary; root tests exclude it.
+(
+  cd "${repo_root}/build/cliproxyapi/sdk/protocol"
+  GOWORK=off go test -race ./...
+)

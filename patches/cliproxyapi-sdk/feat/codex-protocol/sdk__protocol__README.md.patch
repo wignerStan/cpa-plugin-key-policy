@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/README.md)
+
+---
+diff --git a/sdk/protocol/README.md b/sdk/protocol/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bb637fac7047993d6436540df2de025e7986cbe
+--- /dev/null
++++ b/sdk/protocol/README.md
+@@ -0,0 +1,24 @@
++# Standalone CPA protocol contracts
++
++Module: `github.com/router-for-me/CLIProxyAPI/sdk/protocol`.
++The canonical location is `sdk/protocol` in the patched CPA source. This module
++uses only the Go standard library. Importing it does not load the host, plugin
++runtime, translator, scheduler, or infra cache.
++
++`codex` describes Responses/Lite usage attribution, tool catalogs and completed
++call/result history, metadata and turn-state transport. `Response` and `Event`
++are inspection views. Retain the original wire when forwarding opaque or unknown
++fields. The echoed tool catalog does not prove that tools can execute.
++
++`Usage.Validate()` checks reported counters and complete attribution partitions.
++Check `InputKnown` separately when explicit accounting is required. Unknown reads
++and writes remain unknown. Aggregate input minus reads is not a cache-write count.
++`Usage.EvidenceErr` and `MetadataHeaders.Err` are deferred decoding errors: this
++lets callers give an upstream failure priority over missing accounting evidence.
++Callers must check them before using the evidence.
++
++The protocol types do not establish model identity, classify BPS, select routes,
++or authorize release. Those decisions belong to the consumer. The shared JSON
++vectors under `codex/testdata` test the same accounting cases in Go and Rust.
++
++Run `GOWORK=off go test -race ./...` from this directory.

@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/response.go)
+
+---
+diff --git a/sdk/protocol/codex/response.go b/sdk/protocol/codex/response.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..39e1b069ff13bfeca82987cb6a54f8b2ae02a687
+--- /dev/null
++++ b/sdk/protocol/codex/response.go
+@@ -0,0 +1,102 @@
++package codex
++
++import (
++	"encoding/json"
++	"fmt"
++)
++
++// Response is an inspection view. Forward the original wire bytes, not this
++// view: unknown fields and opaque/encrypted output must remain unchanged.
++// Raw fields preserve absent/null/empty distinctions without inventing evidence.
++type Response struct {
++	ID           string            `json:"id"`
++	Status       string            `json:"status"`
++	Usage        Usage             `json:"usage"`
++	Output       []json.RawMessage `json:"output"`
++	Tools        json.RawMessage   `json:"tools"`
++	Instructions json.RawMessage   `json:"instructions"`
++	Metadata     json.RawMessage   `json:"metadata"`
++}
++
++// Decode a fresh envelope even when a stream consumer reuses its destination.
++// The private field marker lives for this message only.
++func (r *Response) UnmarshalJSON(raw []byte) error {
++	type response Response
++	var next response
++	envelope := struct {
++		*response
++		Usage usageField `json:"usage"`
++	}{response: &next}
++	if err := json.Unmarshal(raw, &envelope); err != nil {
++		return err
++	}
++	next.Usage = envelope.Usage.value
++	*r = Response(next)
++	return nil
++}
++
++type usageField struct {
++	value Usage
++	seen  bool
++}
++
++func (f *usageField) UnmarshalJSON(raw []byte) error {
++	if f.seen {
++		f.value.EvidenceErr = ErrUsage
++		return nil
++	}
++	f.seen = true
++	return json.Unmarshal(raw, &f.value)
++}
++
++// Event describes Responses and Lite lifecycle, output-item and metadata events.
++// Usage and metadata retain deferred errors, so callers can prioritize a later
++// upstream failure over incomplete evidence. They must inspect those errors.
++type Event struct {
++	Type        string          `json:"type"`
++	Response    json.RawMessage `json:"response"`
++	OutputIndex json.RawMessage `json:"output_index"`
++	Item        json.RawMessage `json:"item"`
++	Headers     MetadataHeaders `json:"headers"`
++}
++
++// A reused event must not carry headers or duplicate markers into the next one.
++func (e *Event) UnmarshalJSON(raw []byte) error {
++	type event Event
++	var next event
++	envelope := struct {
++		*event
++		Headers metadataField `json:"headers"`
++	}{event: &next}
++	if err := json.Unmarshal(raw, &envelope); err != nil {
++		return err
++	}
++	next.Headers = envelope.Headers.value
++	*e = Event(next)
++	return nil
++}
++
++type metadataField struct {
++	value MetadataHeaders
++	seen  bool
++}
++
++func (f *metadataField) UnmarshalJSON(raw []byte) error {
++	if f.seen {
++		f.value.Err = fmt.Errorf("%w: duplicate_held_metadata_headers", ErrTurnState)
++		return nil
++	}
++	f.seen = true
++	return json.Unmarshal(raw, &f.value)
++}
++
++func (e Event) IsMetadata() bool {
++	return e.Type == "response.metadata" || e.Type == "codex.response.metadata"
++}
++
++// TurnMetadata identifies logical work. ThreadID is not a physical session ID.
++type TurnMetadata struct {
++	ThreadID    string `json:"thread_id"`
++	TurnID      string `json:"turn_id"`
++	RequestKind string `json:"request_kind"`
++}

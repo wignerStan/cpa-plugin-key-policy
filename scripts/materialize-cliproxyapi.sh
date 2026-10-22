@@ -64,9 +64,9 @@ patch_count=0
 while IFS=$'\t' read -r patch_path expected_sha; do
   [[ -n "${patch_path}" ]] || continue
   case "${patch_path}" in
-    patches/cliproxyapi/*.patch) ;;
+    patches/cliproxyapi/*.patch|patches/cliproxyapi-sdk/*.patch) ;;
     *)
-      printf 'refusing patch outside patches/cliproxyapi: %s\n' "${patch_path}" >&2
+      printf 'refusing patch outside the declared CPA and SDK roots: %s\n' "${patch_path}" >&2
       exit 1
       ;;
   esac

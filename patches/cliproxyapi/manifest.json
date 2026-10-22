@@ -71,6 +71,78 @@
       "path": "patches/cliproxyapi/0011-fix-logging-honor-diagnostic-capture-contract.patch",
       "commit": "9f52fc90d1aef9992890b246500b5a0c1ce1c499",
       "sha256": "4d314fa968a3334ba30b784e18d2c590d59c5248120558f7745eef81459d68b9"
+    },
+    {
+      "order": 12,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__LICENSE.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "e30a584105a160e5758ea32e0247a5cd142f082a9d0e4e31ce09a9e504d0a0dc"
+    },
+    {
+      "order": 13,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__README.md.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "88d4d67d96fa602e5fefec07f1693762cf6c88bd97361692e9644161d41e286d"
+    },
+    {
+      "order": 14,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__BUILD.bazel.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "ac0d2b2d0b6d459f6a15ece120a716103b0a353f0b9b7b824e40f79f768d2f9a"
+    },
+    {
+      "order": 15,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__attribution.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "70fcbb0ae440c77516b429a465b94279fe2e7156235c8a7e430a08b1327256a4"
+    },
+    {
+      "order": 16,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__contract_test.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "935babb8187569470fe625ab57409d3acc6a9ef48d67dc5ab5018f614430baa5"
+    },
+    {
+      "order": 17,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__event_metadata.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "27c58ce6d2fc002d7da6bbdb06ddb224173b1b3a502fcdec48f0fff4470a85ac"
+    },
+    {
+      "order": 18,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__metadata.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "80b08c2aa049f259b083d3c0faf6d312e9090009a24e04fff79f79857d130562"
+    },
+    {
+      "order": 19,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__response.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "fa5f1e9968b90f9f8575d9531d487e842136797c8f4ac55c93dd653e44e4c928"
+    },
+    {
+      "order": 20,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__testdata__usage.json.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "359116e213031da4e37ccc65723ce3779fea5675307197d4e2ac286a40b592e9"
+    },
+    {
+      "order": 21,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__tools.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "841e0fc6f1d284538d5a8e3ec8c0f9128b4aa22d6f3c692d2d70f9e09e0bfb9c"
+    },
+    {
+      "order": 22,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__codex__usage.go.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "8eee5e260cc62498008208a27d165883ea891b0e90b1ad54c4abe525747dd0df"
+    },
+    {
+      "order": 23,
+      "path": "patches/cliproxyapi-sdk/feat/codex-protocol/sdk__protocol__go.mod.patch",
+      "commit": "b008c3acec8844c921834d014543605b64da1f32",
+      "sha256": "c57ac2d6d807dc04a4151b518edfacd17b3cc3f32501689782afe413f432cf34"
     }
   ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",

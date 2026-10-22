@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/metadata.go)
+
+---
+diff --git a/sdk/protocol/codex/metadata.go b/sdk/protocol/codex/metadata.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..32d11b16cca1dddcc245f30b346924139c6c31a2
+--- /dev/null
++++ b/sdk/protocol/codex/metadata.go
+@@ -0,0 +1,174 @@
++package codex
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"sort"
++	"strings"
++)
++
++var ErrTurnState = errors.New("missing_or_conflicting_turn_state")
++
++func TurnState(headers http.Header) (string, bool, error) {
++	var values []string
++	present := false
++	for k, v := range headers {
++		if strings.EqualFold(k, "x-codex-turn-state") {
++			present = true
++			values = append(values, v...)
++		}
++	}
++	if !present {
++		return "", false, nil
++	}
++	if len(values) != 1 || strings.TrimSpace(values[0]) == "" || strings.ContainsAny(values[0], "\r\n") {
++		return "", true, ErrTurnState
++	}
++	return values[0], true, nil
++}
++
++// Client metadata can repeat HTTP fields under the Responses Lite ws_request
++// names. Normalize only names; values and logical IDs are never text-replaced.
++func MetadataFieldName(name string) string {
++	name = strings.ReplaceAll(strings.ToLower(name), "_", "-")
++	return strings.TrimPrefix(name, "ws-request-header-")
++}
++
++// Keep all header copies, with the canonical key first and a stable order for
++// aliases. Different values can contain different unrelated metadata fields.
++func TurnMetadataHeaderValues(headers http.Header) ([]string, error) {
++	var keys []string
++	for key, values := range headers {
++		if MetadataFieldName(key) == "x-codex-turn-metadata" {
++			if len(values) == 0 {
++				return nil, errors.New("invalid_turn_metadata: empty header values")
++			}
++			keys = append(keys, key)
++		}
++	}
++	const canonical = "X-Codex-Turn-Metadata"
++	sort.Slice(keys, func(i, j int) bool {
++		if (keys[i] == canonical) != (keys[j] == canonical) {
++			return keys[i] == canonical
++		}
++		return keys[i] < keys[j]
++	})
++	var result []string
++	for _, key := range keys {
++		result = append(result, headers[key]...)
++	}
++	return result, nil
++}
++
++// RewriteMetadataObject also visits the JSON string used for turn metadata.
++// RawMessage preserves opaque fields, including integers larger than 2^53.
++// A nil replacement removes a field. Only the named metadata container is
++// traversed; arbitrary objects and strings in user input are not inspected.
++func RewriteMetadataObject(raw json.RawMessage, mutate func(string, json.RawMessage) json.RawMessage, depth int) (json.RawMessage, error) {
++	if depth > 8 {
++		return nil, errors.New("invalid_request_metadata: nested turn metadata")
++	}
++	object, err := EvidenceFields(raw)
++	if err != nil {
++		return nil, errors.New("invalid_request_metadata: object required")
++	}
++	for key, value := range object {
++		name := MetadataFieldName(key)
++		if name == "x-codex-turn-metadata" {
++			var encoded string
++			if err := json.Unmarshal(value, &encoded); err != nil {
++				return nil, errors.New("invalid_turn_metadata: JSON string required")
++			}
++			nested, err := RewriteMetadataObject(json.RawMessage(encoded), mutate, depth+1)
++			if err != nil {
++				return nil, err
++			}
++			object[key], _ = json.Marshal(string(nested))
++			continue
++		}
++		if replacement := mutate(name, value); replacement == nil {
++			delete(object, key)
++		} else {
++			object[key] = replacement
++		}
++	}
++	return json.Marshal(object)
++}
++
++func MutateRequestMetadata(body map[string]json.RawMessage, mutate func(string, json.RawMessage) json.RawMessage) error {
++	for _, key := range []string{"metadata", "client_metadata"} {
++		value, ok := body[key]
++		// An optional null container has no routing fields. A present encoded
++		// turn-metadata value must still contain an object, never null.
++		if !ok || strings.TrimSpace(string(value)) == "null" {
++			continue
++		}
++		rewritten, err := RewriteMetadataObject(value, mutate, 0)
++		if err != nil {
++			return err
++		}
++		body[key] = rewritten
++	}
++	return nil
++}
++
++func HeadersWithTurnState(outgoing http.Header, token string) http.Header {
++	out := outgoing.Clone()
++	if out == nil {
++		out = http.Header{}
++	}
++	for key := range out {
++		if strings.EqualFold(key, "X-Codex-Turn-State") {
++			delete(out, key)
++		}
++	}
++	out.Set("X-Codex-Turn-State", token)
++	return out
++}
++
++// Steer receives the exact token already validated against the held response.
++// Synchronize existing transport copies without adding metadata or new tokens.
++func SetMetadataTurnState(body map[string]json.RawMessage, token string) error {
++	encoded, _ := json.Marshal(token)
++	return MutateRequestMetadata(body, func(name string, value json.RawMessage) json.RawMessage {
++		if name == "x-codex-turn-state" {
++			if token == "" {
++				return nil
++			}
++			return encoded
++		}
++		return value
++	})
++}
++
++// The validated request headers are already cloned. Update every existing HTTP
++// metadata copy without changing its key, value count, or unrelated fields.
++// Keep this out of continuationHeaders, which also combines response evidence.
++func SetHeaderMetadataTurnState(headers http.Header, token string) error {
++	encoded, _ := json.Marshal(token)
++	for key, values := range headers {
++		if MetadataFieldName(key) != "x-codex-turn-metadata" {
++			continue
++		}
++		if len(values) == 0 {
++			return errors.New("invalid_turn_metadata: value required")
++		}
++		for i, value := range values {
++			rewritten, err := RewriteMetadataObject(json.RawMessage(value), func(name string, raw json.RawMessage) json.RawMessage {
++				if name == "x-codex-turn-state" {
++					if token == "" {
++						return nil
++					}
++					return encoded
++				}
++				return raw
++			}, 0)
++			if err != nil {
++				return err
++			}
++			values[i] = string(rewritten)
++		}
++	}
++	return nil
++}
