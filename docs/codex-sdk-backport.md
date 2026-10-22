@@ -24,6 +24,7 @@ errors. Upstream failures retain their normal priority.
 
 The parent commit pins the pristine upstream at `third_party/cliproxyapi`.
 Initialize it with `git submodule update --init --depth 1 -- third_party/cliproxyapi`.
+The materializer also initializes a missing checkout from that committed pin.
 The materializer checks that committed gitlink, the manifest commit, and the
 clean submodule checkout agree. It applies the ordered patches in a disposable
 build checkout. The patched output remains at `build/cliproxyapi`.

@@ -43,9 +43,12 @@ if [[ "${source_entry}" != "160000 commit ${source_commit}"$'\t'"third_party/cli
   printf 'upstream commit must match the committed third_party/cliproxyapi gitlink\n' >&2
   exit 1
 fi
-if [[ -L "${source_checkout}" || ! -e "${source_checkout}/.git" ]]; then
-  printf 'initialize the pinned source: git submodule update --init --depth 1 -- third_party/cliproxyapi\n' >&2
+if [[ -L "${source_checkout}" ]]; then
+  printf 'the pinned upstream checkout must not be a symlink\n' >&2
   exit 1
+fi
+if [[ ! -e "${source_checkout}/.git" ]]; then
+  git -C "${repo_root}" submodule update --init --depth 1 -- third_party/cliproxyapi
 fi
 if [[ "$(git -C "${source_checkout}" rev-parse HEAD)" != "${source_commit}" ]] ||
    [[ -n "$(git -C "${source_checkout}" status --porcelain --untracked-files=all)" ]]; then

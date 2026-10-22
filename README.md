@@ -161,7 +161,8 @@ capture is Linux-only, requires both `codex-dump: true` and `trace: true`, and
 writes exact bytes to separate private artifacts. Application logs contain a
 classified payload view; they never contain the captured raw bytes.
 
-Builds materialize the pinned upstream source, apply the checked-in patches,
+The pristine upstream pin lives at `third_party/cliproxyapi`. Builds initialize
+that exact submodule when needed, apply the checked-in patches in a disposable checkout,
 and build the result under the ignored `build/` directory. No generated source
 is stored in `vendor/`, and the host is not maintained as a second editable
 checkout:
