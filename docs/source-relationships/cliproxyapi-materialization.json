@@ -128,10 +128,15 @@
       "order": 24,
       "path": "patches/cliproxyapi-sdk/refactor/codex-wire-codec/0024-separate-wire-codec-from-accounting.patch",
       "sha256": "c77b47b9cb9316a68d2f6caa6a22f596d8f6d61d57978870a307a52c6e81ce69"
+    },
+    {
+      "order": 25,
+      "path": "patches/cliproxyapi-sdk/refactor/codex-wire-codec/0025-resolve-portable-accounting-label.patch",
+      "sha256": "8668f8ccea17dbb3b0197abe103733cf5fb365e0821005280eaf46e72ea54123"
     }
   ],
   "public_api": "CLIProxyAPI server and OpenAI/Gemini/Claude-compatible endpoints; standalone SDK/protocol codex decoded accounting and codexwire JSON codec",
-  "result_tree": "17d361a802730f7ff4f8f17e39a786e892d0b0e4",
+  "result_tree": "934e2d6b920fb4146483c48a5e5f8e7e53719509",
   "licenses": [
     "third_party/cliproxyapi/LICENSE",
     "build/cliproxyapi/sdk/protocol/LICENSE"

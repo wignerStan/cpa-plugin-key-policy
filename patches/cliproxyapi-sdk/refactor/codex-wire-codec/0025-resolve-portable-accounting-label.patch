@@ -1,0 +1,33 @@
+From 644581b3e032c6a8a741f2db0846d63550a9863b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Thu, 22 Oct 2026 04:30:22 -0700
+Subject: [PATCH] fix(sdk): resolve accounting label from the codec package
+ location
+
+---
+ sdk/protocol/codexwire/BUILD.bazel | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/sdk/protocol/codexwire/BUILD.bazel b/sdk/protocol/codexwire/BUILD.bazel
+index 7c453c5..2ab33f6 100644
+--- a/sdk/protocol/codexwire/BUILD.bazel
++++ b/sdk/protocol/codexwire/BUILD.bazel
+@@ -1,11 +1,14 @@
+ load("@rules_go//go:def.bzl", "go_library", "go_test")
+ 
++# Follow the accounting sibling in the current checkout layout.
++_ACCOUNTING_PACKAGE = "/".join(package_name().split("/")[:-1] + ["codex"])
++
+ go_library(
+     name = "codexwire",
+     srcs = ["event_metadata.go", "metadata.go", "response.go", "tools.go", "usage.go"],
+     importpath = "github.com/router-for-me/CLIProxyAPI/sdk/protocol/codexwire",
+     visibility = ["//visibility:public"],
+-    deps = ["//sdk/protocol/codex"],
++    deps = ["//%s:codex" % _ACCOUNTING_PACKAGE],
+ )
+ 
+ go_test(
+-- 
+2.56.0
+
