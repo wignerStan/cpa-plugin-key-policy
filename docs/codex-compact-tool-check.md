@@ -13,16 +13,14 @@ flowchart TD
     C -->|yes, tools declared| D[Restore compact with original tools and model]
     C -->|yes, no tools declared| G[Release original compact response]
     C -->|no| F{Attempts remain?}
-    D --> E{Returned tool catalog contains all declared tools?}
+    D --> E{Complete tool catalog or valid private tool call?}
     E -->|yes| G
     E -->|no or evidence missing| F
     F -->|yes| B
     F -->|no| H[Stop this request; no account penalty]
     G --> I[Client installs compact]
-    I --> J[Hold actual restored response and check its tool catalog]
-    J --> K{Tools intact?}
-    K -->|yes| L[Continue ordinary ModelTrace checks and release]
-    K -->|no| H
+    I --> L[Later requests use ordinary ModelTrace checks]
+    H --> M[Guard may rotate session within its thread retry budget]
 ```
 
 The retry resends the **original compact request**, not the ordinary generation
@@ -45,19 +43,25 @@ produced the invalid stream; that requires the corresponding raw upstream dump.
 
 The private restoration request uses a separate HTTP/1.1 connection, the same
 model and reasoning effort, the original tool declarations and developer/system
-context, the new encrypted compact, and a short request to reply `OK`. It excludes
+context, the new encrypted compact, and a request for one structured call to a
+declared tool. It selects a function tool first, then a custom tool. It excludes
 old calls/results and compact-generation controls. It never executes a tool or
 releases its output to the client. Its state token cannot replace the original
 compact response's token.
 
-The check compares namespace-qualified names and tool kinds. It reads
-`response.created.tools` or `response.in_progress.tools` when an array is present,
-then cancels only the private request. If these events omit the catalog, it waits
-for `response.completed.tools`. It does not ask the model to report its own tools.
-An ordinary text answer with all tools available passes. Empty, partial, malformed
-or missing catalog evidence does not authorize release. Extra server tools are
-allowed. Cache counts, attribution, state and fingerprint scores cannot substitute
-for tool availability. This check does not establish model identity or cache trust.
+The check compares namespace-qualified names and tool kinds. A nonempty catalog
+in `response.created` or `response.in_progress` permits early validation and
+cancellation of the private request. Every originally declared tool must appear
+with the same kind. Partial or malformed catalogs fail; extra server tools are
+allowed.
+
+When the catalog is missing, null or empty, the check waits for completion and
+requires exactly one structured `output_item.done` call to the selected declared
+tool. The call must have a nonempty call ID and the correct kind. Function arguments
+must be a JSON object; custom input must be a string. Prose alone cannot pass.
+The host discards the call without executing it. This establishes availability
+of the selected tool, **not completeness of an omitted catalog**. It does not
+validate argument schemas or establish model identity or cache trust.
 
 Early cancellation reduces generated output but does not guarantee zero inference
 or zero cost. A cheaper model cannot authorize restoration for the requested model.
@@ -78,16 +82,21 @@ The attempt count includes the initial compact
 generation; zero uses 5, and the maximum is 16. This budget belongs to one host
 compact execution. It is separate from ModelTrace's thread/hour retry budget and
 Codex's own transport retries. Missing tools or catalog evidence, invalid compact
-output, transient 5xx and incomplete/failed transport can retry while held. Ordinary
-4xx, cancellation and local size/capacity failures do not spend further attempts.
+output, HTTP 408, transient 5xx and incomplete/failed transport can retry while held.
+Other 4xx, cancellation and local size/capacity failures do not spend further attempts.
 Exhaustion returns a request-scoped error, which stops native account reselection.
-The bound plugin callbacks preserve that stop as an error, rather than converting
-it into a model failure that could create a thread exclusion.
+Bound plugin callbacks convert only exhausted compact validation into the typed
+`upstream_compact_validation_failed` result. ModelTrace spends its normal thread
+retry budget, rotates the physical session, and retries the original request.
+This does not classify the provider as a degraded model or create a model ban.
+Cancellation, malformed input and local quota failures remain host errors. No
+SDK or C ABI changes are required.
 
 An already installed compact cannot be repaired by repeating ordinary generation.
-Its response still gets the tool check, but CPA does not replay that ordinary
-request or silently replace the client's history. Recovery requires the original
-precompact input. That input is retained during the guarded compact operation;
+The presence of an old compact does not invoke this check. Ordinary responses
+continue through the configured ModelTrace hold and continuity checks. CPA does
+not silently replace the client's history. Regenerating an old compact would
+require its original precompact input. That input is retained during the guarded compact operation;
 this change does not create a persistent archive of older request bodies.
 
 At most eight checks hold responses concurrently. Each stream is bounded by 8 MiB
@@ -117,3 +126,9 @@ the intended replay-disabled boundary after one callback. It also checks PAYG
 registration and reuse. That test passed with native hold enabled. The current
 fixture-validation tree is `cda67a8488308030b7d168cab225cb6d0b57d908`; that difference
 changes only the fixture, not the compact runtime.
+
+Validation on 2026-10-23: all twelve loopback process cases pass, including a
+historical compact on an ordinary request, empty tool echo with a private tool
+call, and recovery from an interrupted restoration stream. Both affected patch
+bundles pass their package suites. The real shared-library C ABI test also passes.
+These loopback results establish host behavior, not upstream route availability.
