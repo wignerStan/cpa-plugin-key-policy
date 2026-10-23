@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/wignerStan/infra",
-  "commit": "9b82d375d097900094715c226209d940b405eb8e",
+  "commit": "d0c058fc132ff392d9f96e858f0f6ccd0e1d2037",
   "module": "github.com/wignerStan/infra/go/config/file",
   "source_path": "go/config/file",
   "integration": "direct_go_module",
