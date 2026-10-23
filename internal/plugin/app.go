@@ -12,11 +12,12 @@ import (
 
 	"cpa-key-policy/internal/plugin/web"
 	"cpa-key-policy/internal/policy"
+	configfile "github.com/wignerStan/infra/go/config/file"
 )
 
 type App struct {
 	notificationMu    sync.Mutex
-	notifications     *policyNotifications
+	notifications     *configfile.Subscription
 	policyReloadError string
 	reloadMu          sync.Mutex
 	store             *policy.Store

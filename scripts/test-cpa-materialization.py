@@ -112,7 +112,7 @@ assert 'Value = 2' in (stage / 'example.go').read_text()
         wrappers = self.root / "bin"
         wrappers.mkdir()
         self.write_wrapper(wrappers / "git", """for arg in "$@"; do
-  if [[ "$arg" == am ]]; then
+  if [[ "$arg" == --index ]]; then
     if [[ "${FIXTURE_INJECT:-}" == after_check_edit ]]; then
       printf 'package example\\nconst Value = 99 // concurrent edit\\n' > "$FIXTURE_OUTPUT/example.go"
       touch "$FIXTURE_MARKER"

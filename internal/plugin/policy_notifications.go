@@ -3,15 +3,12 @@ package plugin
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"cpa-key-policy/internal/policy"
-	"github.com/wignerStan/infra/go/files/notify"
+	configfile "github.com/wignerStan/infra/go/config/file"
 	"gopkg.in/yaml.v3"
 )
 
@@ -65,90 +62,43 @@ func (a *App) reloadJSONPolicy() error {
 	a.setCatalogPolicy(catalog)
 	return nil
 }
-func policyDigest(path string) ([32]byte, error) {
+func policySnapshot(path string) (configfile.Snapshot, error) {
 	state, err := policy.LoadState(path)
 	if err != nil {
-		return [32]byte{}, err
+		return configfile.Snapshot{}, err
 	}
 	state.Usage = nil
 	state.UpdatedAt = time.Time{}
-	raw, err := json.Marshal(state)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	return sha256.Sum256(raw), nil
-}
-
-type policyNotifications struct {
-	subscription *notify.FileSubscription
-	cancel       context.CancelFunc
-	done         chan struct{}
-	once         sync.Once
+	return configfile.NewSnapshot(state, state.NeedsRewrite())
 }
 
 func (a *App) startPolicyNotifications() error {
-	path := a.store.StatePath()
-	subscription, err := notify.SubscribeFile(path)
-	if err != nil {
-		return err
-	}
-	digest, err := policyDigest(path)
-	if err != nil {
-		subscription.Close()
-		return err
-	}
 	a.stopPolicyNotifications()
-	ctx, cancel := context.WithCancel(context.Background())
-	n := &policyNotifications{subscription: subscription, cancel: cancel, done: make(chan struct{})}
-	a.notificationMu.Lock()
-	a.notifications = n
-	a.notificationMu.Unlock()
-	go func() {
-		defer close(n.done)
-		for {
-			_, err := subscription.Read(ctx)
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, notify.ErrClosed) {
-					return
-				}
-				a.setReloadError(err)
-				continue
-			}
-			next, err := policyDigest(path)
-			if err != nil {
-				a.setReloadError(err)
-				continue
-			}
-			if next == digest {
-				a.setReloadError(nil)
-				continue
-			}
-			if err = a.reloadJSONPolicy(); err != nil {
-				a.setReloadError(err)
-				continue
-			}
-			digest = next
-			a.setReloadError(nil)
-		}
-	}()
-	// The OS subscription is established before reading the current document,
-	// so replacement during registration cannot leave the cache stale.
-	if err = a.reloadJSONPolicy(); err != nil {
-		a.stopPolicyNotifications()
+	path := a.store.StatePath()
+	subscription, err := configfile.Observe(context.Background(), path, configfile.Observer{
+		Inspect: func() (configfile.Snapshot, error) { return policySnapshot(path) },
+		Apply:   a.reloadJSONPolicy,
+		Report:  a.setReloadError,
+	})
+	if err != nil {
 		return err
 	}
+	a.notificationMu.Lock()
+	a.notifications = subscription
+	a.notificationMu.Unlock()
 	return nil
 }
+
 func (a *App) stopPolicyNotifications() {
 	a.notificationMu.Lock()
-	n := a.notifications
+	subscription := a.notifications
 	a.notifications = nil
 	a.notificationMu.Unlock()
-	if n != nil {
-		n.once.Do(func() { n.cancel(); _ = n.subscription.Close() })
-		<-n.done
+	if subscription != nil {
+		_ = subscription.Close()
 	}
 }
+
 func (a *App) setReloadError(err error) {
 	a.notificationMu.Lock()
 	defer a.notificationMu.Unlock()

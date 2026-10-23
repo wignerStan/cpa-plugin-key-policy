@@ -5,7 +5,15 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	configfile "github.com/wignerStan/infra/go/config/file"
 )
+
+// NeedsRewrite reports whether loading the document normalized an imported key
+// that must be scrubbed from disk even when the effective policy is unchanged.
+func (state *State) NeedsRewrite() bool {
+	return state.needsRewrite
+}
 
 // Config returns policy from the authoritative document, never from host YAML.
 func (state *State) Config(path string) Config {
@@ -112,7 +120,7 @@ func (s *Store) mutatePolicy(change func(*Config) error) error {
 	if err != nil {
 		return err
 	}
-	if err = atomicWriteStateFile(path, raw); err != nil {
+	if err = configfile.WritePrivate(path, raw); err != nil {
 		return err
 	}
 	s.publishPolicy(cfg)
@@ -144,5 +152,5 @@ func rewriteNormalizedState(path string, state *State, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteStateFile(path, raw)
+	return configfile.WritePrivate(path, raw)
 }

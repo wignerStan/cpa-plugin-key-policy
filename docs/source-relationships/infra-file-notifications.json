@@ -1,8 +1,15 @@
 {
   "repository": "https://github.com/wignerStan/infra",
-  "commit": "7b1fea6d734616aa3db0c460a3a104b601573c77",
-  "module": "github.com/wignerStan/infra/go/files/notify",
-  "source_path": "go/files/notify",
+  "commit": "9b82d375d097900094715c226209d940b405eb8e",
+  "module": "github.com/wignerStan/infra/go/config/file",
+  "source_path": "go/config/file",
   "integration": "direct_go_module",
-  "implementation_origin_commit": "c1be68e8f818b649e4b66411db76cb8819f6f79b"
+  "implementation_origin_commit": "9b82d375d097900094715c226209d940b405eb8e",
+  "dependencies": [
+    {
+      "module": "github.com/wignerStan/infra/go/files/notify",
+      "source_path": "go/files/notify",
+      "implementation_origin_commit": "c1be68e8f818b649e4b66411db76cb8819f6f79b"
+    }
+  ]
 }

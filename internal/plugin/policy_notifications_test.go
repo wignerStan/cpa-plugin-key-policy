@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"cpa-key-policy/internal/policy"
 	"encoding/json"
 	"os"
@@ -8,6 +9,63 @@ import (
 	"testing"
 	"time"
 )
+
+func TestJSONFileNotificationScrubsEquivalentPlaintextKey(t *testing.T) {
+	const secret = "one-time-notification-secret"
+	path := filepath.Join(t.TempDir(), "policy.json")
+	hash := hashForTest(t, secret)
+	document := map[string]any{
+		"version": 3,
+		"keys": []map[string]any{{
+			"id": "plain", "enabled": true, "key_hash": hash,
+			"include_models": []string{"gpt-*"},
+		}},
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	t.Cleanup(app.Shutdown)
+	request, err := json.Marshal(LifecycleRequest{ConfigYAML: []byte("enabled: true\nstate_file: " + path + "\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = app.HandleMethod(MethodPluginReconfigure, request); err != nil {
+		t.Fatal(err)
+	}
+	// The effective policy is identical: only its on-disk representation changes.
+	key := document["keys"].([]map[string]any)[0]
+	delete(key, "key_hash")
+	key["key"] = secret
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path+".new", raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	waitForPolicy(t, func() bool {
+		current, err := os.ReadFile(path)
+		return err == nil && !bytes.Contains(current, []byte(secret)) && bytes.Contains(current, []byte(hash))
+	})
+	if app.store.FindByAPIKey(secret) == nil {
+		t.Fatal("rewriting the key changed authentication")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("rewritten policy permissions = %o, want 600", info.Mode().Perm())
+	}
+}
 
 func waitForPolicy(t *testing.T, condition func() bool) {
 	t.Helper()

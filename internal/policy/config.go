@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	configfile "github.com/wignerStan/infra/go/config/file"
 	"gopkg.in/yaml.v3"
 )
 
@@ -748,7 +749,7 @@ func saveStateDocument(path string, keys []KeyConfig, usage map[string]*UsageSta
 	if err != nil {
 		return err
 	}
-	return atomicWriteStateFile(path, raw)
+	return configfile.WritePrivate(path, raw)
 }
 
 // SaveUsageOnly updates usage without changing authoritative policy.
@@ -769,31 +770,5 @@ func SaveUsageOnly(path string, usage map[string]*UsageState) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteStateFile(path, raw)
-}
-
-func atomicWriteStateFile(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer func() { _ = os.Remove(tempName) }()
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if _, err := temp.Write(raw); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempName, path)
+	return configfile.WritePrivate(path, raw)
 }
