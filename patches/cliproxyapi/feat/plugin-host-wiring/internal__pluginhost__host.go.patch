@@ -1,0 +1,90 @@
+From 30e9dd9883ba78c3a7a4c94ac419c5b3306a1ea0 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/host.go)
+
+---
+ internal/pluginhost/host.go | 47 +++++++++++++++++++++++++++----------
+ 1 file changed, 35 insertions(+), 12 deletions(-)
+
+diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
+index 17456e7243cbf2db42af63953bb534566d592a45..f290150f895632ff7a677baf633fdeceb07708c8 100644
+--- a/internal/pluginhost/host.go
++++ b/internal/pluginhost/host.go
+@@ -73,7 +73,9 @@ type Host struct {
+ 	activePluginPaths      map[string]string
+ 	cleanupFilesPending    bool
+ 	runtimeConfig          *config.Config
++	configPath             string
+ 	authManager            *coreauth.Manager
++	authStateHandler       func(context.Context, pluginapi.HostAuthStateRequest) (pluginapi.HostAuthState, error)
+ 	modelExecutor          modelExecutor
+ 	modelClientIDs         map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.
+ 	executorModelClientIDs map[string]struct{}
+@@ -133,6 +135,27 @@ func NewForTest(loader pluginLoader) *Host {
+ 	return h
+ }
+ 
++// SetConfigPath tells RPC plugins which host configuration file they may
++// migrate when their lifecycle config contains one-time plaintext values.
++func (h *Host) SetConfigPath(path string) {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	h.configPath = strings.TrimSpace(path)
++	h.mu.Unlock()
++}
++
++func (h *Host) configPathValue() string {
++	if h == nil {
++		return ""
++	}
++	h.mu.Lock()
++	path := h.configPath
++	h.mu.Unlock()
++	return path
++}
++
+ func (h *Host) SetModelExecutor(executor modelExecutor) {
+ 	if h == nil {
+ 		return
+@@ -1090,17 +1113,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
+ 		return capabilityRecord{}, pluginFile{}, false
+ 	}
+ 	return capabilityRecord{
+-			id:       lp.id,
+-			path:     lp.path,
+-			version:  lp.version,
+-			priority: item.Priority,
+-			meta:     plugin.Metadata,
+-			plugin:   plugin,
+-		}, pluginFile{
+-			ID:      lp.id,
+-			Path:    lp.path,
+-			Version: lp.version,
+-		}, true
++		id:       lp.id,
++		path:     lp.path,
++		version:  lp.version,
++		priority: item.Priority,
++		meta:     plugin.Metadata,
++		plugin:   plugin,
++	}, pluginFile{
++		ID:      lp.id,
++		Path:    lp.path,
++		Version: lp.version,
++	}, true
+ }
+ 
+ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
+@@ -1202,7 +1225,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
+ 		caps.ModelProvider != nil ||
+ 		caps.AuthProvider != nil ||
+ 		caps.FrontendAuthProvider != nil ||
+-		caps.Scheduler != nil ||
++		caps.Scheduler != nil || caps.CodexModelGuard != nil ||
+ 		caps.ModelRouter != nil ||
+ 		caps.Executor != nil ||
+ 		caps.RequestTranslator != nil ||

@@ -1,0 +1,35 @@
+From 6189f7e786dd03e8db6b2c5f635524b2a80e8557 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (internal/pluginhost/loader_windows.go)
+
+---
+ internal/pluginhost/loader_windows.go | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/internal/pluginhost/loader_windows.go b/internal/pluginhost/loader_windows.go
+index bfffeed718355da6f0e4f2a4ccb8f079ff632ea1..629f282b426706ebe2457729aba25a3a39f677fe 100644
+--- a/internal/pluginhost/loader_windows.go
++++ b/internal/pluginhost/loader_windows.go
+@@ -173,14 +173,17 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request
+ 	)
+ 	runtime.KeepAlive(methodBytes)
+ 	runtime.KeepAlive(request)
++	if response.ptr != 0 {
++		defer syscall.SyscallN(c.api.freeBuffer, response.ptr, response.len)
++	}
++	if (response.len > 0 && response.ptr == 0) || uint64(response.len) > uint64(1<<31-1) || (method == guardExchangeMethod && response.len > 32<<20) {
++		return nil, fmt.Errorf("plugin response exceeds ABI buffer bound")
++	}
+ 	var out []byte
+ 	if response.ptr != 0 && response.len > 0 {
+ 		out = unsafe.Slice((*byte)(unsafe.Pointer(response.ptr)), response.len)
+ 		out = append([]byte(nil), out...)
+ 	}
+-	if response.ptr != 0 {
+-		_, _, _ = syscall.SyscallN(c.api.freeBuffer, response.ptr, response.len)
+-	}
+ 	if rc != 0 {
+ 		if isPluginErrorEnvelope(out) {
+ 			return out, nil

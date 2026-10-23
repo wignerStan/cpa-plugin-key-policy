@@ -1,0 +1,39 @@
+From 6dd60861f529e9f9c21ab98ed6605c8357df2717 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(codex): preserve execution session and response metadata
+ (internal/runtime/executor/codex_websockets_request.go)
+
+---
+ .../executor/codex_websockets_request.go       | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/internal/runtime/executor/codex_websockets_request.go b/internal/runtime/executor/codex_websockets_request.go
+index 23111dbe66adb54a667f7c0fee84a30b0c85da86..0e4e06bb149bc9ab68467519b00649276a6c8b6b 100644
+--- a/internal/runtime/executor/codex_websockets_request.go
++++ b/internal/runtime/executor/codex_websockets_request.go
+@@ -174,6 +174,24 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
+ 	return headers
+ }
+ 
++func codexThreadTitleSessionEnabled(cfg *config.Config) bool {
++	if cfg == nil || cfg.Codex.ThreadTitleSession == nil {
++		return true
++	}
++	return *cfg.Codex.ThreadTitleSession
++}
++
++func isCodexThreadTitleTurn(headers http.Header) bool {
++	if headers == nil {
++		return false
++	}
++	raw := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata"))
++	if raw == "" {
++		return false
++	}
++	return strings.EqualFold(strings.TrimSpace(gjson.Get(raw, "thread_source").String()), "thread_title")
++}
++
+ func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {
+ 	if target == nil {
+ 		return

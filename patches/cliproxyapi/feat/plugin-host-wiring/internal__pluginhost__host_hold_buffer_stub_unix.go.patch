@@ -1,0 +1,35 @@
+From e9f41865350347a017abdfe1975a2f479663dd60 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/host_hold_buffer_stub_unix.go)
+
+---
+ .../pluginhost/host_hold_buffer_stub_unix.go   | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+ create mode 100644 internal/pluginhost/host_hold_buffer_stub_unix.go
+
+diff --git a/internal/pluginhost/host_hold_buffer_stub_unix.go b/internal/pluginhost/host_hold_buffer_stub_unix.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..de8ba98519450441991022692b3f0fe69e9c2847
+--- /dev/null
++++ b/internal/pluginhost/host_hold_buffer_stub_unix.go
+@@ -0,0 +1,18 @@
++//go:build cgo && (linux || darwin || freebsd) && (!cpa_hold_buffer || !linux)
++
++package pluginhost
++
++import (
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
++	"unsafe"
++)
++
++const nativeHoldEnabled = false
++
++func nativeHoldCall(_ dynamicHostCallbackEntry, method string, _ unsafe.Pointer, _ uint64) ([]byte, bool, error) {
++	if method == pluginabi.MethodHostModelExecuteHold {
++		return nil, true, fmt.Errorf("native hold buffer support was not built")
++	}
++	return nil, false, nil
++}

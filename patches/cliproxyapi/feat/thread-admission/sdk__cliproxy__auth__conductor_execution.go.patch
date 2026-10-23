@@ -1,0 +1,186 @@
+From a25aab6e3e02dd3b7e4ed9c6e66d6e8524590736 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/cliproxy/auth/conductor_execution.go)
+
+---
+ sdk/cliproxy/auth/conductor_execution.go | 74 +++++++++++++++++++++++-
+ 1 file changed, 71 insertions(+), 3 deletions(-)
+
+diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
+index 17a1b458ca874028cfe30ead61170527505632c4..83bb541e8b2a3120b4221e8d2eed0b4892b058b1 100644
+--- a/sdk/cliproxy/auth/conductor_execution.go
++++ b/sdk/cliproxy/auth/conductor_execution.go
+@@ -20,6 +20,7 @@ import (
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+ 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ 	log "github.com/sirupsen/logrus"
+ )
+@@ -120,6 +121,10 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
+ // Execute performs a non-streaming execution using the configured selector and executor.
+ // It supports multiple providers for the same model and round-robins the starting provider per model.
+ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++	opts = modelGuardRequestOptions(opts)
++	if m.codexThread.Load() != nil && m.HomeEnabled() {
++		return cliproxyexecutor.Response{}, threadError(fmt.Errorf("Codex thread cooldown cannot run through Home scheduling"))
++	}
+ 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+ 	req, opts = cliproxysession.Enrich(req, opts)
+ 	normalized := m.normalizeProviders(providers)
+@@ -127,11 +132,19 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
+ 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+ 	}
+ 	if m.HomeEnabled() {
++		if singleExecutionAttempt(ctx) {
++			return cliproxyexecutor.Response{}, fmt.Errorf("single execution requires local scheduling")
++		}
+ 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
+ 		return resp, unwrapExecutionBoundaryError(errHome)
+ 	}
+ 
+ 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
++	if singleExecutionAttempt(ctx) {
++		// Preserve transport provenance for callbacks. No retry or 401 refresh
++		// may replace the original observation used by an external evaluator.
++		return m.executeMixedOnce(ctx, normalized, req, opts, 1, 0, 0)
++	}
+ 
+ 	var lastErr error
+ 	var preferredUpstreamErr error
+@@ -180,6 +193,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
+ 
+ // It supports multiple providers for the same model and round-robins the starting provider per model.
+ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++	if m.codexThread.Load() != nil && m.HomeEnabled() {
++		return cliproxyexecutor.Response{}, threadError(fmt.Errorf("Codex thread cooldown cannot run through Home scheduling"))
++	}
+ 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+ 	req, opts = cliproxysession.Enrich(req, opts)
+ 	normalized := m.normalizeProviders(providers)
+@@ -233,6 +249,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
+ // ExecuteStream performs a streaming execution using the configured selector and executor.
+ // It supports multiple providers for the same model and round-robins the starting provider per model.
+ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
++	opts = modelGuardRequestOptions(opts)
++	if m.codexThread.Load() != nil && m.HomeEnabled() {
++		return nil, threadError(fmt.Errorf("Codex thread cooldown cannot run through Home scheduling"))
++	}
+ 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
+ 	req, opts = cliproxysession.Enrich(req, opts)
+ 	if m.HomeEnabled() {
+@@ -554,7 +574,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 		}
+ 		executor = executorForAuth(executor, auth)
+ 		var authErr error
+-		didRefreshOnUnauthorized := false
++		didRefreshOnUnauthorized := singleExecutionAttempt(ctx)
+ 		for _, upstreamModel := range models {
+ 			execCtx = newUpstreamAttemptContext(execCtx)
+ 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+@@ -593,8 +613,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+ 			startExec := time.Now()
+-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
++			if errThread := m.beginCodexThreadDispatch(execCtx, auth, routeModel, &execOpts); errThread != nil {
++				return cliproxyexecutor.Response{}, errThread
++			}
++			resp, errExec := m.executeWithModelGuard(execCtx, executor, auth, execReq, execOpts, routeModel)
++			if isModelGuardReselect(errExec) {
++				authErr = errExec
++				break
++			}
++			if isRequestStopError(errExec) {
++				return cliproxyexecutor.Response{}, errExec
++			}
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
++			// A caller's read budget is not an upstream availability failure.
++			// Stop before refresh, retry, failure counters, or cooldown updates.
++			if errors.Is(errExec, httptransport.ErrResponseBodyTooLarge) {
++				return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
++			}
+ 			durationExec := time.Since(startExec)
+ 			if errExec != nil {
+ 				if hasUpstreamExecutionAttempt(errExec) {
+@@ -611,8 +646,21 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
++					if errThread := m.beginCodexThreadDispatch(execCtx, auth, routeModel, &execOpts); errThread != nil {
++						return cliproxyexecutor.Response{}, errThread
++					}
++					resp, errExec = m.executeWithModelGuard(execCtx, executor, auth, execReq, execOpts, routeModel)
++					if isModelGuardReselect(errExec) {
++						authErr = errExec
++						break
++					}
++					if isRequestStopError(errExec) {
++						return cliproxyexecutor.Response{}, errExec
++					}
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
++					if errors.Is(errExec, httptransport.ErrResponseBodyTooLarge) {
++						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
++					}
+ 					durationRetry := time.Since(startRetry)
+ 					if errExec != nil {
+ 						if hasUpstreamExecutionAttempt(errExec) {
+@@ -646,6 +694,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 				} else {
+ 					m.MarkResult(execCtx, result)
+ 				}
++				if singleExecutionAttempt(ctx) {
++					return cliproxyexecutor.Response{}, errExec
++				}
+ 				if okAction {
+ 					if isRequestScopedStop(action, okAction) {
+ 						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
+@@ -670,6 +721,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 			rewriteForceMappedResponse(&resp, attemptAliasResult)
+ 			return resp, nil
+ 		}
++		if isModelGuardReselect(authErr) {
++			lastErr = authErr
++			continue
++		}
+ 		if authErr != nil {
+ 			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
+ 			if okAction {
+@@ -807,6 +862,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 			executionSeq := m.nextExecutionSeq()
+ 			startExec := time.Now()
++			if errThread := m.beginCodexThreadDispatch(execCtx, auth, routeModel, &execOpts); errThread != nil {
++				return cliproxyexecutor.Response{}, errThread
++			}
+ 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 			durationExec := time.Since(startExec)
+@@ -825,6 +883,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
++					if errThread := m.beginCodexThreadDispatch(execCtx, auth, routeModel, &execOpts); errThread != nil {
++						return cliproxyexecutor.Response{}, errThread
++					}
+ 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+ 					durationRetry := time.Since(startRetry)
+@@ -1180,6 +1241,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
+ 			pooled = false
+ 		}
+ 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
++		if isModelGuardReselect(errStream) {
++			lastErr = errStream
++			continue
++		}
++		if isRequestStopError(errStream) {
++			return nil, errStream
++		}
+ 		if errStream != nil {
+ 			if hasUpstreamExecutionAttempt(errStream) {
+ 				upstreamErr = errStream

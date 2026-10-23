@@ -1,0 +1,23 @@
+From af8c9f7577f624fd8f7efe8a6b32294d04400f2f Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/types.go)
+
+---
+ sdk/cliproxy/auth/types.go | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/sdk/cliproxy/auth/types.go b/sdk/cliproxy/auth/types.go
+index cb815e48483f60f48a717030231d5cefc2c6036e..024d38985cd2d933baf023b6f7f1175fe0cd140a 100644
+--- a/sdk/cliproxy/auth/types.go
++++ b/sdk/cliproxy/auth/types.go
+@@ -58,6 +58,8 @@ type Auth struct {
+ 	CredentialVersion uint64 `json:"credential_version,omitempty"`
+ 	// Generation tracks monotonic mutations to resolve scheduler/reconcile snapshot races.
+ 	Generation uint64 `json:"generation,omitempty"`
++	// AdmissionVersion changes only when native disabled state changes.
++	AdmissionVersion uint64 `json:"-"`
+ 	// Index is a stable runtime identifier derived from auth metadata (not persisted).
+ 	Index string `json:"-"`
+ 	// Provider is the upstream provider key (e.g. "gemini", "claude").

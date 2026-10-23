@@ -1,0 +1,48 @@
+From a67063c871147a8666c648c659e232f440c1cb23 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/handlers_stream.go)
+
+---
+ sdk/api/handlers/handlers_stream.go | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
+index 6f0bfbc931b28b49064cb3879702d0ccf7f96bee..ac2f23d6de87b64a9acd25c8cc68e476ad7fb44a 100644
+--- a/sdk/api/handlers/handlers_stream.go
++++ b/sdk/api/handlers/handlers_stream.go
+@@ -289,6 +289,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+ 	if !preparedRoute {
+ 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+ 	}
++	if errMsg := h.validateGuardRoute(modelName, routeDecision, execOptions); errMsg != nil {
++		return nil, nil, guardFallbackErrChan(errMsg)
++	}
+ 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
+ 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+ 		errChan := make(chan *interfaces.ErrorMessage, 1)
+@@ -352,6 +355,23 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+ 	}
+ 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
+ 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
++	if err != nil {
++		guardDecision, guardErr := h.guardRoute(ctx, req, opts, err)
++		if guardErr != nil {
++			lifecycle.completeError(ctx, guardErr)
++			return nil, nil, guardFallbackErrChan(guardErr)
++		}
++		if guardDecision.Action == "direct" {
++			heldChunks := make(chan coreexecutor.StreamChunk, len(guardDecision.Chunks))
++			for _, raw := range guardDecision.Chunks {
++				heldChunks <- coreexecutor.StreamChunk{Payload: raw}
++			}
++			close(heldChunks)
++			streamResult = &coreexecutor.StreamResult{Headers: guardDecision.Response.Headers, Chunks: heldChunks}
++			err = nil
++		}
++	}
++
+ 	if err != nil {
+ 		err = enrichAuthSelectionError(err, providers, normalizedModel)
+ 		errMsg := executionErrorMessage(err)

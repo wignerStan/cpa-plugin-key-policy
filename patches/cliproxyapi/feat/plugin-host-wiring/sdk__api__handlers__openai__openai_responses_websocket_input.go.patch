@@ -1,0 +1,52 @@
+From 10105095ac590d19e6a15146fe712b7ead1a11d0 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_websocket_input.go)
+
+---
+ .../openai/openai_responses_websocket_input.go         | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_input.go b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+index cc232b3f80badbba5587e1f6f45b850dce4474e6..c8c14daf34037f4e9dcaf0415cf513386539c9b6 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_input.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+@@ -14,6 +14,7 @@ import (
+ 
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"github.com/tidwall/gjson"
+@@ -79,7 +80,7 @@ func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
+ // readResponsesWebsocketInput is the only downstream reader. Interrupts are
+ // handled immediately so they are not queued behind an active response.
+ // The bounded queue backpressures clients instead of retaining unlimited input.
+-func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
++func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender, sessionID string) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
+ 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
+ 	done := make(chan struct{})
+ 	go func() {
+@@ -94,6 +95,11 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
+ 			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
+ 				continue
+ 			}
++			if kind == websocket.BinaryMessage {
++				requestlogging.CodexDumpBinaryFrame(sessionID, "client_in", payload)
++			} else {
++				requestlogging.CodexDumpFrame(sessionID, "client_in", payload)
++			}
+ 			// Control frames bypass response.create normalization. The original
+ 			// response_id, mode, and extension fields must reach upstream unchanged.
+ 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
+@@ -110,7 +116,7 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
+ 					appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
+ 					// The sanitized outcome replaces raw error logging here: errors
+ 					// from transport dependencies may contain credentials or URLs.
+-					_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
++					_, errWrite := writeResponsesWebsocketError(writer, nil, sessionID, &interfaces.ErrorMessage{
+ 						StatusCode: http.StatusBadRequest,
+ 						Error:      errInterrupt,
+ 					})

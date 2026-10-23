@@ -1,0 +1,32 @@
+From 5eeba23a35111d45fd079c8c070324d6bcd8e4e7 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_routes.go)
+
+---
+ internal/api/server_routes.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
+index 8113a815d638811a0d32d90a2a7cdaf0d3e56e97..c8a0ce9263c2d1c8660e2d2757e0ed00650e4fd2 100644
+--- a/internal/api/server_routes.go
++++ b/internal/api/server_routes.go
+@@ -64,7 +64,7 @@ func (s *Server) setupRoutes() {
+ 	v1 := s.engine.Group("/v1")
+ 	v1.Use(AuthMiddleware(s.accessManager))
+ 	{
+-		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
++		v1.GET("/models", s.originModelsEndpointMiddleware(), s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+ 		v1.GET("/models/*model", func(c *gin.Context) {
+ 			c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
+ 			s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
+@@ -129,7 +129,7 @@ func (s *Server) setupRoutes() {
+ 	v1beta := s.engine.Group("/v1beta")
+ 	v1beta.Use(AuthMiddleware(s.accessManager))
+ 	{
+-		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
++		v1beta.GET("/models", s.originModelsEndpointMiddleware(), s.geminiModelsHandler(geminiHandlers))
+ 		v1beta.POST("/interactions", geminiHandlers.Interactions)
+ 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
+ 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))

@@ -1,0 +1,77 @@
+From af8f56c2f3a94a13f1c532442d4490374930e8b1 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (internal/codexthread/policy_test.go)
+
+---
+ internal/codexthread/policy_test.go | 60 +++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+ create mode 100644 internal/codexthread/policy_test.go
+
+diff --git a/internal/codexthread/policy_test.go b/internal/codexthread/policy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e635e884d958eceea7f8c0508d72ea192ee3ec8e
+--- /dev/null
++++ b/internal/codexthread/policy_test.go
+@@ -0,0 +1,60 @@
++package codexthread
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"github.com/wignerStan/infra/go/cache/disk"
++	"testing"
++	"time"
++)
++
++func TestSharedWriterReaderAndAbsoluteThreadScope(t *testing.T) {
++	now := time.Now()
++	clock := func() time.Time { return now }
++	dir := t.TempDir()
++	writer, e := disk.Open(disk.Options{Directory: dir, SingleWriter: true, DiskEntries: 100, MaxValueBytes: 16384, Now: clock})
++	if e != nil {
++		t.Fatal(e)
++	}
++	defer writer.Close()
++	reader, e := openClock(dir, clock)
++	if e != nil {
++		t.Fatal("reader competed for write ownership", e)
++	}
++	defer reader.Close()
++	scope := Scope{Caller: "caller", Thread: "thread", Model: "model", Prefix: "lab"}
++	target := Target{AuthID: "auth", Model: "physical"}
++	ctx := context.Background()
++	if e = reader.Check(ctx, scope, target, false); e != nil {
++		t.Fatal(e)
++	}
++	until := now.Add(time.Hour)
++	raw, _ := json.Marshal(DisabledLease{"baseline", until})
++	if e = writer.Update(ctx, func(tx *disk.Transaction) error { return tx.Put(disabledKey(scope, target), raw, until) }); e != nil {
++		t.Fatal(e)
++	}
++	scope.Model = "other"
++	scope.Prefix = "another"
++	target.Model = "other-physical"
++	if e = reader.Check(ctx, scope, target, true); !errors.Is(e, ErrExcluded) {
++		t.Fatal("fresh read bypassed new all-model exclusion", e)
++	}
++	scope.Thread = "another-thread"
++	if e = reader.Check(ctx, scope, target, true); e != nil {
++		t.Fatal("other thread excluded", e)
++	}
++	scope.Thread = "thread"
++	scope.Caller = "another-caller"
++	if e = reader.Check(ctx, scope, target, true); e != nil {
++		t.Fatal("other caller excluded", e)
++	}
++	scope.Caller = "caller"
++	now = until
++	if e = reader.Check(ctx, scope, target, true); e != nil {
++		t.Fatal("expiry renewed", e)
++	}
++	if reader.records.Stats().Pending != 0 {
++		t.Fatal("read consumer produced writes")
++	}
++}

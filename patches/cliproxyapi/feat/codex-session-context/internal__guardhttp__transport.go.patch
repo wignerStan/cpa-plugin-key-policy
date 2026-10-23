@@ -1,0 +1,261 @@
+From c0ab8dabdf363a97f33f0b5f5555680d2417a9a4 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 05:00:00 -0700
+Subject: [PATCH] feat(guard): isolate verification HTTP sockets (internal/guardhttp/transport.go)
+
+---
+diff --git a/internal/guardhttp/transport.go b/internal/guardhttp/transport.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..60dba71932353074165a312754c8adfbfa6276ab
+--- /dev/null
++++ b/internal/guardhttp/transport.go
+@@ -0,0 +1,249 @@
++// Package guardhttp isolates sockets for bound Codex verification requests.
++package guardhttp
++
++import (
++	"context"
++	"crypto/tls"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptrace"
++	"strings"
++	"sync"
++
++	log "github.com/sirupsen/logrus"
++	infralog "github.com/wignerStan/infra/go/logging"
++	"github.com/wignerStan/infra/go/observability/diagnosticoutput"
++)
++
++type policyKey struct{}
++type scopeKey struct{}
++
++const Isolated = "isolated"
++const HTTP1 = "isolated_http1"
++const Session = "session"
++
++var ErrIsolation = errors.New("guard cannot isolate custom HTTP transport")
++
++func WithPolicy(ctx context.Context, policy string) (context.Context, error) {
++	if policy != "" && policy != Isolated && policy != HTTP1 && policy != Session {
++		return ctx, errors.New("unsupported guard HTTP transport")
++	}
++	return context.WithValue(ctx, policyKey{}, policy), nil
++}
++
++// Scope owns a parent connection pool for one bound guard execution. It cannot
++// close sockets belonging to another thread or the host's shared transport.
++type Scope struct {
++	mu           sync.Mutex
++	session, key string
++	parent       *transport
++	closed       bool
++}
++type binding struct {
++	scope   *Scope
++	session string
++}
++
++func WithScope(ctx context.Context, scope *Scope, session string) context.Context {
++	return context.WithValue(ctx, scopeKey{}, binding{scope, session})
++}
++
++func (s *Scope) Close() {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.closed = true
++	if s.parent != nil {
++		s.parent.close()
++	}
++}
++
++func Select(ctx context.Context, base http.RoundTripper, key string) http.RoundTripper {
++	policy := Policy(ctx)
++	if policy != Session {
++		return Standard(base, policy)
++	}
++	b, _ := ctx.Value(scopeKey{}).(binding)
++	if b.scope == nil || b.session == "" {
++		return failedTransport{}
++	}
++	s := b.scope
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed {
++		return failedTransport{}
++	}
++	if s.parent != nil && (s.session != b.session || s.key != key) {
++		s.parent.close()
++		s.parent = nil
++	}
++	if s.parent == nil {
++		parent, ok := Standard(base, Session).(*transport)
++		if !ok {
++			return failedTransport{}
++		}
++		s.parent, s.session, s.key = parent, b.session, key
++	}
++	return s.parent
++}
++
++func Policy(ctx context.Context) string {
++	if ctx == nil {
++		return ""
++	}
++	p, _ := ctx.Value(policyKey{}).(string)
++	return p
++}
++
++type failedTransport struct{}
++
++func (failedTransport) RoundTrip(*http.Request) (*http.Response, error) {
++	return nil, ErrIsolation
++}
++
++// Standard clones the selected transport before changing protocol/pooling.
++// Its proxy, roots, dialer and timeouts survive. No shared pool is closed.
++func Standard(base http.RoundTripper, policy string) http.RoundTripper {
++	if policy == "" {
++		return base
++	}
++	t, ok := base.(*http.Transport)
++	if !ok {
++		return failedTransport{}
++	}
++	clone := t.Clone()
++	clone.DisableKeepAlives = policy != Session
++	// A custom TLS dialer can return a shared connection or negotiate h2 itself.
++	// Such a transport cannot promise socket or protocol isolation here.
++	if clone.DialTLS != nil || clone.DialTLSContext != nil {
++		return failedTransport{}
++	}
++	if policy == HTTP1 {
++		clone.ForceAttemptHTTP2 = false
++		clone.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
++		protocols := new(http.Protocols)
++		protocols.SetHTTP1(true)
++		clone.Protocols = protocols
++		if clone.TLSClientConfig == nil {
++			clone.TLSClientConfig = &tls.Config{}
++		}
++		clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
++	}
++	return &transport{base: clone, policy: policy, connections: map[net.Conn]map[string]any{}}
++}
++
++type transport struct {
++	base        *http.Transport
++	policy      string
++	mu          sync.Mutex
++	closed      bool
++	connections map[net.Conn]map[string]any
++}
++
++func copyFields(fields map[string]any) map[string]any {
++	clone := make(map[string]any, len(fields))
++	for k, v := range fields {
++		clone[k] = v
++	}
++	return clone
++}
++
++func (t *transport) close() {
++	t.mu.Lock()
++	if t.closed {
++		t.mu.Unlock()
++		return
++	}
++	t.closed = true
++	connections := make(map[net.Conn]map[string]any, len(t.connections))
++	for conn, fields := range t.connections {
++		connections[conn] = copyFields(fields)
++	}
++	t.mu.Unlock()
++	t.base.CloseIdleConnections()
++	for conn, fields := range connections {
++		_ = conn.Close()
++		trace("guard_http_closed", fields)
++	}
++}
++
++type traceWriter struct{}
++
++func (traceWriter) Write(p []byte) (int, error) {
++	log.Trace(strings.TrimSuffix(string(p), "\n"))
++	return len(p), nil
++}
++
++var traceSink, _ = infralog.NewDiagnosticJSONSink(traceWriter{}, diagnosticoutput.DefaultPolicy())
++
++func trace(event string, fields map[string]any) {
++	if !log.IsLevelEnabled(log.TraceLevel) {
++		return
++	}
++	raw, err := json.Marshal(fields)
++	if err == nil {
++		_ = traceSink.WriteDiagnostic(context.Background(), event, raw)
++	}
++}
++
++func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
++	fields := map[string]any{"policy": t.policy, "session_id": req.Header.Get("Session-Id"), "thread_id": req.Header.Get("Thread-Id")}
++	t.mu.Lock()
++	closed := t.closed
++	t.mu.Unlock()
++	if closed {
++		return nil, ErrIsolation
++	}
++	var connection net.Conn
++	ctx := httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
++		t.mu.Lock()
++		defer t.mu.Unlock()
++		if t.closed {
++			_ = info.Conn.Close()
++			return
++		}
++		connection = info.Conn
++		fields["reused"] = info.Reused
++		fields["local_addr"] = info.Conn.LocalAddr().String()
++		fields["remote_addr"] = info.Conn.RemoteAddr().String()
++		t.connections[info.Conn] = fields
++	}})
++	response, err := t.base.RoundTrip(req.Clone(ctx))
++	if err != nil {
++		if t.policy != Session {
++			t.close()
++		}
++		return response, err
++	}
++	t.mu.Lock()
++	fields["protocol"] = response.Proto
++	if connection != nil {
++		t.connections[connection] = fields
++	}
++	trace("guard_http_connection", fields)
++	t.mu.Unlock()
++	response.Body = &body{ReadCloser: response.Body, closeIdle: func() {
++		if t.policy != Session {
++			t.close()
++			return
++		}
++		t.mu.Lock()
++		defer t.mu.Unlock()
++		trace("guard_http_response_closed", fields)
++	}}
++	return response, nil
++}
++
++type body struct {
++	io.ReadCloser
++	closeIdle func()
++	once      sync.Once
++}
++
++func (b *body) Close() error {
++	err := b.ReadCloser.Close()
++	b.once.Do(b.closeIdle)
++	return err
++}

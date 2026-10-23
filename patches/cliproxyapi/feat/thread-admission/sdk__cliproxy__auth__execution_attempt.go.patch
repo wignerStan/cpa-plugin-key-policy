@@ -1,0 +1,36 @@
+From 21e4563fe09f9a1dc9b49f700dd04fe29431a72b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/execution_attempt.go)
+
+---
+ sdk/cliproxy/auth/execution_attempt.go | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/execution_attempt.go
+
+diff --git a/sdk/cliproxy/auth/execution_attempt.go b/sdk/cliproxy/auth/execution_attempt.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..876c2895dc580243bf2096ef9c2c7faea6a24cbe
+--- /dev/null
++++ b/sdk/cliproxy/auth/execution_attempt.go
+@@ -0,0 +1,19 @@
++package auth
++
++import "context"
++
++type singleAttemptKey struct{}
++
++// WithSingleExecutionAttempt disables retries for a pinned, non-stream request.
++// Its returned errors retain upstream transport provenance.
++func WithSingleExecutionAttempt(ctx context.Context) context.Context {
++	return context.WithValue(ctx, singleAttemptKey{}, true)
++}
++
++func singleExecutionAttempt(ctx context.Context) bool {
++	v, _ := ctx.Value(singleAttemptKey{}).(bool)
++	return v
++}
++
++// HasUpstreamAttempt reports transport provenance, not a local routing error.
++func HasUpstreamAttempt(err error) bool { return hasUpstreamExecutionAttempt(err) }

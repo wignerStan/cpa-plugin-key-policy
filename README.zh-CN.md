@@ -153,16 +153,22 @@ CPA 里配置的兼容通道，映射时 `provider` 填通道 **name**。插件�
 
 Linux `.so` 需要 cgo：
 
+插件直接导入 `infra/go/files/notify` 公共模块。请将 infra 仓库放在
+`~/infra`，或设置 `INFRA_GO_DIR=/path/to/infra/go`。`make` 会生成被 Git
+忽略的 `go.work`，通过 `replace` 直接绑定该 checkout。所需提交和更新方法见
+[依赖来源记录](docs/source-relationships/infra-file-notifications.md)。
+
 ```bash
 make test
 make build-linux          # 先编前端，再编 linux amd64/arm64 .so
 # 或
-make web-build
-GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared \
+make prepare-workspace web-build
+GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared \
   -buildmode=c-shared -o dist/cpa-key-policy_linux_amd64.so ./cmd/cpa-key-policy
 ```
 
-Windows 上请用 WSL/Linux 编 `.so`。`go test ./...` 可用非 cgo stub，不依赖动态库工具链。
+Windows 上请用 WSL/Linux 编 `.so`。`go test ./cmd/... ./internal/...`
+可用非 cgo stub，不依赖动态库工具链。
 
 把 `.so` 放进 CPA 的 `plugins.dir`，并在配置里启用插件。
 
@@ -307,6 +313,11 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 ## 测试
 
 ```bash
-go test ./...
+make test
+GOFLAGS=-mod=readonly go test -race ./cmd/... ./internal/...
+GOFLAGS=-mod=readonly go vet ./cmd/... ./internal/...
 cd web && npm test && npm run build
 ```
+
+`make test` 还会在临时仓库中验证 CPA 构建替换保护。
+Go 测试只选择插件包，不扫描 `build/` 下的依赖。

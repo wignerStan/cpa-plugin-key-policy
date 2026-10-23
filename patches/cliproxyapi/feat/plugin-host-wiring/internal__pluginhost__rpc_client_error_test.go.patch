@@ -1,0 +1,25 @@
+From 502306cc8aa812c388b15d053df0e403468424f1 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/rpc_client_error_test.go)
+
+---
+ internal/pluginhost/rpc_client_error_test.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/internal/pluginhost/rpc_client_error_test.go b/internal/pluginhost/rpc_client_error_test.go
+index 5f383d227fb619a92660dc954077c08f696e4b3e..5def44ddaeacde11ee78f3a3708acbfdb13ac046 100644
+--- a/internal/pluginhost/rpc_client_error_test.go
++++ b/internal/pluginhost/rpc_client_error_test.go
+@@ -42,6 +42,10 @@ func TestDecodeEnvelopeResultPreservesPluginHTTPStatus(t *testing.T) {
+ 	if got := statusProvider.StatusCode(); got != http.StatusForbidden {
+ 		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+ 	}
++	codeProvider, ok := errDecode.(interface{ ErrorCode() string })
++	if !ok || codeProvider.ErrorCode() != "plugin_error" {
++		t.Fatalf("plugin error code was lost: %T %v", errDecode, errDecode)
++	}
+ }
+ 
+ func TestCallPluginReturnsPluginErrorWithoutMethodWrapper(t *testing.T) {

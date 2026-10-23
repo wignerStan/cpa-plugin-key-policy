@@ -1,0 +1,25 @@
+From e75c8ef4bc03ead11cecb80e1f807f9bb8c4cc34 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/cliproxy/executor/types.go)
+
+---
+ sdk/cliproxy/executor/types.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/sdk/cliproxy/executor/types.go b/sdk/cliproxy/executor/types.go
+index 0ce22e8783a4cec65dfea4fbcd06768fffd292b1..666e831857a708d7161920daa34eeaf27541bd65 100644
+--- a/sdk/cliproxy/executor/types.go
++++ b/sdk/cliproxy/executor/types.go
+@@ -11,6 +11,10 @@ import (
+ // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
+ const RequestedModelMetadataKey = "requested_model"
+ 
++// CodexThreadAttemptMetadataKey carries a private dispatch receipt for the trusted
++// fingerprint gate. It must never be accepted from a public request header.
++const CodexThreadAttemptMetadataKey = "codex_thread_attempt"
++
+ // RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
+ // It is optional and may be absent for non-HTTP executions.
+ const RequestPathMetadataKey = "request_path"

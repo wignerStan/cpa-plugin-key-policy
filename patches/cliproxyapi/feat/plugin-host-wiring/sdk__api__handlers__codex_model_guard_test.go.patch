@@ -1,0 +1,150 @@
+diff --git a/sdk/api/handlers/codex_model_guard_test.go b/sdk/api/handlers/codex_model_guard_test.go
+new file mode 100644
+index 0000000..756e47a
+--- /dev/null
++++ b/sdk/api/handlers/codex_model_guard_test.go
+@@ -0,0 +1,144 @@
++package handlers
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
++	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"github.com/wignerStan/infra/go/cache/disk"
++)
++
++type handlerGuardFunc func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error)
++
++func (f handlerGuardFunc) ExchangeModelGuard(ctx context.Context, id string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	return f(ctx, id, in)
++}
++
++// Exercise the actual handler fallback path. It must preserve ordinary response
++// interceptors, header filtering and lifecycle accounting for both transports.
++func TestGuardFallbackUsesNormalResponsePipeline(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(map[bool]string{false: "response", true: "stream"}[stream], func(t *testing.T) {
++			model := "guard-pipeline-" + t.Name()
++			model = strings.ReplaceAll(model, "/", "-")
++			executor := &interceptorCaptureExecutor{provider: "codex", execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
++				t.Fatal("thread-excluded target executed")
++				return coreexecutor.Response{}, nil
++			}}
++			h := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
++			target, ok := h.AuthManager.GetByID("handler-interceptor-" + model)
++			if !ok {
++				t.Fatal("missing handler target")
++			}
++			if target.Attributes == nil {
++				target.Attributes = map[string]string{}
++			}
++			target.Attributes["auth_kind"] = "apikey"
++			if _, err := h.AuthManager.Update(context.Background(), target); err != nil {
++				t.Fatal(err)
++			}
++			dir := t.TempDir()
++			if err := h.AuthManager.ConfigureCodexThreadCooldown(dir); err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { _ = h.AuthManager.CloseCodexThreadCooldown() })
++			writer, err := disk.Open(disk.Options{Directory: dir, SingleWriter: true, DiskEntries: 100, MaxValueBytes: 16384})
++			if err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { _ = writer.Close() })
++			keyJSON, _ := json.Marshal([]string{coresession.CallerScope("caller-key"), "thread", "handler-interceptor-" + model})
++			sum := sha256.Sum256(keyJSON)
++			until := time.Now().Add(time.Hour)
++			record, _ := json.Marshal(map[string]any{"baseline_id": "baseline", "until": until})
++			if err := writer.Update(context.Background(), func(tx *disk.Transaction) error {
++				return tx.Put("disabled-thread-target:"+hex.EncodeToString(sum[:]), record, until)
++			}); err != nil {
++				t.Fatal(err)
++			}
++			var calls, completed atomic.Int32
++			completionEvents := make(chan struct{}, 2)
++			ids := map[string]bool{}
++			guard := handlerGuardFunc(func(_ context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				if in.Operation != "fallback" || !in.Exhausted || in.RequestID == "" || ids[in.RequestID] {
++					t.Fatal("fallback/request identity mismatch", in.Operation, in.RequestID)
++				}
++				ids[in.RequestID] = true
++				return pluginapi.ModelGuardDecision{Action: "direct", Response: pluginapi.ModelGuardObservation{Body: []byte(`{"marker":"payg"}`), Headers: http.Header{"X-Upstream-Private": {"hidden"}}}, Chunks: [][]byte{[]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_payg\",\"status\":\"completed\",\"output\":[],\"marker\":\"payg\"}}\n\n")}}, nil
++			})
++			if err := h.AuthManager.ConfigureCodexModelGuard(guard, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			h.SetPluginHost(&handlerInterceptorTestHost{
++				interceptResponse: func(_ context.Context, in pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
++					calls.Add(1)
++					return pluginapi.ResponseInterceptResponse{Body: []byte(strings.ReplaceAll(string(in.Body), "payg", "checked")), Headers: in.ResponseHeaders}
++				},
++				interceptStreamChunk: func(_ context.Context, in pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
++					if len(in.Body) > 0 {
++						calls.Add(1)
++					}
++					return pluginapi.StreamChunkInterceptResponse{Body: []byte(strings.ReplaceAll(string(in.Body), "payg", "checked")), Headers: in.ResponseHeaders}
++				},
++				completeRequest: func(_ context.Context, in pluginapi.RequestCompletion) {
++					if in.Outcome != pluginapi.RequestCompletionSucceeded {
++						t.Errorf("fallback completion: %s", in.Outcome)
++					}
++					completed.Add(1)
++					completionEvents <- struct{}{}
++				},
++			})
++			for n := 0; n < 2; n++ {
++				ctx := contextWithHeaders(http.Header{"Thread-Id": {"thread"}, "X-Codex-Turn-Metadata": {`{"thread_id":"thread","turn_id":"turn"}`}})
++				ctx.Value("gin").(*gin.Context).Set("userApiKey", "caller-key")
++				var body []byte
++				var headers http.Header
++				if stream {
++					data, hs, errs := h.ExecuteStreamWithAuthManager(ctx, "openai-response", model, []byte(`{"input":"hello"}`), "")
++					headers = hs
++					for chunk := range data {
++						body = append(body, chunk...)
++					}
++					for err := range errs {
++						if err != nil {
++							t.Fatal(err)
++						}
++					}
++				} else {
++					var failure error
++					b, hs, err := h.ExecuteWithAuthManager(ctx, "openai-response", model, []byte(`{"input":"hello"}`), "")
++					if err != nil {
++						failure = err.Error
++					}
++					if failure != nil {
++						t.Fatal(failure)
++					}
++					body, headers = b, hs
++				}
++				select {
++				case <-completionEvents:
++				case <-time.After(time.Second):
++					t.Fatal("missing completion event")
++				}
++				if !strings.Contains(string(body), "checked") || strings.Contains(string(body), "payg") || headers.Get("X-Upstream-Private") != "" {
++					t.Fatal("fallback bypassed response pipeline", string(body), headers)
++				}
++			}
++			if calls.Load() != 2 || completed.Load() != 2 || len(ids) != 2 {
++				t.Fatal("wrong interceptor/lifecycle count", calls.Load(), completed.Load(), len(ids))
++			}
++		})
++	}
++}

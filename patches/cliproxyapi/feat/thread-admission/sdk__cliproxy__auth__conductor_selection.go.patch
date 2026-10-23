@@ -1,0 +1,219 @@
+From e7de81ac1d054b59c83a96a3a8741e0bf86874d6 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/conductor_selection.go)
+
+---
+ sdk/cliproxy/auth/conductor_selection.go | 128 ++++++++++++++++++++++-
+ 1 file changed, 125 insertions(+), 3 deletions(-)
+
+diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
+index e2eac43a75c6c3c2797f4c21a36a507c54d1d8b8..b5bd74667d2eba2352493b3613c7dd5c242c1b28 100644
+--- a/sdk/cliproxy/auth/conductor_selection.go
++++ b/sdk/cliproxy/auth/conductor_selection.go
+@@ -80,6 +80,8 @@ type authSelectionEligibility struct {
+ 	requiredKind     string
+ 	credentialPolicy string
+ 	disallowFreeAuth bool
++	fallbackOwner    string
++	fallbackAuthID   string
+ }
+ 
+ func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
+@@ -103,6 +105,10 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
+ 	if ctx != nil {
+ 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
+ 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
++		if isPluginFallback(opts) {
++			eligibility.fallbackOwner = pluginapi.CallingPlugin(ctx)
++			eligibility.fallbackAuthID = pinnedAuthIDFromMetadata(opts.Metadata)
++		}
+ 	}
+ 	return eligibility
+ }
+@@ -111,6 +117,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
+ 	if auth == nil {
+ 		return false
+ 	}
++	if auth.Attributes["plugin_fallback_only"] == "true" && (e.fallbackOwner == "" || e.fallbackOwner != auth.Attributes["plugin_owner"] || e.fallbackAuthID != auth.ID) {
++		return false
++	}
+ 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
+ 		return false
+ 	}
+@@ -976,6 +985,10 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
+ }
+ 
+ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
++	if isPluginFallback(opts) {
++		selected, err := m.authorizedPluginFallbackCandidate(ctx, model, opts, candidates)
++		return selected, true, err
++	}
+ 	if scheduler == nil || len(candidates) == 0 {
+ 		return nil, false, nil
+ 	}
+@@ -1018,7 +1031,98 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
+ 	if !okStrategy {
+ 		return nil, false, nil
+ 	}
+-	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
++	restricted := make(map[string]struct{}, len(tried))
++	for id := range tried {
++		restricted[id] = struct{}{}
++	}
++	allowed := make(map[string]bool, len(candidates))
++	for _, a := range candidates {
++		allowed[a.ID] = true
++	}
++	m.mu.RLock()
++	for id := range m.auths {
++		if !allowed[id] {
++			restricted[id] = struct{}{}
++		}
++	}
++	m.mu.RUnlock()
++	selected, handled, err := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, restricted)
++	if selected != nil && !allowed[selected.ID] {
++		return nil, true, &Error{Code: "auth_unavailable", Message: "builtin scheduler escaped supplied candidates"}
++	}
++	return selected, handled, err
++}
++
++type pluginFallbackDispatchKey struct{}
++
++type pluginFallbackDispatch struct {
++	owner, authID string
++}
++
++// Only the request-bound fallback callback creates this capability, after it
++// verifies the normal pool's thread exclusions. JSON metadata cannot mint it.
++func withPluginFallbackDispatch(ctx context.Context, owner, authID string) context.Context {
++	return context.WithValue(ctx, pluginFallbackDispatchKey{}, pluginFallbackDispatch{owner, authID})
++}
++
++func (m *Manager) authorizedPluginFallbackCandidate(ctx context.Context, model string, opts cliproxyexecutor.Options, candidates []*Auth) (*Auth, error) {
++	deny := func() (*Auth, error) {
++		return nil, &Error{Code: "auth_unavailable", Message: "invalid plugin fallback dispatch capability"}
++	}
++	if ctx == nil || m.modelGuard == nil {
++		return deny()
++	}
++	capability, ok := ctx.Value(pluginFallbackDispatchKey{}).(pluginFallbackDispatch)
++	pinned := pinnedAuthIDFromMetadata(opts.Metadata)
++	if !ok || capability.owner != m.modelGuard.id || capability.owner != pluginapi.CallingPlugin(ctx) || pinned == "" || capability.authID != pinned || len(candidates) != 1 {
++		return deny()
++	}
++	a := candidates[0]
++	if a == nil || a.ID != pinned || a.Disabled || a.Status == StatusDisabled || a.Attributes["plugin_owner"] != capability.owner || a.Attributes["plugin_fallback_only"] != "true" || a.Attributes["upstream_protocol"] != "openai-response" || a.Prefix == "" || !strings.HasPrefix(model, a.Prefix+"/") || m.guarded(model) {
++		return deny()
++	}
++	return a, nil
++}
++
++// admittedAuthsForRequest queries stable scheduler policy without choosing an
++// auth or considering native cooldown. The caller supplies all priority tiers.
++func (m *Manager) admittedAuthsForRequest(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, candidates []*Auth) ([]*Auth, bool, error) {
++	m.mu.RLock()
++	scheduler := m.pluginScheduler
++	m.mu.RUnlock()
++	if scheduler == nil {
++		return candidates, true, nil
++	}
++	if state, ok := scheduler.(pluginSchedulerState); ok && !state.HasScheduler() {
++		return candidates, true, nil
++	}
++	admission, ok := scheduler.(interface {
++		AdmitAuth(context.Context, pluginapi.SchedulerPickRequest) ([]string, bool, error)
++	})
++	if !ok {
++		return nil, false, nil
++	}
++	ids, known, err := admission.AdmitAuth(ctx, pluginapi.SchedulerPickRequest{
++		Provider: provider, Providers: []string{provider}, Model: model, Stream: opts.Stream,
++		Options: schedulerOptions(opts), Candidates: schedulerAuthCandidates(candidates),
++	})
++	if err != nil || !known {
++		return nil, known, err
++	}
++	allowed := make(map[string]bool, len(ids))
++	for _, id := range ids {
++		if id == "" || allowed[id] || pickSchedulerAuthByID(candidates, id) == nil {
++			return nil, false, fmt.Errorf("scheduler admission escaped native candidates")
++		}
++		allowed[id] = true
++	}
++	out := make([]*Auth, 0, len(ids))
++	for _, candidate := range candidates {
++		if allowed[candidate.ID] {
++			out = append(out, candidate)
++		}
++	}
++	return out, true, nil
+ }
+ 
+ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
+@@ -1869,6 +1973,12 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
+ 		}
+ 		candidates = append(candidates, candidate)
+ 	}
++	var errThread error
++	candidates, errThread = m.filterCodexThreadCandidates(ctx, model, opts, candidates)
++	if errThread != nil {
++		m.mu.RUnlock()
++		return nil, nil, errThread
++	}
+ 	if len(candidates) == 0 {
+ 		m.mu.RUnlock()
+ 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+@@ -1903,6 +2013,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
+ 	if selected == nil {
+ 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+ 	}
++	if m.codexThread.Load() != nil && pickSchedulerAuthByID(selectorAuths, selected.ID) == nil {
++		return nil, nil, threadError(fmt.Errorf("selector escaped Codex admission candidates"))
++	}
+ 	authCopy := selected.Clone()
+ 	if !selected.indexAssigned {
+ 		m.mu.Lock()
+@@ -2089,7 +2202,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+ 
+-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
++	if m.codexThread.Load() != nil || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+ 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
+ 	}
+ 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+@@ -2215,6 +2328,12 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ 		}
+ 		candidates = append(candidates, candidate)
+ 	}
++	var errThread error
++	candidates, errThread = m.filterCodexThreadCandidates(ctx, model, opts, candidates)
++	if errThread != nil {
++		m.mu.RUnlock()
++		return nil, nil, "", errThread
++	}
+ 	if len(candidates) == 0 {
+ 		m.mu.RUnlock()
+ 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+@@ -2254,6 +2373,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ 	if !okExecutor {
+ 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+ 	}
++	if m.codexThread.Load() != nil && pickSchedulerAuthByID(selectorAuths, selected.ID) == nil {
++		return nil, nil, "", threadError(fmt.Errorf("selector escaped Codex admission candidates"))
++	}
+ 	authCopy := selected.Clone()
+ 	if !selected.indexAssigned {
+ 		m.mu.Lock()
+@@ -2274,7 +2396,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+ 
+-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
++	if m.codexThread.Load() != nil || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+ 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+ 	}
+ 

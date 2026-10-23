@@ -1,0 +1,51 @@
+From 91604915477d77ed1be29c161e88b2d137081519 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_websocket_timeline.go)
+
+---
+ .../openai_responses_websocket_timeline.go    | 22 ++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+index 70ee202eec8e247cab3ae4a8a079fb8495da7278..77e06fc90e7d61ec37dcdc01099ef4c6906bdb53 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+@@ -291,19 +291,31 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
+ 	c.Set(key, []byte(trimmedBody))
+ }
+ 
+-func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, payload []byte, timestamp time.Time) error {
+-	if wsTimelineLog != nil {
+-		wsTimelineLog.Append("response", payload, timestamp)
+-	}
++func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, sessionID string, payload []byte, timestamp time.Time) error {
+ 	if writer == nil || writer.conn == nil {
+ 		return fmt.Errorf("responses websocket: writer is nil")
+ 	}
++	supplement := codexTurnStateMetadataSupplement(payload)
+ 	writer.writeMu.Lock()
+ 	defer writer.writeMu.Unlock()
+ 	if writer.closing.Load() {
+ 		return websocket.ErrCloseSent
+ 	}
+-	return writer.conn.WriteMessage(websocket.TextMessage, payload)
++	if wsTimelineLog != nil {
++		wsTimelineLog.Append("response", payload, timestamp)
++	}
++	requestlogging.CodexDumpFrame(sessionID, "client_out", payload)
++	if err := writer.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
++		return err
++	}
++	if len(supplement) == 0 {
++		return nil
++	}
++	if wsTimelineLog != nil {
++		wsTimelineLog.Append("response", supplement, timestamp)
++	}
++	requestlogging.CodexDumpFrame(sessionID, "client_out", supplement)
++	return writer.conn.WriteMessage(websocket.TextMessage, supplement)
+ }
+ 
+ func appendWebsocketTimelineDisconnect(timeline websocketTimelineAppender, err error, timestamp time.Time) {

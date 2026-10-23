@@ -1,0 +1,40 @@
+From 40bddd5384e9622bd4277bcd5bbb6dbe7d7a2c48 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/host_callbacks_unix.go)
+
+---
+ internal/pluginhost/host_callbacks_unix.go | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/internal/pluginhost/host_callbacks_unix.go b/internal/pluginhost/host_callbacks_unix.go
+index 5bbbd8fb4c7f4a2f365637e47e4b6cbc3365b5a2..2f96af52059bcdfbe10d9840ad961e13d1d21397 100644
+--- a/internal/pluginhost/host_callbacks_unix.go
++++ b/internal/pluginhost/host_callbacks_unix.go
+@@ -38,12 +38,20 @@ func cliproxyHostCall(hostCtx unsafe.Pointer, method *C.char, request *C.uint8_t
+ 	if !okHost || entry.host == nil {
+ 		return 1
+ 	}
+-	var requestBytes []byte
+-	if request != nil && requestLen > 0 {
+-		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
++	name := C.GoString(method)
++	resp, handled, errCall := nativeHoldCall(entry, name, unsafe.Pointer(request), uint64(requestLen))
++	if !handled {
++		// Keep ordinary methods' size contract; only reject C.GoBytes overflow.
++		if uint64(requestLen) > uint64(1<<31-1) || (requestLen > 0 && request == nil) {
++			return 1
++		}
++		var requestBytes []byte
++		if request != nil && requestLen > 0 {
++			requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
++		}
++		ctx := withHostCallbackIdentity(context.Background(), entry.pluginID, entry.instance)
++		resp, errCall = entry.host.callFromPlugin(ctx, name, requestBytes)
+ 	}
+-	ctx := withHostCallbackIdentity(context.Background(), entry.pluginID, entry.instance)
+-	resp, errCall := entry.host.callFromPlugin(ctx, C.GoString(method), requestBytes)
+ 	if errCall != nil {
+ 		resp = marshalRPCError("host_call_failed", errCall.Error(), clienterror.HTTPStatusFromError(errCall))
+ 	}

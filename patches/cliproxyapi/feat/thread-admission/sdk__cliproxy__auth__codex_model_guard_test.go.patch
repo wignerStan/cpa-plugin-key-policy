@@ -1,0 +1,336 @@
+diff --git a/sdk/cliproxy/auth/codex_model_guard_test.go b/sdk/cliproxy/auth/codex_model_guard_test.go
+new file mode 100644
+index 0000000..bcd37b9
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard_test.go
+@@ -0,0 +1,330 @@
++package auth
++
++import (
++	"context"
++	"errors"
++	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"testing"
++)
++
++type guardHostFunc func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error)
++
++func (f guardHostFunc) ExchangeModelGuard(ctx context.Context, id string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	return f(ctx, id, in)
++}
++func guardOptions() core.Options {
++	o := threadOptions("logical-thread")
++	o.Metadata["model_guard_request_id"] = "request"
++	o.SourceFormat = translator.FormatOpenAIResponse
++	o.Headers.Set("X-Codex-Turn-Metadata", `{"thread_id":"logical-thread","turn_id":"turn"}`)
++	return o
++}
++func guardRequest() core.Request {
++	return core.Request{Model: "model", Payload: []byte(`{"model":"model","input":"private input"}`)}
++}
++
++func TestModelGuardExactTargetsAndCredentialKinds(t *testing.T) {
++	m, _ := threadManager(t, &FillFirstSelector{})
++	targets := []internalconfig.CodexModelGuardTarget{
++		{AuthIDs: []string{"key-a", "key-b"}, BaseURLs: []string{"https://UPSTREAM.example/v1/"}, Models: []string{"lab/model", "lab/other"}},
++		{AuthIDs: []string{"key-c"}, BaseURLs: []string{"https://second.example/v1"}, Models: []string{"lab/model"}},
++	}
++	host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		t.Fatal("matching alone must not call plugin")
++		return pluginapi.ModelGuardDecision{}, nil
++	})
++	if err := m.ConfigureCodexModelGuard(host, "guard", []string{"lab"}, targets...); err != nil {
++		t.Fatal(err)
++	}
++	// Startup configuration must not retain caller-owned slices.
++	targets[0].AuthIDs[0], targets[0].BaseURLs[0], targets[0].Models[0] = "changed", "https://changed.example", "changed"
++	for _, tc := range []struct {
++		name, id, provider, kind, base, route string
++		want                                  bool
++	}{
++		{"first", "key-a", "codex", "apikey", "https://upstream.example/v1", "lab/model", true},
++		{"second-value", "key-b", "codex", "apikey", "https://upstream.example/v1/", "lab/other", true},
++		{"second-rule", "key-c", "codex", "apikey", "https://second.example/v1", "lab/model", true},
++		{"wrong-id", "key-a-extra", "codex", "apikey", "https://upstream.example/v1", "lab/model", false},
++		{"wrong-base", "key-a", "codex", "apikey", "https://upstream.example/v1/extra", "lab/model", false},
++		{"wrong-host", "key-a", "codex", "apikey", "https://upstream.example.attacker/v1", "lab/model", false},
++		{"wrong-model", "key-a", "codex", "apikey", "https://upstream.example/v1", "lab/model-more", false},
++		{"wrong-prefix", "key-a", "codex", "apikey", "https://upstream.example/v1", "other/model", false},
++		{"cross-rule", "key-c", "codex", "apikey", "https://upstream.example/v1", "lab/model", false},
++		{"oauth", "key-a", "codex", "oauth", "https://upstream.example/v1", "lab/model", false},
++		{"unknown", "key-a", "codex", "", "https://upstream.example/v1", "lab/model", false},
++		{"other-protocol", "key-a", "openai", "apikey", "https://upstream.example/v1", "lab/model", false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			a := &Auth{ID: tc.id, Provider: tc.provider, Attributes: map[string]string{"auth_kind": tc.kind, "base_url": tc.base}}
++			if tc.kind == "oauth" {
++				a.Attributes["api_key"] = "legacy-present"
++			}
++			if got := m.guardedAuth(a, tc.route); got != tc.want {
++				t.Fatalf("guarded=%v want=%v", got, tc.want)
++			}
++		})
++	}
++}
++
++func TestModelGuardInvalidTargetFailsStartup(t *testing.T) {
++	for name, target := range map[string]internalconfig.CodexModelGuardTarget{
++		"empty": {}, "wildcard-id": {AuthIDs: []string{"key-*"}}, "empty-id": {AuthIDs: []string{""}},
++		"whitespace": {Models: []string{" model"}}, "wildcard-model": {Models: []string{"lab/*"}},
++		"partial-url": {BaseURLs: []string{"example.com"}}, "credentials": {BaseURLs: []string{"https://user:pass@example.com/v1"}},
++		"query": {BaseURLs: []string{"https://example.com/v1?key=x"}}, "fragment": {BaseURLs: []string{"https://example.com/v1#foo"}},
++		"wildcard-host": {BaseURLs: []string{"https://*.example.com/v1"}},
++	} {
++		t.Run(name, func(t *testing.T) {
++			m, _ := threadManager(t, &FillFirstSelector{})
++			host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				return pluginapi.ModelGuardDecision{}, nil
++			})
++			if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}, target); err == nil || m.ModelGuardEnabled() {
++				t.Fatal("invalid target enabled guard")
++			}
++		})
++	}
++}
++
++func TestModelGuardUnmatchedBypassesExecutionAndThreadLease(t *testing.T) {
++	for _, mode := range []string{"oauth", "unknown", "unmatched-api-key", "unmatched-model", "default-oauth"} {
++		t.Run(mode, func(t *testing.T) {
++			m, ids := threadManager(t, &FillFirstSelector{})
++			a, _ := m.GetByID(ids[0])
++			if mode == "oauth" || mode == "default-oauth" {
++				a.Attributes["auth_kind"] = "oauth"
++				a.Attributes["api_key"] = "legacy-present"
++			}
++			if mode == "unknown" {
++				delete(a.Attributes, "auth_kind")
++			}
++			if _, err := m.Update(context.Background(), a); err != nil {
++				t.Fatal(err)
++			}
++			calls := 0
++			host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				calls++
++				return pluginapi.ModelGuardDecision{}, errors.New("guard intentionally unavailable")
++			})
++			target := internalconfig.CodexModelGuardTarget{AuthIDs: []string{ids[0]}}
++			if mode == "unmatched-api-key" {
++				target.AuthIDs = []string{ids[1]}
++			}
++			if mode == "unmatched-model" {
++				target.Models = []string{"other"}
++			}
++			targets := []internalconfig.CodexModelGuardTarget{target}
++			if mode == "default-oauth" {
++				targets = nil
++			}
++			if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}, targets...); err != nil {
++				t.Fatal(err)
++			}
++			opts := guardOptions()
++			disableThread(t, m, ids[0], opts)
++			// A stale disk exclusion and even invalid guard-only metadata must not
++			// affect credentials or models outside this guard's scope.
++			opts.Headers.Set("X-Codex-Turn-Metadata", "not-json")
++			allowed, err := m.filterCodexThreadCandidates(context.Background(), "model", opts, []*Auth{a})
++			if err != nil || len(allowed) != 1 || allowed[0].ID != a.ID {
++				t.Fatal("unmatched filtered", err)
++			}
++			if err := m.beginCodexThreadDispatch(context.Background(), a, "model", &opts); err != nil {
++				t.Fatal(err)
++			}
++			r, err := m.executeWithModelGuard(context.Background(), m.executorFor("codex"), a, guardRequest(), opts, "model")
++			if err != nil || string(r.Payload) != a.ID {
++				t.Fatal("unmatched non-stream blocked", err)
++			}
++			s, err := m.streamWithModelGuard(context.Background(), m.executorFor("codex"), a, guardRequest(), opts, "model")
++			if err != nil {
++				t.Fatal("unmatched stream blocked", err)
++			}
++			var output string
++			for chunk := range s.Chunks {
++				if chunk.Err != nil {
++					t.Fatal(chunk.Err)
++				}
++				output += string(chunk.Payload)
++			}
++			if output != a.ID || calls != 0 {
++				t.Fatal("unmatched execution called guard", calls)
++			}
++		})
++	}
++}
++
++func TestModelGuardUnmatchedCandidatePreventsFallback(t *testing.T) {
++	for _, oauth := range []bool{false, true} {
++		t.Run(map[bool]string{false: "unmatched-api-key", true: "oauth"}[oauth], func(t *testing.T) {
++			m, ids := threadManager(t, &FillFirstSelector{})
++			if oauth {
++				a, _ := m.GetByID(ids[1])
++				a.Attributes["auth_kind"] = "oauth"
++				if _, err := m.Update(context.Background(), a); err != nil {
++					t.Fatal(err)
++				}
++			}
++			host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				t.Fatal("unmatched ordinary candidate must prevent PAYG")
++				return pluginapi.ModelGuardDecision{}, nil
++			})
++			if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}, internalconfig.CodexModelGuardTarget{AuthIDs: []string{ids[0]}}); err != nil {
++				t.Fatal(err)
++			}
++			opts := guardOptions()
++			for _, id := range ids {
++				disableThread(t, m, id, opts)
++			}
++			d, err := m.ModelGuardRouting(context.Background(), guardRequest(), opts, &modelGuardReselect{})
++			if err != nil || d.Action != "continue" {
++				t.Fatal("false pool exhaustion", d, err)
++			}
++			a, err := m.SelectAuth(context.Background(), "codex", "model", opts)
++			if err != nil || a.ID != ids[1] {
++				t.Fatal("ordinary candidate did not survive lease filter", err)
++			}
++		})
++	}
++}
++func TestModelGuardHoldsUntilPluginReturnsAndRechecksDisable(t *testing.T) {
++	m, ids := threadManager(t, &FillFirstSelector{})
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		callbacks := pluginapi.ExecutionCallbacksFrom(ctx)
++		r, e := callbacks.Execute(ctx, pluginapi.HostModelExecutionRequest{Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers})
++		if e != nil {
++			return pluginapi.ModelGuardDecision{}, e
++		}
++		if e = callbacks.Validate(ctx, r.Receipt); e != nil {
++			return pluginapi.ModelGuardDecision{}, e
++		}
++		close(entered)
++		<-release
++		return pluginapi.ModelGuardDecision{Action: "release", Receipt: r.Receipt, Response: pluginapi.ModelGuardObservation{Body: r.Body, Headers: r.Headers}}, nil
++	})
++	if e := m.ConfigureCodexModelGuard(host, "guard", []string{""}); e != nil {
++		t.Fatal(e)
++	}
++	done := make(chan error, 1)
++	go func() {
++		a, _ := m.GetByID(ids[0])
++		r, e := m.executeWithModelGuard(context.Background(), m.executorFor("codex"), a, guardRequest(), guardOptions(), "model")
++		if len(r.Payload) > 0 {
++			done <- errors.New("disabled held output released")
++			return
++		}
++		done <- e
++	}()
++	<-entered
++	select {
++	case <-done:
++		t.Fatal("output crossed hold before decision")
++	default:
++	}
++	disableThread(t, m, ids[0], guardOptions())
++	close(release)
++	if e := <-done; e == nil {
++		t.Fatal("release did not recheck disk")
++	}
++}
++func TestModelGuardCannotForgeReceiptOrReselect(t *testing.T) {
++	for _, action := range []string{"release", "reselect"} {
++		t.Run(action, func(t *testing.T) {
++			m, ids := threadManager(t, &FillFirstSelector{})
++			host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				return pluginapi.ModelGuardDecision{Action: action, Receipt: "forged", Response: pluginapi.ModelGuardObservation{Body: []byte("leak")}}, nil
++			})
++			m.ConfigureCodexModelGuard(host, "guard", []string{""})
++			a, _ := m.GetByID(ids[0])
++			if r, e := m.executeWithModelGuard(context.Background(), m.executorFor("codex"), a, guardRequest(), guardOptions(), "model"); e == nil || len(r.Payload) > 0 {
++				t.Fatal("forged gate action admitted", e)
++			}
++		})
++	}
++}
++func TestGuardRotationClearsInternalSessionMetadata(t *testing.T) {
++	in := map[string]any{core.CallerScopeMetadataKey: "caller", core.CanonicalSessionIDMetadataKey: "old", core.LCPAffinitySessionIDMetadataKey: "old", core.ParentSessionIDMetadataKey: "old", core.IsForkMetadataKey: true, "lcp_fingerprints": "old", core.SessionAffinityModelMetadataKey: "old"}
++	out := guardSessionMetadata(in, "new")
++	if out[core.CallerScopeMetadataKey] != "caller" || out[core.CanonicalSessionIDMetadataKey] != "execution:new" {
++		t.Fatal("scope lost")
++	}
++	for _, k := range []string{core.LCPAffinitySessionIDMetadataKey, core.ParentSessionIDMetadataKey, core.IsForkMetadataKey, "lcp_fingerprints", core.SessionAffinityModelMetadataKey} {
++		if _, ok := out[k]; ok {
++			t.Fatal("old affinity retained", k)
++		}
++	}
++	if in[core.CanonicalSessionIDMetadataKey] != "old" {
++		t.Fatal("original metadata mutated")
++	}
++}
++
++func TestModelGuardRequestIDSurvivesNativeTargetReselection(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(map[bool]string{false: "response", true: "stream"}[stream], func(t *testing.T) {
++			m, ids := threadManager(t, &FillFirstSelector{})
++			opts := guardOptions()
++			delete(opts.Metadata, "model_guard_request_id")
++			var requestIDs, targets []string
++			host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				requestIDs, targets = append(requestIDs, in.RequestID), append(targets, in.Route.AuthID)
++				if in.Route.AuthID == ids[0] {
++					disableThread(t, m, ids[0], opts)
++					return pluginapi.ModelGuardDecision{Action: "reselect"}, nil
++				}
++				callbacks := pluginapi.ExecutionCallbacksFrom(ctx)
++				req := pluginapi.HostModelExecutionRequest{AuthID: in.Route.AuthID, Model: in.Scope.Model, Body: in.Request, Headers: in.Headers, Stream: stream}
++				d := pluginapi.ModelGuardDecision{Action: "release"}
++				if stream {
++					result, err := callbacks.Stream(ctx, req)
++					if err != nil {
++						return d, err
++					}
++					d.Receipt = result.Response.Receipt
++					for chunk := range result.Chunks {
++						if chunk.Err != nil {
++							return d, chunk.Err
++						}
++						d.Chunks = append(d.Chunks, chunk.Payload)
++					}
++				} else {
++					result, err := callbacks.Execute(ctx, req)
++					if err != nil {
++						return d, err
++					}
++					d.Receipt, d.Response.Body = result.Receipt, result.Body
++				}
++				return d, nil
++			})
++			if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			for n := 0; n < 2; n++ {
++				if stream {
++					result, err := m.ExecuteStream(context.Background(), []string{"codex"}, guardRequest(), opts)
++					if err != nil {
++						t.Fatal(err)
++					}
++					for chunk := range result.Chunks {
++						if chunk.Err != nil {
++							t.Fatal(chunk.Err)
++						}
++					}
++				} else if _, err := m.Execute(context.Background(), []string{"codex"}, guardRequest(), opts); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if len(requestIDs) != 3 || requestIDs[0] == "" || requestIDs[0] != requestIDs[1] || requestIDs[1] == requestIDs[2] || targets[0] != ids[0] || targets[1] != ids[1] {
++				t.Fatal("request identity reset across native selection", requestIDs, targets)
++			}
++			if _, exists := opts.Metadata["model_guard_request_id"]; exists {
++				t.Fatal("Manager mutated caller options")
++			}
++		})
++	}
++}

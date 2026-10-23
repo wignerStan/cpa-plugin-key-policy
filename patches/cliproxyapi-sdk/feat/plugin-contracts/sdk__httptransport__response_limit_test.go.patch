@@ -1,0 +1,120 @@
+From 71188efc847dd1f720dbda2dea6fe8410c770e82 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (sdk/httptransport/response_limit_test.go)
+
+---
+ sdk/httptransport/response_limit_test.go | 103 +++++++++++++++++++++++
+ 1 file changed, 103 insertions(+)
+ create mode 100644 sdk/httptransport/response_limit_test.go
+
+diff --git a/sdk/httptransport/response_limit_test.go b/sdk/httptransport/response_limit_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dbc7f03958fbb94612c421f7bbfa9839aec6c8aa
+--- /dev/null
++++ b/sdk/httptransport/response_limit_test.go
+@@ -0,0 +1,103 @@
++package httptransport
++
++import (
++	"compress/gzip"
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestResponseBodyLimitCountsDecompressedBytes(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Encoding", "gzip")
++		compressed := gzip.NewWriter(w)
++		_, _ = io.WriteString(compressed, strings.Repeat("x", 1024))
++		_ = compressed.Close()
++	}))
++	defer server.Close()
++	ctx := WithResponseBodyLimit(context.Background(), 8)
++	client := Decorate(ctx, server.Client())
++	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
++	response, err := client.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(response.Body)
++	if !errors.Is(err, ErrResponseBodyTooLarge) || len(body) != 8 {
++		t.Fatal("compressed response bypassed decoded byte limit", len(body), err)
++	}
++}
++
++type boundedTestBody struct {
++	io.Reader
++	read, closes int
++}
++
++func (b *boundedTestBody) Read(p []byte) (int, error) {
++	n, err := b.Reader.Read(p)
++	b.read += n
++	return n, err
++}
++func (b *boundedTestBody) Close() error { b.closes++; return nil }
++
++type boundedTestTransport struct{ body *boundedTestBody }
++
++func (t boundedTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	return &http.Response{StatusCode: 200, Header: make(http.Header), ContentLength: -1, Body: t.body, Request: req}, nil
++}
++
++func TestResponseBodyLimitCountsReadsAndPreservesTransport(t *testing.T) {
++	for _, text := range []string{"1234567", "12345678", "123456789extra"} {
++		t.Run(text, func(t *testing.T) {
++			body := &boundedTestBody{Reader: strings.NewReader(text)}
++			transport := boundedTestTransport{body}
++			decorated := false
++			ctx := WithDecorator(context.Background(), func(next http.RoundTripper) http.RoundTripper {
++				if next != transport {
++					t.Fatal("selected transport changed")
++				}
++				decorated = true
++				return next
++			})
++			ctx = WithResponseBodyLimit(ctx, 8)
++			client := Decorate(ctx, &http.Client{Transport: transport})
++			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://local.invalid", nil)
++			response, err := client.Do(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			data, err := io.ReadAll(response.Body)
++			if len(text) > 8 {
++				if !errors.Is(err, ErrResponseBodyTooLarge) || string(data) != text[:8] || body.read != 9 || body.closes != 1 {
++					t.Fatalf("overflow: data=%q err=%v read=%d closes=%d", data, err, body.read, body.closes)
++				}
++			} else if err != nil || string(data) != text {
++				t.Fatalf("valid body changed: %q %v", data, err)
++			}
++			_ = response.Body.Close()
++			_ = response.Body.Close()
++			if !decorated || body.closes != 1 {
++				t.Fatal("decorator or close lifecycle changed")
++			}
++		})
++	}
++}
++
++func TestResponseBodyLimitLeavesUnboundedClientAndCancellationIntact(t *testing.T) {
++	plain := &http.Client{Transport: boundedTestTransport{&boundedTestBody{Reader: strings.NewReader("unbounded")}}}
++	if got := Decorate(WithResponseBodyLimit(context.Background(), 0), plain); got != plain {
++		t.Fatal("unlimited client was changed")
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	body := &boundedTestBody{Reader: strings.NewReader("unread")}
++	limited := &limitedResponseBody{body: body, ctx: ctx, remaining: 8}
++	cancel()
++	if _, err := io.ReadAll(limited); !errors.Is(err, context.Canceled) || body.read != 0 {
++		t.Fatal("canceled reader touched upstream", err, body.read)
++	}
++}

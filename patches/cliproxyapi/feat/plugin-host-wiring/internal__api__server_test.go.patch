@@ -1,0 +1,33 @@
+From 4303d3d40d1ee2fc2be17acfc90d226835ed5b40 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_test.go)
+
+---
+ internal/api/server_test.go | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/internal/api/server_test.go b/internal/api/server_test.go
+index 44862bb9dbac8907ddaee4a23ef992a4b933cb3b..1e4bb98855ab48bf668b9701f718cf6b5ca4f642 100644
+--- a/internal/api/server_test.go
++++ b/internal/api/server_test.go
+@@ -614,7 +614,8 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
+ 	t.Helper()
+ 	cfg := &proxyconfig.Config{
+ 		SDKConfig: sdkconfig.SDKConfig{
+-			APIKeys: []string{"test-key"},
++			APIKeys:                   []string{"test-key"},
++			AllowOriginModelsEndpoint: true,
+ 		},
+ 	}
+ 	return newTestServerWithConfig(t, cfg, opts...)
+@@ -2167,7 +2168,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
+ 		modelRegistry.UnregisterClient(clientID)
+ 	})
+ 
+-	cfg := &proxyconfig.Config{SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}}}
++	cfg := &proxyconfig.Config{SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}, AllowOriginModelsEndpoint: true}}
+ 	cfg.Client.Codex.EnableApplyPatch = true
+ 	server := newTestServerWithConfig(t, cfg)
+ 	server.handlers.AuthManager.RegisterExecutor(executor.NewCodexAutoExecutor(&proxyconfig.Config{}))

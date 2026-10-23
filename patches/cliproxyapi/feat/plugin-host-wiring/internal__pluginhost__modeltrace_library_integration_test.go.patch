@@ -1,0 +1,162 @@
+From 384a1e6427bad63e021dedca19a54a58638b2d51 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/modeltrace_library_integration_test.go)
+
+---
+ .../modeltrace_library_integration_test.go    | 145 ++++++++++++++++++
+ 1 file changed, 145 insertions(+)
+ create mode 100644 internal/pluginhost/modeltrace_library_integration_test.go
+
+diff --git a/internal/pluginhost/modeltrace_library_integration_test.go b/internal/pluginhost/modeltrace_library_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9476cbdda221c97c7dfaf9132a5104e983127e9
+--- /dev/null
++++ b/internal/pluginhost/modeltrace_library_integration_test.go
+@@ -0,0 +1,145 @@
++//go:build cgo && (linux || darwin || freebsd)
++
++package pluginhost
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++// Set CPA_MODELTRACE_TEST_ROOT to the plugin repository after building its shared
++// library. This test performs local Python scoring setup and ABI calls only.
++func TestModelTraceSharedLibraryGuardContract(t *testing.T) {
++	root := os.Getenv("CPA_MODELTRACE_TEST_ROOT")
++	if root == "" {
++		t.Skip("external ModelTrace library integration is opt-in")
++	}
++	if os.Getenv("CPA_MODELTRACE_TEST_CHILD") != "1" {
++		dir := t.TempDir()
++		cfgPath := filepath.Join(dir, "config.json")
++		cfg, _ := json.Marshal(map[string]any{"guard": map[string]any{"enabled": true, "cache_dir": filepath.Join(dir, "cache"), "thread_cache_dir": filepath.Join(dir, "threads"), "expected": map[string]string{"lab/gpt-6-astra": "gpt-6-astra"}, "payg": map[string]any{"base_url": "https://payg.example/v1", "api_key_env": "CPA_TEST_PAYG_SECRET", "models": map[string]string{"lab/gpt-6-astra": "premium"}}}})
++		if err := os.WriteFile(cfgPath, cfg, 0600); err != nil {
++			t.Fatal(err)
++		}
++		// A Go c-shared runtime reads process-start environment separately from
++		// the host runtime. Setenv inside a Go test cannot configure that copy.
++		cmd := exec.Command(os.Args[0], "-test.run=^TestModelTraceSharedLibraryGuardContract$", "-test.count=1")
++		cmd.Env = append(os.Environ(), "CPA_MODELTRACE_TEST_CHILD=1", "CPA_MODELTRACE_ROOT="+root, "CPA_MODELTRACE_CONFIG="+cfgPath, "CPA_TEST_PAYG_SECRET=local-test-key")
++		if out, err := cmd.CombinedOutput(); err != nil {
++			t.Fatalf("shared-library subprocess: %v\n%s", err, out)
++		}
++		return
++	}
++	host := New()
++	client, err := (dynamicLibraryLoader{}).Open(pluginFile{ID: "cpa-modeltrace", Path: filepath.Join(root, "dist/cpa-modeltrace.so"), Version: "integration"}, host)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer client.Shutdown()
++	registered, err := registerRPCPlugin(context.Background(), host, "cpa-modeltrace", client, pluginabi.MethodPluginRegister, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !validPlugin(registered) {
++		t.Fatal("shared-library registration does not pass host metadata/capability validation")
++	}
++	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
++	host.runtimeConfig.ForceModelPrefix = true
++	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
++	setHostSnapshotForTest(host, true, capabilityRecord{id: "cpa-modeltrace", plugin: registered})
++	if registered.Capabilities.AuthProvider == nil || registered.Capabilities.ModelProvider == nil {
++		t.Fatal("PAYG must use existing auth/model capabilities")
++	}
++	guard := registered.Capabilities.CodexModelGuard
++	if guard == nil {
++		t.Fatal("capability missing from ABI registration")
++	}
++	request := pluginapi.ModelGuardExchange{Version: 1, Operation: "start", RequestID: "request", AttemptID: "a", RuntimeID: "host-instance", Scope: pluginapi.ModelGuardScope{Caller: "caller", Prefix: "lab", Thread: "logical", Model: "lab/gpt-6-astra"}, Route: pluginapi.ModelGuardRoute{AuthID: "actual-auth", Model: "gpt-6-astra", Revision: "revision"}, Request: []byte(`{"model":"gpt-6-astra","input":[{"id":"user-prefix","role":"user","content":"prefix"}]}`), Headers: map[string][]string{"Thread-Id": {"logical"}, "X-Codex-Turn-Metadata": {`{"thread_id":"logical","turn_id":"turn"}`}}}
++	d, err := guard.ExchangeModelGuard(context.Background(), request)
++	if err != nil || d.Action != "hold" || d.BaselineID == "" {
++		t.Fatal("start contract", d, err)
++	}
++	d, err = guard.ExchangeModelGuard(context.Background(), pluginapi.ModelGuardExchange{Version: 1, Operation: "evaluate", AttemptID: "a", Response: pluginapi.ModelGuardObservation{Error: "fake-upstream-error"}})
++	if err != nil || d.Action != "retry" || d.RetriesUsed != 1 {
++		t.Fatal("retry contract", d, err)
++	}
++	request.AttemptID = "b"
++	request.Route.AuthID = "another-provider"
++	next, err := guard.ExchangeModelGuard(context.Background(), request)
++	if err != nil || next.Action != "hold" || next.RetriesUsed != 1 || next.SessionID == "" || next.Headers.Get("Thread-Id") != "logical" {
++		t.Fatal("retry session and scope contract", next, err)
++	}
++	for _, id := range []string{"a", "b"} {
++		_, _ = guard.ExchangeModelGuard(context.Background(), pluginapi.ModelGuardExchange{Version: 1, Operation: "abort", AttemptID: id})
++	}
++	if nativeHoldEnabled {
++		calls := 0
++		var callbackCtx context.Context
++		ctx := pluginapi.WithExecutionCallbacks(context.Background(), &pluginapi.ExecutionCallbacks{Execute: func(ctx context.Context, req pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++			calls++
++			callbackCtx = ctx
++			if req.AuthID != request.Route.AuthID || !bytes.Contains(req.Body, []byte("prefix")) {
++				t.Fatal("borrowed body or target changed")
++			}
++			return pluginapi.HostModelExecutionResponse{Receipt: "native-hold", Headers: http.Header{"X-Codex-Turn-State": {"state"}}, Body: []byte(`{"status":"completed","usage":{"input_tokens":2048,"input_tokens_details":{"cached_tokens":0},"attribution":{"items":{"user-prefix":{"input_tokens":2048,"cached_tokens":0}}}},"output":[{"type":"message","content":[{"type":"output_text","text":"held output"}]}]}`)}, nil
++		}})
++		request.Operation = "execute"
++		request.Scope.Thread = "native-borrow"
++		request.Headers = http.Header{"Thread-Id": {"native-borrow"}, "X-Codex-Turn-Metadata": {`{"thread_id":"native-borrow","turn_id":"turn"}`}}
++		d, err = guard.ExchangeModelGuard(ctx, request)
++		// Replay remains off. The real C ABI body borrow must execute exactly
++		// once, then hold the business response at the unvalidated boundary.
++		if err == nil || calls != 1 || len(d.Response.Body) != 0 {
++			t.Fatal("native hold escaped", calls, d, err)
++		}
++		if callbackCtx == nil || callbackCtx.Err() == nil {
++			t.Fatal("callback capability remained live after exchange")
++		}
++		paygCalls := 0
++		fallbackContext := pluginapi.WithExecutionCallbacks(context.Background(), &pluginapi.ExecutionCallbacks{Execute: func(_ context.Context, in pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++			paygCalls++
++			auth, ok := host.currentAuthManager().GetByID("modeltrace-payg.json")
++			if !ok || auth.Provider != "modeltrace-payg" || auth.Attributes["plugin_owner"] != "cpa-modeltrace" || in.AuthID != auth.ID || in.Model != "modeltrace-payg/premium" {
++				t.Fatal("PAYG registration/dispatch mismatch")
++			}
++			return pluginapi.HostModelExecutionResponse{Body: []byte(`{"status":"completed"}`)}, nil
++		}})
++		request.Operation = "fallback"
++		request.Exhausted = true
++		result, err := guard.ExchangeModelGuard(fallbackContext, request)
++		if err != nil || result.Action != "direct" || paygCalls != 1 {
++			t.Fatal("PAYG shared ABI fallback", result, err, paygCalls)
++		}
++		// Reuse reads the stored descriptor through the existing auth callback.
++		result, err = guard.ExchangeModelGuard(fallbackContext, request)
++		if err != nil || result.Action != "direct" || paygCalls != 2 {
++			t.Fatal("PAYG shared ABI reuse", result, err, paygCalls)
++		}
++		auth, _ := host.currentAuthManager().GetByID("modeltrace-payg.json")
++		models := host.ModelsForAuth(context.Background(), auth)
++		if !models.Handled || models.Err != nil || len(models.Models) != 1 || models.Models[0].ID != "premium" {
++			t.Fatal("PAYG model registration", models.Err)
++		}
++		persisted, err := os.ReadFile(filepath.Join(host.runtimeConfig.AuthDir, "modeltrace-payg.json"))
++		if err != nil || bytes.Contains(persisted, []byte("local-test-key")) {
++			t.Fatal("PAYG persistence leaked key", err)
++		}
++		request.Operation = "route"
++		route, err := guard.ExchangeModelGuard(fallbackContext, request)
++		if err != nil || route.Action != "continue" || paygCalls != 2 {
++			t.Fatal("PAYG became a thread lease", route, err)
++		}
++
++	}
++}

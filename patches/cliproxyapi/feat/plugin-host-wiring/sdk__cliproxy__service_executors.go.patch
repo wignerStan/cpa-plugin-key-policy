@@ -1,0 +1,33 @@
+From 9558c17c716eecf0f11e8fa289efc34ecc377a3a Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/cliproxy/service_executors.go)
+
+---
+ sdk/cliproxy/service_executors.go | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/sdk/cliproxy/service_executors.go b/sdk/cliproxy/service_executors.go
+index 2c2083d959c27501824331b2fa6f85ee501c8f79..f8d8229f49fef2466a09b15682006b6cb6b130a7 100644
+--- a/sdk/cliproxy/service_executors.go
++++ b/sdk/cliproxy/service_executors.go
+@@ -284,6 +284,18 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
+ 	if a.Disabled {
+ 		return
+ 	}
++	if a.Attributes["plugin_owner"] != "" && a.Attributes["upstream_protocol"] == "openai-response" {
++		provider := strings.ToLower(strings.TrimSpace(a.Provider))
++		if !forceReplace {
++			if current, ok := s.coreManager.Executor(provider); ok {
++				if responses, ok := current.(*executor.CodexHTTPProviderExecutor); ok && responses.UsesConfig(cfg) {
++					return
++				}
++			}
++		}
++		s.coreManager.RegisterExecutor(executor.NewCodexHTTPProviderExecutor(provider, cfg))
++		return
++	}
+ 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
+ 		if compatProviderKey == "" {
+ 			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))

@@ -1,0 +1,45 @@
+From 0b64280a8a62daff2e229da29e868b3c6eb853ea Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/config/sdk_config.go)
+
+---
+ internal/config/sdk_config.go | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/internal/config/sdk_config.go b/internal/config/sdk_config.go
+index fa057c084453e34579fbb89427c3a8b1533ca33a..2a95e74a9affb30ffd85d8d9e253e4f4637d5460 100644
+--- a/internal/config/sdk_config.go
++++ b/internal/config/sdk_config.go
+@@ -77,15 +77,30 @@ type SDKConfig struct {
+ 	// RequestLog enables or disables detailed request logging functionality.
+ 	RequestLog bool `yaml:"request-log" json:"request-log"`
+ 
++	// CodexDump explicitly authorizes private raw Codex WS/HTTPS capture (Linux only, default off).
++	// Consent is independent of trace verbosity; streaming writes are asynchronous and best effort.
++	// Individual artifacts are limited to 8 MiB and retained artifacts to 64 MiB total.
++	CodexDump bool `yaml:"codex-dump" json:"codex-dump"`
++
+ 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
+ 	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
+ 
++	// CodexThreadTitleSession mirrors Codex.ThreadTitleSession for API handlers.
++	CodexThreadTitleSession *bool `yaml:"-" json:"-"`
++
+ 	// ClaudeCode configures Claude Code compatibility behavior.
+ 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
+ 
+ 	// APIKeys is a list of keys for authenticating clients to this proxy server.
+ 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+ 
++	// AllowOriginModelsEndpoint controls whether native CLIProxyAPI api-keys may
++	// access the global GET /v1/models and /v1beta/models endpoints. It defaults
++	// to false so native keys do not expose the complete model catalog unless the
++	// operator explicitly opts in. Plugin-owned keys keep their own per-key
++	// allow_models_endpoint policy.
++	AllowOriginModelsEndpoint bool `yaml:"allow-origin-models-endpoint" json:"allow-origin-models-endpoint"`
++
+ 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
+ 	// Default is false (disabled).
+ 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

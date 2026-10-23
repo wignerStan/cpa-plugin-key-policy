@@ -1,0 +1,41 @@
+From 173eaa2c0e009fa0cd926ee5f0d62b995a6d4346 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/util/util.go)
+
+---
+ internal/util/util.go | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/internal/util/util.go b/internal/util/util.go
+index 892755830f00f0ffa2d013a74133918b6481b5c5..66ae261690696b620119c4227386e73cddc88c8e 100644
+--- a/internal/util/util.go
++++ b/internal/util/util.go
+@@ -54,12 +54,14 @@ func SanitizeFunctionName(name string) string {
+ 	return sanitized
+ }
+ 
+-// SetLogLevel configures the logrus log level based on the configuration.
+-// It sets the log level to DebugLevel if debug mode is enabled, otherwise to InfoLevel.
++// SetLogLevel configures the logrus log level based on the selected verbosity.
++// Trace mode sets logrus to TraceLevel.
+ func SetLogLevel(cfg *config.Config) {
+ 	currentLevel := log.GetLevel()
+ 	var newLevel log.Level
+-	if cfg.Debug {
++	if cfg.Trace {
++		newLevel = log.TraceLevel
++	} else if cfg.Debug {
+ 		newLevel = log.DebugLevel
+ 	} else {
+ 		newLevel = log.InfoLevel
+@@ -67,7 +69,7 @@ func SetLogLevel(cfg *config.Config) {
+ 
+ 	if currentLevel != newLevel {
+ 		log.SetLevel(newLevel)
+-		log.Infof("log level changed from %s to %s (debug=%t)", currentLevel, newLevel, cfg.Debug)
++		log.Infof("log level changed from %s to %s (trace=%t, debug=%t)", currentLevel, newLevel, cfg.Trace, cfg.Debug)
+ 	}
+ }
+ 

@@ -1,0 +1,274 @@
+From 7d0fd170ab648cb3c46e502abc614fa270ce9811 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/host_inspection_response_limit_test.go)
+
+---
+ .../host_inspection_response_limit_test.go    | 257 ++++++++++++++++++
+ 1 file changed, 257 insertions(+)
+ create mode 100644 internal/pluginhost/host_inspection_response_limit_test.go
+
+diff --git a/internal/pluginhost/host_inspection_response_limit_test.go b/internal/pluginhost/host_inspection_response_limit_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1176f9a0c8d38eecbe70223f646f4abb7f508e71
+--- /dev/null
++++ b/internal/pluginhost/host_inspection_response_limit_test.go
+@@ -0,0 +1,257 @@
++package pluginhost
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	upstream "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++)
++
++type inspectionCountBody struct {
++	io.Reader
++	read, closed int
++}
++
++func (b *inspectionCountBody) Read(p []byte) (int, error) {
++	n, err := b.Reader.Read(p)
++	b.read += n
++	return n, err
++}
++
++func (b *inspectionCountBody) Close() error { b.closed++; return nil }
++
++type inspectionTransport func(*http.Request) (*http.Response, error)
++
++func (f inspectionTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++// Exercise the actual host callback boundary with an in-memory transport. The
++// counter observes bytes consumed by io.ReadAll, before any native reply copy.
++func TestHostInspectionResponseReadLimit(t *testing.T) {
++	for _, bound := range []bool{false, true} {
++		name := "executor"
++		if bound {
++			name = "bound_callback"
++		}
++		t.Run(name, func(t *testing.T) {
++			for _, tc := range []struct {
++				name       string
++				single     bool
++				size       int
++				resultSize int
++				wantError  bool
++				wantRead   int
++			}{
++				{"inspection_exact_result_limit", true, hostInspectionResponseLimit, hostInspectionResponseLimit, false, hostInspectionResponseLimit},
++				{"inspection_larger_wire_small_result", true, hostInspectionResponseLimit + 4096, 2, false, hostInspectionResponseLimit + 4096},
++				{"inspection_transport_overflow", true, hostInspectionWireLimit + 4096, 0, true, hostInspectionWireLimit + 1},
++				{"ordinary_large_response", false, hostInspectionResponseLimit + 4096, hostInspectionResponseLimit + 4096, false, hostInspectionResponseLimit + 4096},
++			} {
++				t.Run(tc.name, func(t *testing.T) {
++					body := &inspectionCountBody{Reader: bytes.NewReader(bytes.Repeat([]byte{'x'}, tc.size))}
++					var readErr error
++					decorated := false
++					execute := func(ctx context.Context) (pluginapi.HostModelExecutionResponse, error) {
++						client := httptransport.Decorate(ctx, &http.Client{Transport: inspectionTransport(func(req *http.Request) (*http.Response, error) {
++							return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Test": {"kept"}}, Body: body, Request: req}, nil
++						})})
++						req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://inspection.invalid", nil)
++						if err != nil {
++							t.Fatal(err)
++						}
++						response, err := client.Do(req)
++						if err != nil {
++							t.Fatal(err)
++						}
++						defer response.Body.Close()
++						payload, err := io.ReadAll(response.Body)
++						readErr = err
++						if err == nil {
++							payload = payload[:tc.resultSize]
++						}
++						return pluginapi.HostModelExecutionResponse{StatusCode: response.StatusCode, Headers: response.Header, Body: payload}, err
++					}
++					ctx := httptransport.WithDecorator(context.Background(), func(next http.RoundTripper) http.RoundTripper {
++						decorated = true
++						return next
++					})
++					raw, err := callInspectionTestExecutor(t, ctx, bound, tc.single, execute)
++					if !decorated || body.read != tc.wantRead || body.closed != 1 {
++						t.Fatalf("decorator=%v read=%d close=%d; want preserved decorator, %d bytes, one close", decorated, body.read, body.closed, tc.wantRead)
++					}
++					if tc.wantError {
++						if !errors.Is(readErr, httptransport.ErrResponseBodyTooLarge) || err == nil || len(raw) != 0 {
++							t.Fatalf("oversized response escaped: readErr=%v callbackErr=%v encodedBytes=%d", readErr, err, len(raw))
++						}
++						return
++					}
++					if err != nil || readErr != nil {
++						t.Fatalf("callback error=%v read error=%v", err, readErr)
++					}
++					result, err := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](raw)
++					if err != nil || len(result.Body) != tc.resultSize || result.Headers.Get("X-Test") != "kept" {
++						t.Fatalf("response changed: bytes=%d headers=%v err=%v", len(result.Body), result.Headers, err)
++					}
++				})
++			}
++		})
++	}
++}
++
++// A custom executor can return an already allocated body. It must still be
++// rejected before the host copies or marshals it into a native plugin reply.
++func TestHostInspectionResponseCopyLimit(t *testing.T) {
++	for _, bound := range []bool{false, true} {
++		for _, single := range []bool{false, true} {
++			payload := bytes.Repeat([]byte{'x'}, hostInspectionResponseLimit+1)
++			raw, err := callInspectionTestExecutor(t, context.Background(), bound, single, func(context.Context) (pluginapi.HostModelExecutionResponse, error) {
++				return pluginapi.HostModelExecutionResponse{StatusCode: http.StatusOK, Body: payload}, nil
++			})
++			if single {
++				if !errors.Is(err, httptransport.ErrResponseBodyTooLarge) || len(raw) != 0 {
++					t.Fatalf("inspection bound=%v encoded local overflow: callback=%v bytes=%d", bound, err, len(raw))
++				}
++				continue
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			result, err := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](raw)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !bytes.Equal(result.Body, payload) || result.Error != "" {
++				t.Fatalf("ordinary callback bound=%v changed: bytes=%d error=%q", bound, len(result.Body), result.Error)
++			}
++		}
++	}
++}
++
++func TestHostInspectionCodexWireAndResultBounds(t *testing.T) {
++	completed := `data: {"type":"response.completed","response":{"id":"local","object":"response","status":"completed","output":[{"id":"msg","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}` + "\n\n"
++	for _, tc := range []struct {
++		name, wire     string
++		wantLocalError bool
++		statusCode     int
++	}{
++		{"large_wire_small_result", strings.Repeat(":padding\n\n", 31000) + completed, false, http.StatusOK},
++		{"wire_overflow", completed + strings.Repeat(":padding\n\n", hostInspectionWireLimit/10+4096), true, http.StatusOK},
++		{"result_overflow", strings.Replace(completed, `"text":"ok"`, `"text":"`+strings.Repeat("x", hostInspectionResponseLimit)+`"`, 1), true, http.StatusOK},
++		{"non2xx_wire_overflow", strings.Repeat("x", hostInspectionWireLimit+1), true, http.StatusInternalServerError},
++		{"non2xx_small_upstream_failure", `{"error":{"message":"upstream test failure"}}`, false, http.StatusInternalServerError},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
++			manager.SetRetryConfig(3, 0, 0)
++			manager.RegisterExecutor(upstream.NewCodexExecutor(&config.Config{}))
++			authID, model := "inspection-auth-"+tc.name, "inspection-model-"+tc.name
++			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
++			defer registry.GetGlobalRegistry().UnregisterClient(authID)
++			if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "fake-local-key"}}); err != nil {
++				t.Fatal(err)
++			}
++			before, _ := manager.GetByID(authID)
++			body := &inspectionCountBody{Reader: strings.NewReader(tc.wire)}
++			calls := 0
++			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", inspectionTransport(func(req *http.Request) (*http.Response, error) {
++				calls++
++				return &http.Response{StatusCode: tc.statusCode, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: body, Request: req}, nil
++			}))
++			raw, err := callInspectionTestExecutor(t, ctx, false, true, func(ctx context.Context) (pluginapi.HostModelExecutionResponse, error) {
++				result, err := manager.Execute(ctx, []string{"codex"}, core.Request{Model: model, Payload: []byte(`{"input":"probe"}`)}, core.Options{SourceFormat: translator.FormatOpenAIResponse, Metadata: map[string]any{core.PinnedAuthMetadataKey: authID}})
++				return pluginapi.HostModelExecutionResponse{Body: result.Payload, Headers: result.Headers}, err
++			})
++			if tc.wantLocalError {
++				if !errors.Is(err, httptransport.ErrResponseBodyTooLarge) || len(raw) != 0 {
++					t.Fatalf("local bound became a failed inspection sample: callback=%v bytes=%d", err, len(raw))
++				}
++				after, _ := manager.GetByID(authID)
++				if after.Failed != before.Failed || after.Unavailable != before.Unavailable || after.Status != before.Status || after.Disabled != before.Disabled || !after.NextRetryAfter.Equal(before.NextRetryAfter) || !reflect.DeepEqual(after.Quota, before.Quota) || !reflect.DeepEqual(after.LastError, before.LastError) {
++					t.Fatalf("local quota changed native auth availability: failed=%d->%d success=%d->%d unavailable=%t->%t model_states=%d->%d", before.Failed, after.Failed, before.Success, after.Success, before.Unavailable, after.Unavailable, len(before.ModelStates), len(after.ModelStates))
++				}
++				if len(tc.wire) > hostInspectionWireLimit && (after.Success != before.Success || !reflect.DeepEqual(after.ModelStates, before.ModelStates)) {
++					t.Fatalf("local wire quota changed native accounting: success=%d->%d model_states=%d->%d", before.Success, after.Success, len(before.ModelStates), len(after.ModelStates))
++				}
++				for model, state := range after.ModelStates {
++					if state.Unavailable || !state.NextRetryAfter.IsZero() || state.LastError != nil || state.Quota.Exceeded {
++						t.Fatalf("local quota cooled down model %q: %+v", model, state)
++					}
++				}
++			} else {
++				if err != nil {
++					t.Fatal(err)
++				}
++				result, err := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](raw)
++				if tc.statusCode == http.StatusOK {
++					if err != nil || result.Error != "" || !bytes.Contains(result.Body, []byte(`"text":"ok"`)) {
++						t.Fatalf("large native SSE result changed: %+v, %v", result, err)
++					}
++				} else if err != nil || result.Error != "upstream_execution_failed" || result.StatusCode != http.StatusBadGateway {
++					t.Fatalf("ordinary HTTP failure became local: %+v, %v", result, err)
++				} else {
++					after, _ := manager.GetByID(authID)
++					if after.Failed != before.Failed+1 {
++						t.Fatalf("ordinary HTTP failure did not reach native accounting: %d->%d", before.Failed, after.Failed)
++					}
++				}
++			}
++			wantRead := len(tc.wire)
++			if wantRead > hostInspectionWireLimit {
++				wantRead = hostInspectionWireLimit + 1
++			}
++			if calls != 1 || body.read != wantRead || body.closed != 1 {
++				t.Fatalf("calls=%d read=%d close=%d; want one pinned bounded attempt, %d bytes, one close", calls, body.read, body.closed, wantRead)
++			}
++		})
++	}
++}
++
++func callInspectionTestExecutor(t *testing.T, parent context.Context, bound, single bool, execute func(context.Context) (pluginapi.HostModelExecutionResponse, error)) ([]byte, error) {
++	t.Helper()
++	host := New()
++	instance := &hostCallbackInstance{}
++	caller := withHostCallbackIdentity(parent, "inspection-test", instance)
++	req := rpcHostModelExecutionRequest{HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{SingleAttempt: single, AuthID: "test-auth", Model: "test-model", Body: []byte(`{"input":"probe"}`)}}
++	if bound {
++		parent = pluginapi.WithExecutionCallbacks(parent, &pluginapi.ExecutionCallbacks{Execute: func(ctx context.Context, _ pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++			return execute(ctx)
++		}})
++		id, cleanup := host.openCallbackContextForPluginInstance(parent, "inspection-test", instance)
++		defer cleanup()
++		req.HostCallbackID = id
++	} else {
++		host.SetModelExecutor(&fakeHostModelExecutor{executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
++			if req.AuthID != "test-auth" {
++				t.Fatalf("pinned target changed: %q", req.AuthID)
++			}
++			result, err := execute(ctx)
++			if err != nil {
++				return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
++			}
++			return handlers.ModelExecutionResponse{StatusCode: result.StatusCode, Headers: result.Headers, Body: result.Body}, nil
++		}})
++		if single {
++			req.OperationID = openHostHTTPOperation(t, host, caller, "")
++		}
++	}
++	raw, err := json.Marshal(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return host.callHostModelExecute(caller, raw)
++}

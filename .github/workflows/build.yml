@@ -12,7 +12,8 @@ permissions:
 
 env:
   PLUGIN_ID: cpa-key-policy
-  GOFLAGS: -mod=mod
+  GOFLAGS: -mod=readonly
+  INFRA_GO_DIR: ${{ github.workspace }}/build/infra-source/go
 
 jobs:
   test:
@@ -28,6 +29,9 @@ jobs:
           go-version: '1.26.x'
           cache: true
 
+      - name: Use canonical infra modules
+        uses: ./.github/actions/infra
+
       - name: Validate CLIProxyAPI materialization
         run: bash scripts/check-cliproxyapi.sh
 
@@ -42,10 +46,12 @@ jobs:
         run: make web-build
 
       - name: Test
-        run: go test ./...
+        run: |
+          python3 scripts/test-cpa-materialization.py
+          go test ./cmd/... ./internal/...
 
       - name: Vet
-        run: go vet ./...
+        run: go vet ./cmd/... ./internal/...
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -87,6 +93,9 @@ jobs:
         with:
           go-version: '1.26.x'
           cache: true
+
+      - name: Use canonical infra modules
+        uses: ./.github/actions/infra
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -140,6 +149,9 @@ jobs:
           go-version: '1.26.x'
           cache: true
 
+      - name: Use canonical infra modules
+        uses: ./.github/actions/infra
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -158,7 +170,7 @@ jobs:
         timeout-minutes: 45
         uses: go-cross/cgo-actions@v1
         env:
-          GOFLAGS: -mod=mod -trimpath -buildmode=c-shared
+          GOFLAGS: -mod=readonly -trimpath -buildmode=c-shared
         with:
           dir: ./cmd/cpa-key-policy
           packages: .
@@ -212,6 +224,9 @@ jobs:
         with:
           go-version: '1.26.x'
           cache: true
+
+      - name: Use canonical infra modules
+        uses: ./.github/actions/infra
 
       - name: Resolve host release metadata
         run: |

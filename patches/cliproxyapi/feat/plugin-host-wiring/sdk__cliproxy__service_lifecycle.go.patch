@@ -1,0 +1,24 @@
+From 93449e9701e14ca9dae1b84df7a8efce0d0981d6 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/cliproxy/service_lifecycle.go)
+
+---
+ sdk/cliproxy/service_lifecycle.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/sdk/cliproxy/service_lifecycle.go b/sdk/cliproxy/service_lifecycle.go
+index f08eb1b4cf3b957843c5cdebfac9a286a642b2a2..049ce8f11dfff4d8708365e48f202ca3e426e912 100644
+--- a/sdk/cliproxy/service_lifecycle.go
++++ b/sdk/cliproxy/service_lifecycle.go
+@@ -326,6 +326,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
+ 		}
+ 		if s.coreManager != nil {
+ 			s.coreManager.StopAutoRefresh()
++			if err := s.coreManager.CloseCodexThreadCooldown(); err != nil && shutdownErr == nil {
++				shutdownErr = err
++			}
+ 		}
+ 		if watcher := s.currentWatcher(); watcher != nil {
+ 			if err := watcher.Stop(); err != nil {

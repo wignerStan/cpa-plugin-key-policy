@@ -1,0 +1,118 @@
+From 8285284c4b76e71c42f66961d44b0e64ae9c7e3d Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(codex): retain nonstream metadata state
+ (internal/runtime/executor/codex_turn_state.go)
+
+---
+ internal/runtime/executor/codex_turn_state.go | 101 ++++++++++++++++++
+ 1 file changed, 101 insertions(+)
+ create mode 100644 internal/runtime/executor/codex_turn_state.go
+
+diff --git a/internal/runtime/executor/codex_turn_state.go b/internal/runtime/executor/codex_turn_state.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..63ff9965fd02ad3586d79d16e3ea6b419e649700
+--- /dev/null
++++ b/internal/runtime/executor/codex_turn_state.go
+@@ -0,0 +1,101 @@
++package executor
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/tidwall/gjson"
++)
++
++const codexTurnStateResponseHeader = "X-Codex-Turn-State"
++
++// Nonstream Responses discard SSE envelopes, so retain their turn-state in the
++// returned headers. An empty value represents invalid evidence. Multiple values
++// preserve a conflict. Both forms make the guard refuse continuity without
++// reporting a model execution failure or inheriting the outbound token.
++func mergeCodexMetadataTurnState(headers http.Header, event []byte) http.Header {
++	token, present, valid := codexMetadataTurnState(event)
++	if !present {
++		return headers
++	}
++	if !valid {
++		token = ""
++	}
++	if headers == nil {
++		headers = make(http.Header)
++	}
++	count := 0
++	var existing string
++	for key, values := range headers {
++		if strings.EqualFold(key, codexTurnStateResponseHeader) {
++			// A present header with no values is also invalid. Do not repair it
++			// with a later metadata token.
++			if len(values) == 0 {
++				return headers
++			}
++			for _, value := range values {
++				count++
++				existing = value
++			}
++		}
++	}
++	// Once invalid or contradictory, retain the original evidence and stop
++	// growing the header list when an upstream repeats metadata many times.
++	if count > 1 || (count == 1 && (!validCodexTurnState(existing) || existing == token)) {
++		return headers
++	}
++	headers.Add(codexTurnStateResponseHeader, token)
++	return headers
++}
++
++func codexMetadataTurnState(event []byte) (token string, present, valid bool) {
++	if !gjson.ValidBytes(event) {
++		return "", true, false
++	}
++	root := gjson.ParseBytes(event)
++	var headers gjson.Result
++	headerFields := 0
++	root.ForEach(func(key, value gjson.Result) bool {
++		if strings.EqualFold(key.Str, "headers") {
++			headerFields++
++			headers = value
++		}
++		return true
++	})
++	if headerFields == 0 {
++		return "", false, true
++	}
++	if headerFields != 1 || !headers.IsObject() {
++		return "", true, false
++	}
++	count := 0
++	valid = true
++	headers.ForEach(func(key, value gjson.Result) bool {
++		if strings.EqualFold(key.Str, codexTurnStateResponseHeader) {
++			count++
++			token, valid = codexMetadataTurnStateValue(value, 0)
++		}
++		return true
++	})
++	return token, count != 0, valid && count == 1
++}
++
++func codexMetadataTurnStateValue(value gjson.Result, depth int) (string, bool) {
++	if depth > 8 {
++		return "", false
++	}
++	if value.Type == gjson.String {
++		return value.Str, validCodexTurnState(value.Str)
++	}
++	if value.IsArray() {
++		values := value.Array()
++		if len(values) == 1 {
++			return codexMetadataTurnStateValue(values[0], depth+1)
++		}
++	}
++	return "", false
++}
++
++func validCodexTurnState(value string) bool {
++	return strings.TrimSpace(value) != "" && !strings.ContainsAny(value, "\r\n")
++}

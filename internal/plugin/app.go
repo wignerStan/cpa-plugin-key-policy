@@ -60,6 +60,8 @@ func (a *App) handleMethod(method string, request []byte) ([]byte, error) {
 		return a.routeModel(request)
 	case MethodSchedulerPick:
 		return a.pickScheduler(request)
+	case MethodSchedulerAdmit:
+		return a.admitScheduler(request)
 	case MethodResponseInterceptAfter:
 		return a.interceptResponse(request)
 	case MethodUsageHandle:
@@ -147,6 +149,7 @@ func (a *App) registration() Registration {
 			FrontendAuthProviderExclusive: false,
 			ModelRouter:                   true,
 			Scheduler:                     true,
+			SchedulerAdmission:            true,
 			ResponseInterceptor:           true,
 			UsagePlugin:                   true,
 			ManagementAPI:                 true,
@@ -302,23 +305,8 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
-	// A native route delegates both provider and credential selection to CPA.
-	// Resolve it again from the scheduler payload because some host versions do
-	// not propagate frontend-auth metadata into SchedulerPickOptions.Metadata.
-	if rule, _, ok := a.store.Route(http.Header(req.Options.Headers), nil, req.Model); ok &&
-		strings.EqualFold(strings.TrimSpace(rule.Provider), "native") {
-		return OKEnvelope(SchedulerPickResponse{Handled: false})
-	}
-	group := schedulerGroupFromMetadata(req.Options.Metadata)
-	globalMode := a.store.GlobalWeightedRoundRobin()
-	if globalMode {
-		if !a.store.OwnsRequestKey(http.Header(req.Options.Headers)) {
-			// 全局模式仅接管插件自有密钥，原生密钥仍由 CPA 调度。
-			return OKEnvelope(SchedulerPickResponse{Handled: false})
-		}
-		group = ""
-	} else if group == "" && !a.store.OwnsRequestKey(http.Header(req.Options.Headers)) {
-		// 无组兼容路径只能影响插件自己的密钥，原生密钥仍由 CPA 调度。
+	group, handled := a.schedulerRequestGroup(req)
+	if !handled {
 		return OKEnvelope(SchedulerPickResponse{Handled: false})
 	}
 	if len(req.Candidates) == 0 {
@@ -364,6 +352,43 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 
 	picked := a.pickSmoothWeighted(req, group, maxPriority, weighted)
 	return OKEnvelope(SchedulerPickResponse{Handled: true, AuthID: picked.ID})
+}
+
+// Admission shares the scheduler's existing group and weight rules. It includes
+// lower priorities and transiently unavailable auths, and never makes a pick.
+func (a *App) admitScheduler(raw []byte) ([]byte, error) {
+	var req SchedulerPickRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	group, handled := a.schedulerRequestGroup(req)
+	if !handled {
+		return OKEnvelope(SchedulerAdmissionResponse{Handled: false})
+	}
+	ids := make([]string, 0, len(req.Candidates))
+	for _, candidate := range req.Candidates {
+		if (group == "" || a.candidateMatchesGroup(candidate, group)) && schedulerCandidateWeight(candidate) > 0 {
+			ids = append(ids, candidate.ID)
+		}
+	}
+	return OKEnvelope(SchedulerAdmissionResponse{Handled: true, AuthIDs: ids})
+}
+
+func (a *App) schedulerRequestGroup(req SchedulerPickRequest) (string, bool) {
+	// Native routes defer policy to CPA. Resolve again for older hosts that do
+	// not propagate authenticated group metadata to the scheduler.
+	if rule, _, ok := a.store.Route(http.Header(req.Options.Headers), nil, req.Model); ok &&
+		strings.EqualFold(strings.TrimSpace(rule.Provider), "native") {
+		return "", false
+	}
+	group := schedulerGroupFromMetadata(req.Options.Metadata)
+	if a.store.GlobalWeightedRoundRobin() {
+		return "", a.store.OwnsRequestKey(http.Header(req.Options.Headers))
+	}
+	if group == "" && !a.store.OwnsRequestKey(http.Header(req.Options.Headers)) {
+		return "", false
+	}
+	return group, true
 }
 
 func schedulerCandidateUsable(status string) bool {

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index 03e5ac80a19d276d3ef1a806c0910deb362d1e72..95765a60299add716dd28bb5777eb90505823a0d 100644
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -3,6 +3,7 @@ package executor
+ import (
+ 	"bytes"
+ 	"context"
++	"errors"
+ 	"io"
+ 	"net/http"
+ 	"strings"
+@@ -14,13 +15,14 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ 	"github.com/tidwall/sjson"
+ )
+ 
+-func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
++func (e *CodexExecutor) executeStreamOnce(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+ 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
+ 	if opts.Alt == "responses/compact" {
+ 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+@@ -496,6 +498,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 				return
+ 			}
+ 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
++			if errors.Is(errScan, httptransport.ErrResponseBodyTooLarge) {
++				select {
++				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
++				case <-ctx.Done():
++				}
++				return
++			}
+ 		}
+ 		if emittedCount == 0 {
+ 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
+-- 
+2.47.3

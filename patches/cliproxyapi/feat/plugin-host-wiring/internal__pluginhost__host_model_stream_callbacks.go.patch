@@ -1,0 +1,196 @@
+From 7ba50fc6493a3e975d6468c147578519be9b6227 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 05:00:00 -0700
+Subject: [PATCH] feat(guard): isolate verification HTTP sockets
+ (internal/pluginhost/host_model_stream_callbacks.go)
+
+---
+ .../pluginhost/host_model_stream_callbacks.go | 126 +++++++++++++++++-
+ 1 file changed, 122 insertions(+), 4 deletions(-)
+
+diff --git a/internal/pluginhost/host_model_stream_callbacks.go b/internal/pluginhost/host_model_stream_callbacks.go
+index ad3184c..c765343 100644
+--- a/internal/pluginhost/host_model_stream_callbacks.go
++++ b/internal/pluginhost/host_model_stream_callbacks.go
+@@ -3,11 +3,18 @@ package pluginhost
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+ )
+ 
++// Keep local quota failures distinct through the internal stream bridge. Exact
++// pointer identity cannot confuse a same-message upstream error with this marker.
++var localModelStreamLimitError = &handlers.ModelExecutionStreamError{StatusCode: 503, Message: httptransport.ErrResponseBodyTooLarge.Error()}
++
+ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) ([]byte, error) {
+ 	var req rpcHostModelExecutionRequest
+ 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+@@ -19,12 +26,60 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
+ 	if errProxy := validateHostModelProxy(req.ProxyURL); errProxy != nil {
+ 		return nil, errProxy
+ 	}
++	callbackCtxBound, errContext := h.ownedExecutionContext(ctx, req.HostCallbackID)
++	if errContext != nil {
++		return nil, errContext
++	}
++	if bound := pluginapi.ExecutionCallbacksFrom(callbackCtxBound); bound != nil {
++		work, cancel := context.WithCancel(callbackCtxBound)
++		stream, err := bound.Stream(work, req.HostModelExecutionRequest)
++		if callbackCtxBound.Err() != nil {
++			cancel()
++			return nil, callbackCtxBound.Err()
++		}
++		if err != nil {
++			cancel()
++			if response, ok := modelGuardValidationFailure(err); ok {
++				return marshalRPCResult(response)
++			}
++			return nil, err
++		}
++		if stream.Response.Error != "" {
++			cancel()
++			return marshalRPCResult(stream.Response)
++		}
++		chunks := make(chan handlers.ModelExecutionChunk)
++		go func() {
++			defer close(chunks)
++			for {
++				select {
++				case <-work.Done():
++					return
++				case chunk, ok := <-stream.Chunks:
++					if !ok {
++						return
++					}
++					select {
++					case chunks <- handlers.ModelExecutionChunk{Payload: chunk.Payload, Err: boundStreamError(chunk.Err)}:
++					case <-work.Done():
++						return
++					}
++				}
++			}
++		}()
++		stream.Response.StreamID = h.modelStreams.open(req.HostCallbackID, chunks, cancel)
++		h.addCallbackCleanup(req.HostCallbackID, func() { h.modelStreams.close(stream.Response.StreamID) })
++		return marshalRPCResult(stream.Response)
++	}
++	if req.HTTPTransport != "" {
++		return nil, fmt.Errorf("HTTP transport isolation requires bound Codex execution")
++	}
+ 	executor := h.currentModelExecutor()
+ 	if executor == nil {
+ 		return nil, fmt.Errorf("host model executor is unavailable")
+ 	}
+ 	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
+-	callbackCtx := h.resolveCallbackContext(req.HostCallbackID, ctx)
++	callbackCtx := pluginapi.WithCallingPlugin(h.resolveCallbackContext(req.HostCallbackID, ctx), skipPluginID)
+ 	if callbackCtx == nil {
+ 		callbackCtx = context.Background()
+ 	}
+@@ -56,17 +111,41 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
+ }
+ 
+ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]byte, error) {
+-	var req pluginapi.HostModelStreamReadRequest
++	var req struct {
++		pluginapi.HostModelStreamReadRequest
++		HostCallbackID string `json:"host_callback_id"`
++	}
+ 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+ 		return nil, fmt.Errorf("decode host model stream read request: %w", errUnmarshal)
+ 	}
+ 	if h == nil || h.modelStreams == nil {
+ 		return nil, fmt.Errorf("host model stream bridge is unavailable")
+ 	}
++	if err := h.validateModelStreamOwner(ctx, req.StreamID, req.HostCallbackID); err != nil {
++		return nil, err
++	}
++	if req.HostCallbackID != "" {
++		bound, err := h.ownedCallbackContext(ctx, req.HostCallbackID)
++		if err != nil {
++			return nil, err
++		}
++		if pluginapi.ExecutionCallbacksFrom(bound) != nil {
++			ctx = bound
++		}
++	}
+ 	chunk, done, errRead := h.modelStreams.read(ctx, req.StreamID)
++	// Cancellation can race a queued chunk or a closed channel. Never expose
++	// that race as an upstream failure or a successfully completed response.
++	if err := ctx.Err(); err != nil {
++		h.modelStreams.close(req.StreamID)
++		return nil, err
++	}
+ 	if errRead != nil {
+ 		return nil, errRead
+ 	}
++	if chunk.Err == localModelStreamLimitError {
++		return nil, httptransport.ErrResponseBodyTooLarge
++	}
+ 	resp := pluginapi.HostModelStreamReadResponse{
+ 		Payload: append([]byte(nil), chunk.Payload...),
+ 		Done:    done,
+@@ -78,13 +157,55 @@ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]b
+ 	return marshalRPCResult(resp)
+ }
+ 
+-func (h *Host) callHostModelStreamClose(request []byte) ([]byte, error) {
+-	var req pluginapi.HostModelStreamCloseRequest
++func (h *Host) callHostModelStreamCloseContext(ctx context.Context, request []byte) ([]byte, error) {
++	var req struct {
++		pluginapi.HostModelStreamCloseRequest
++		HostCallbackID string `json:"host_callback_id"`
++	}
+ 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+ 		return nil, fmt.Errorf("decode host model stream close request: %w", errUnmarshal)
+ 	}
+ 	if h != nil && h.modelStreams != nil {
++		if err := h.validateModelStreamOwner(ctx, req.StreamID, req.HostCallbackID); err != nil {
++			return nil, err
++		}
+ 		h.modelStreams.close(req.StreamID)
+ 	}
+ 	return marshalRPCResult(rpcEmptyResponse{})
+ }
++
++func boundStreamError(err error) *handlers.ModelExecutionStreamError {
++	if err == nil {
++		return nil
++	}
++	if errors.Is(err, httptransport.ErrResponseBodyTooLarge) {
++		return localModelStreamLimitError
++	}
++	return &handlers.ModelExecutionStreamError{StatusCode: 503, Message: err.Error()}
++}
++
++func (h *Host) callHostModelStreamClose(raw []byte) ([]byte, error) {
++	return h.callHostModelStreamCloseContext(context.Background(), raw)
++}
++func (h *Host) validateModelStreamOwner(ctx context.Context, id, callback string) error {
++	if hostCallbackPluginIDFromContext(ctx) == "" {
++		return nil
++	}
++	h.modelStreams.mu.Lock()
++	entry, found := h.modelStreams.streams[id]
++	h.modelStreams.mu.Unlock()
++	if !found {
++		return nil
++	}
++	owner := entry.ownerCallbackID
++	if callback != "" && callback != owner {
++		return fmt.Errorf("model stream context mismatch")
++	}
++	if owner == "" {
++		// Legacy background streams have no request callback capability.
++		// Bound guarded streams always have one and use the check below.
++		return nil
++	}
++	_, err := h.ownedCallbackContext(ctx, owner)
++	return err
++}

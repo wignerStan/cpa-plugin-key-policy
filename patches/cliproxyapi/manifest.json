@@ -3,126 +3,39 @@
   "output": "build/cliproxyapi",
   "upstream": {
     "url": "https://github.com/router-for-me/CLIProxyAPI.git",
-    "commit": "67465884ca179a8f9098328d03a361b50003fdd7",
-    "version": "v8.0.22"
+    "commit": "2422c6b0f5fe16495320fa29456493874c1977a0",
+    "tree": "42ea68410056d807909a71036dc8607f4501474c",
+    "version": "v8.0.33"
   },
-  "patches": [
-    {
-      "order": 1,
-      "path": "patches/cliproxyapi/0001-feat-plugins-expose-v1-models-to-response-interceptors.patch",
-      "commit": "a54d035d6d79b6bdabd78beb7ca5df5a16d0ff35",
-      "sha256": "40cfd00338544f057a20ae1fe2b7ac0676a8724d3419966f209d15655196594e"
-    },
-    {
-      "order": 2,
-      "path": "patches/cliproxyapi/0002-feat-plugins-pass-host-config-path-to-lifecycle-plugins.patch",
-      "commit": "62dcea63475ce02ae16a2aac51d42712027ec4bb",
-      "sha256": "48c91686cd33817241f5272d73ac65ccb8240b9d365fbce6e932187f65aba3e3"
-    },
-    {
-      "order": 3,
-      "path": "patches/cliproxyapi/0003-feat-models-gate-native-key-model-listings-by-config.patch",
-      "sha256": "45b15fd4f7eae1dc3f825c03d9264c291c5cffaea9c0afa31818722e3d0c5cfb",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 8d2b6ee7c1bcb9f77f39a4d3f3192605f3a7ce89."
-    },
-    {
-      "order": 4,
-      "path": "patches/cliproxyapi/0004-feat-codex-normalize-response-metadata-and-tag-execution-session-context.patch",
-      "sha256": "7fa4624c3e8d11c5ca87a69d32162fa871870de914e6633f309a91492d7c994f",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 707a6bca6c7108bce950e82105340e03b9903db8."
-    },
-    {
-      "order": 5,
-      "path": "patches/cliproxyapi/0005-feat-codex-configurable-thread-title-session-naming-across-websocket-and-https-default-allow.patch",
-      "sha256": "cde94249ed034d513d04330eeced434c10101eeeec44d8b2ac68b6d631f17997",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 3e6d3330c39541bf9663775b0e113a4f702abfb9."
-    },
-    {
-      "order": 6,
-      "path": "patches/cliproxyapi/0006-feat-codex-add-websocket-and-https-dump-via-logrus-debug-linux-only-default-off.patch",
-      "sha256": "3676b3d933bc0cfbb826a474ad0a676593e584625617329c52ff3194f55985aa",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 7a24ee3b701ba3a7f787957b00c0e615d2a549b3."
-    },
-    {
-      "order": 7,
-      "path": "patches/cliproxyapi/0007-feat-logging-add-trace-level-logging-and-switch-websocket-and-https-dump-to-trace.patch",
-      "sha256": "6f5d422680a275c543d06430e887db07a167d03b0a65987de31746f30ea4f9e2",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 5dd1fc352c1e34c72ad8af5ad9bc1fc9bb3f5f8b."
-    },
-    {
-      "order": 8,
-      "path": "patches/cliproxyapi/0008-fix-use-v8-plugin-API-for-model-list-interception.patch",
-      "sha256": "4346cd64fb690a97d2a7509e79b668cedfe6c68ada3e8f120036c0501975abd9",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 7bf71900a8cda6cd3eedcdd03393e0d20574ef43."
-    },
-    {
-      "order": 9,
-      "path": "patches/cliproxyapi/0009-feat-logging-dump-full-raw-payload-in-trace-log.patch",
-      "commit": "181ef62ddbe772926e41bbaf15831cf11d0dea2e",
-      "sha256": "de96d74477aaeed8cc4ea14af399832e6ce1c2a7c621691b0fa2e6659e377c7c"
-    },
-    {
-      "order": 10,
-      "path": "patches/cliproxyapi/0010-fix-logging-redact-sensitive-trace-headers.patch",
-      "commit": "66b0530a77ffd7393bbabfb0f991ab6a119e4c3f",
-      "sha256": "6da2ffcd2e07c6fa3dbcf7f0acfc469ef0da48ca957981f1c18e81dc24506748"
-    },
-    {
-      "order": 11,
-      "path": "patches/cliproxyapi/0011-fix-logging-honor-diagnostic-capture-contract.patch",
-      "sha256": "0d997fc620874a8672a99cc4058b713b2e7a32d46c22e7d396dcb9db8ee8fd93",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7. Original local patch commit 9f52fc90d1aef9992890b246500b5a0c1ce1c499."
-    },
-    {
-      "order": 12,
-      "path": "patches/cliproxyapi/0012-feat-logging-hash-metadata-and-separate-lb-cookies.patch",
-      "sha256": "d0914d5f2e5a21fc9b844a236b8f6d7fc156aff6ee821cf55e688a77f84e4f57",
-      "provenance": "Rebased onto official v8.0.22 67465884ca179a8f9098328d03a361b50003fdd7."
-    }
-  ],
   "procedure": "bash scripts/materialize-cliproxyapi.sh",
-  "update_policy": "Advance the official upstream commit and rebase this repository's ordered patches. Do not maintain a parallel CLIProxyAPI fork. Refresh checksums and run scripts/check-cliproxyapi.sh before merging.",
-  "infra_diagnostics": {
-    "source_url": "https://github.com/wignerStan/infra.git",
-    "source_commit": "dd068415f6229673fa5ef915a7139c883aeefdfa",
-    "source_paths": [
-      "go/observability/diagnosticoutput",
-      "go/observability/artifactcapture"
+  "update_policy": "Keep the upstream product outside the parent source tree. Fetch the pinned commit into the ignored build object cache and apply each semantic bundle once. Maintain SDK contracts and host integration in their separate bundles. Replace the owning target patch when changing a file; never add patch-over-patch. Verify the source commit/tree, global target ownership, bundle digests, final tree and runners.",
+  "infra_cache": {
+    "modules": [
+      "github.com/wignerStan/infra/go/cache/disk",
+      "github.com/wignerStan/infra/go/cache/writeback"
     ],
-    "snapshot": "third_party/infra",
-    "files": [
-      {
-        "path": "LICENSE-APACHE",
-        "sha256": "8269e060542eedd21b863fa4842e576c208a263692c7e501c8c1543b30cc40ac"
-      },
-      {
-        "path": "LICENSE-MIT",
-        "sha256": "48e0f542d8d6a5b1ac7bcca0c878a1dadf7007af5481298c83da8889f531189b"
-      },
-      {
-        "path": "go/go.mod",
-        "sha256": "73f17e9590cdc12b82a1ea72bfc39282cadd38ba3e72cdfd2b86c2f13b119a8b"
-      },
-      {
-        "path": "go/observability/artifactcapture/collector.go",
-        "sha256": "2512ad585383abcc8ccbf3a5c3a3a4229dddaea1da33d97b42bef24968b5c225"
-      },
-      {
-        "path": "go/observability/artifactcapture/files.go",
-        "sha256": "04787649aadb3e1894ff11e3449c4074de57579c735a18933b78dde318afefcd"
-      },
-      {
-        "path": "go/observability/diagnosticoutput/capture.go",
-        "sha256": "0165610e7d14e0f096406be73f140c877d4764fe45e27c5266badcbd80075364"
-      },
-      {
-        "path": "go/observability/diagnosticoutput/credentials.go",
-        "sha256": "74b748cea1becb96f25405014cd3e6bb806aab542e25e2c2c63d9aa04c252edf"
-      },
-      {
-        "path": "go/observability/diagnosticoutput/projection.go",
-        "sha256": "80a36eca4d81f2671872456cb98fd95cf31c408226085eaf08fb2b92ccf7199c"
-      }
-    ]
-  }
+    "integration": "direct_local_go_module",
+    "source": "${INFRA_GO_DIR:-$HOME/infra/go}",
+    "copied": false
+  },
+  "infra_hold_buffer": {
+    "integration": "optional_direct_c_header",
+    "build_tag": "cpa_hold_buffer",
+    "platform": "linux/cgo",
+    "source": "${INFRA_GO_DIR}/../c/plugin-interop",
+    "copied": false,
+    "ordinary_abi": "ABI 1 / schema 6 unchanged"
+  },
+  "result_tree": "23602eba00ea424f7f374bb223f8d1f55164691d",
+  "infra_diagnostics": {
+    "integration": "direct_local_go_modules",
+    "modules": [
+      "github.com/wignerStan/infra/go/logging",
+      "github.com/wignerStan/infra/go/observability/diagnosticoutput",
+      "github.com/wignerStan/infra/go/observability/artifactcapture"
+    ],
+    "source": "${INFRA_GO_DIR:-$HOME/infra/go}",
+    "copied": false
+  },
+  "source_relationship": "docs/source-relationships/cliproxyapi-materialization.json"
 }

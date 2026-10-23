@@ -1,0 +1,61 @@
+From f6f5889edf68d11f93ecff7ed365c419e763631a Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/cliproxy/executor/context.go)
+
+---
+ sdk/cliproxy/executor/context.go | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/sdk/cliproxy/executor/context.go b/sdk/cliproxy/executor/context.go
+index 30cbebf544f44b940277a260af0083d5c9c06236..7d05c91ac308bc714c2bdc818034363316b13214 100644
+--- a/sdk/cliproxy/executor/context.go
++++ b/sdk/cliproxy/executor/context.go
+@@ -2,12 +2,14 @@ package executor
+ 
+ import (
+ 	"context"
++	"strings"
+ 	"sync/atomic"
+ )
+ 
+ type downstreamWebsocketContextKey struct{}
+ type requireUpstreamWebsocketContextKey struct{}
+ type upstreamAttemptTrackerContextKey struct{}
++type executionSessionContextKey struct{}
+ 
+ type upstreamAttemptTracker struct {
+ 	attempted atomic.Bool
+@@ -77,3 +79,31 @@ func UpstreamAttempted(ctx context.Context) bool {
+ 	tracker, ok := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker)
+ 	return ok && tracker != nil && tracker.attempted.Load()
+ }
++
++// WithExecutionSessionID tags a long-lived downstream websocket execution session.
++func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
++	sessionID = strings.TrimSpace(sessionID)
++	if sessionID == "" {
++		return ctx
++	}
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
++}
++
++// ExecutionSessionID returns the execution session ID when present.
++func ExecutionSessionID(ctx context.Context) string {
++	if ctx == nil {
++		return ""
++	}
++	raw := ctx.Value(executionSessionContextKey{})
++	switch v := raw.(type) {
++	case string:
++		return strings.TrimSpace(v)
++	case []byte:
++		return strings.TrimSpace(string(v))
++	default:
++		return ""
++	}
++}

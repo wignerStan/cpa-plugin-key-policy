@@ -1,0 +1,23 @@
+From f35cf508f131e7075146686a020338268d5afce9 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_websocket_prewarm.go)
+
+---
+ sdk/api/handlers/openai/openai_responses_websocket_prewarm.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go b/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
+index 0950fda29c160a90de5820c9a32799f224ee4bc4..562dc7a6d8b6f6b74f17291ba770ae0ec629231a 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_prewarm.go
+@@ -45,7 +45,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
+ 		// 	websocketPayloadEventType(payloads[i]),
+ 		// 	websocketPayloadPreview(payloads[i]),
+ 		// )
+-		if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
++		if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payloads[i], time.Now()); errWrite != nil {
+ 			log.Warnf(
+ 				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+ 				sessionID,

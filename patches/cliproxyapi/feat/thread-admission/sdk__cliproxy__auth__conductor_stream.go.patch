@@ -1,0 +1,59 @@
+From 43eb2ff7a6e44ba27cb8a16252834a866c2cd467 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/conductor_stream.go)
+
+---
+ sdk/cliproxy/auth/conductor_stream.go | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
+index 2c1daabb4f9c450a059e615aad050c2a2f89a3be..b7d9acda4b3a161b5146e72ca453d8e5e62cbd93 100644
+--- a/sdk/cliproxy/auth/conductor_stream.go
++++ b/sdk/cliproxy/auth/conductor_stream.go
+@@ -263,7 +263,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 		executionSeq := m.nextExecutionSeq()
+ 		startStream := time.Now()
+-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
++		if errThread := m.beginCodexThreadDispatch(ctx, auth, routeModel, &execOpts); errThread != nil {
++			return nil, errThread
++		}
++		streamResult, errStream := m.streamWithModelGuard(ctx, executor, auth, execReq, execOpts, routeModel)
++		if isModelGuardReselect(errStream) || isRequestStopError(errStream) {
++			return nil, errStream
++		}
+ 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 		if hasUpstreamExecutionAttempt(errStream) {
+ 			upstreamErr = errStream
+@@ -285,7 +291,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
++					if errThread := m.beginCodexThreadDispatch(ctx, auth, routeModel, &execOpts); errThread != nil {
++						return nil, errThread
++					}
++					streamResult, errStream = m.streamWithModelGuard(ctx, executor, auth, execReq, execOpts, routeModel)
++					if isModelGuardReselect(errStream) || isRequestStopError(errStream) {
++						return nil, errStream
++					}
+ 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 					if hasUpstreamExecutionAttempt(errStream) {
+ 						upstreamErr = errStream
+@@ -364,7 +376,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 					ctx = newUpstreamAttemptContext(ctx)
+ 					executionSeq = m.nextExecutionSeq()
+ 					startRetry := time.Now()
+-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
++					if errThread := m.beginCodexThreadDispatch(ctx, auth, routeModel, &execOpts); errThread != nil {
++						return nil, errThread
++					}
++					retryStream, retryErr := m.streamWithModelGuard(ctx, executor, auth, execReq, execOpts, routeModel)
++					if isModelGuardReselect(retryErr) || isRequestStopError(retryErr) {
++						return nil, retryErr
++					}
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
+ 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)

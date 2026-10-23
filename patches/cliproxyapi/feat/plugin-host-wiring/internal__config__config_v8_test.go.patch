@@ -1,0 +1,44 @@
+diff --git a/internal/config/config_v8_test.go b/internal/config/config_v8_test.go
+index e8c6662..ac42c31 100644
+--- a/internal/config/config_v8_test.go
++++ b/internal/config/config_v8_test.go
+@@ -933,3 +933,39 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestCodexThreadCooldownBothConfigLayouts(t *testing.T) {
++	for _, raw := range []string{
++		"codex-thread-cooldown: {enabled: true, cache-dir: /tmp/codex-thread-test}\n",
++		"config-version: 8\nrouting: {cooldown: {codex-thread: {enabled: true, cache-dir: /tmp/codex-thread-test}}}\n",
++	} {
++		cfg, err := ParseConfigBytes([]byte(raw))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !cfg.CodexThreadCooldown.Enabled || cfg.CodexThreadCooldown.CacheDir != "/tmp/codex-thread-test" {
++			t.Fatal(cfg.CodexThreadCooldown)
++		}
++	}
++}
++
++func TestCodexModelGuardTargetsBothConfigLayoutsAndClone(t *testing.T) {
++	settings := `{enabled: true, guard-plugin: cpa-modeltrace, guard-prefixes: [lab], guard-targets: [{auth-ids: [key-a, key-b], base-urls: [https://example.test/v1], models: [lab/model]}]}`
++	for _, raw := range []string{"codex-thread-cooldown: " + settings + "\n", "config-version: 8\nrouting: {cooldown: {codex-thread: " + settings + "}}\n"} {
++		cfg, err := ParseConfigBytes([]byte(raw))
++		if err != nil {
++			t.Fatal(err)
++		}
++		guard := cfg.CodexThreadCooldown
++		if guard.GuardPlugin != "cpa-modeltrace" || len(guard.GuardTargets) != 1 || len(guard.GuardTargets[0].AuthIDs) != 2 || guard.GuardTargets[0].BaseURLs[0] != "https://example.test/v1" || guard.GuardTargets[0].Models[0] != "lab/model" {
++			t.Fatalf("lost target selectors: %+v", guard)
++		}
++		cloned := cfg.CloneForRuntime()
++		cloned.CodexThreadCooldown.GuardTargets[0].AuthIDs[0] = "changed"
++		cloned.CodexThreadCooldown.GuardTargets[0].BaseURLs[0] = "changed"
++		cloned.CodexThreadCooldown.GuardTargets[0].Models[0] = "changed"
++		if cfg.CodexThreadCooldown.GuardTargets[0].AuthIDs[0] != "key-a" || cfg.CodexThreadCooldown.GuardTargets[0].BaseURLs[0] != "https://example.test/v1" || cfg.CodexThreadCooldown.GuardTargets[0].Models[0] != "lab/model" {
++			t.Fatal("clone retained selector slices")
++		}
++	}
++}

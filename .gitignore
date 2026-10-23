@@ -5,6 +5,8 @@
 # built shared libraries (root dist/ only)
 /dist/
 /build/
+/go.work
+/go.work.sum
 .gomodcache/
 .gocache/
 .go-appdata/

@@ -1,0 +1,56 @@
+From fa0a7c2e23507a58aa962132afc32f7fef8f81f9 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/config/origin_models_test.go)
+
+---
+ internal/config/origin_models_test.go | 39 +++++++++++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+ create mode 100644 internal/config/origin_models_test.go
+
+diff --git a/internal/config/origin_models_test.go b/internal/config/origin_models_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c955ecbb59545cfc7bdb65e864aeb15c93235568
+--- /dev/null
++++ b/internal/config/origin_models_test.go
+@@ -0,0 +1,39 @@
++package config
++
++import "testing"
++
++func TestParseConfigOriginModelsEndpointDefaultsAndOptIn(t *testing.T) {
++	defaultCfg, err := ParseConfigBytes([]byte("api-keys: [native]\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if defaultCfg.AllowOriginModelsEndpoint {
++		t.Fatal("allow-origin-models-endpoint defaulted to true")
++	}
++
++	optInCfg, err := ParseConfigBytes([]byte("allow-origin-models-endpoint: true\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !optInCfg.AllowOriginModelsEndpoint {
++		t.Fatal("allow-origin-models-endpoint: true was not parsed")
++	}
++
++	v8Cfg, err := ParseConfigBytes([]byte("config-version: 8\naccess:\n  allow-origin-models-endpoint: true\n"))
++	if err != nil {
++		t.Fatalf("ParseConfigBytes with v8 allow-origin-models-endpoint: %v", err)
++	}
++	if !v8Cfg.AllowOriginModelsEndpoint {
++		t.Fatal("v8 access.allow-origin-models-endpoint: true was not parsed")
++	}
++}
++
++func TestParseConfigTrace(t *testing.T) {
++	cfg, err := ParseConfigBytes([]byte("trace: true\n"))
++	if err != nil {
++		t.Fatalf("ParseConfigBytes with trace: %v", err)
++	}
++	if !cfg.Trace {
++		t.Fatal("trace: true was not parsed")
++	}
++}

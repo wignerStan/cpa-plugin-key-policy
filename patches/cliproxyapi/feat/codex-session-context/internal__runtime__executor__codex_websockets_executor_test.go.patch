@@ -1,0 +1,95 @@
+From be226f10531cade3fcc6170910ef996666924561 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(codex): preserve execution session and response metadata
+ (internal/runtime/executor/codex_websockets_executor_test.go)
+
+---
+ .../codex_websockets_executor_test.go         | 77 +++++++++++++++++++
+ 1 file changed, 77 insertions(+)
+
+diff --git a/internal/runtime/executor/codex_websockets_executor_test.go b/internal/runtime/executor/codex_websockets_executor_test.go
+index 47e957f3f752d6c8785be5ba98f85b207fa2a762..d972658b43f9020b3c5a14ea755e0f50262a6f9d 100644
+--- a/internal/runtime/executor/codex_websockets_executor_test.go
++++ b/internal/runtime/executor/codex_websockets_executor_test.go
+@@ -3290,3 +3290,80 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
+ 		t.Fatalf("expected reason=send_error in log output, got: %s", logOutput)
+ 	}
+ }
++
++func TestPrepareCodexWebsocketStreamRejectsThreadTitleSidecar(t *testing.T) {
++	disabled := false
++	executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ThreadTitleSession: &disabled}})
++	auth := &cliproxyauth.Auth{
++		ID:       "auth-thread-title",
++		Provider: "codex",
++		Attributes: map[string]string{
++			"api_key":    "test-key",
++			"websockets": "true",
++		},
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	_, err := executor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
++		Model:   "gpt-6-astra",
++		Payload: []byte(`{"model":"gpt-6-astra","input":[]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Headers:      headers,
++	})
++	if err == nil {
++		t.Fatal("prepareCodexWebsocketStream accepted thread_title sidecar")
++	}
++	if !strings.Contains(err.Error(), "thread_title") {
++		t.Fatalf("error = %v, want thread_title", err)
++	}
++}
++
++func TestPrepareCodexWebsocketStreamAllowsThreadTitleByDefault(t *testing.T) {
++	executor := NewCodexWebsocketsExecutor(&config.Config{})
++	auth := &cliproxyauth.Auth{
++		ID:       "auth-thread-title-default",
++		Provider: "codex",
++		Attributes: map[string]string{
++			"api_key":    "test-key",
++			"websockets": "true",
++		},
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	_, err := executor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
++		Model:   "gpt-6-astra",
++		Payload: []byte(`{"model":"gpt-6-astra","input":[]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Headers:      headers,
++	})
++	if err != nil {
++		t.Fatalf("prepareCodexWebsocketStream rejected thread_title sidecar by default: %v", err)
++	}
++}
++
++func TestPrepareCodexWebsocketStreamAllowsThreadTitleWhenConfigured(t *testing.T) {
++	enabled := true
++	executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ThreadTitleSession: &enabled}})
++	auth := &cliproxyauth.Auth{
++		ID:       "auth-thread-title-enabled",
++		Provider: "codex",
++		Attributes: map[string]string{
++			"api_key":    "test-key",
++			"websockets": "true",
++		},
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	_, err := executor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
++		Model:   "gpt-6-astra",
++		Payload: []byte(`{"model":"gpt-6-astra","input":[]}`),
++	}, cliproxyexecutor.Options{
++		SourceFormat: sdktranslator.FromString("openai-response"),
++		Headers:      headers,
++	})
++	if err != nil {
++		t.Fatalf("prepareCodexWebsocketStream rejected thread_title sidecar when enabled: %v", err)
++	}
++}

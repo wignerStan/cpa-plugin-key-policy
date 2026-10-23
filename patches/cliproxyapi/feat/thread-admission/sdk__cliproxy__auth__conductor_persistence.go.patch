@@ -1,0 +1,23 @@
+From fbe540d8eed9d89304a29b873a332292960e475d Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/conductor_persistence.go)
+
+---
+ sdk/cliproxy/auth/conductor_persistence.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sdk/cliproxy/auth/conductor_persistence.go b/sdk/cliproxy/auth/conductor_persistence.go
+index 285e37b95f497310c55120e7fc05b167552fdd98..53cb1a991218edbe3ecfee9cac0cf2f91f4975e3 100644
+--- a/sdk/cliproxy/auth/conductor_persistence.go
++++ b/sdk/cliproxy/auth/conductor_persistence.go
+@@ -241,7 +241,7 @@ func mergeAuthSaveDelta(target, before, after *Auth, preserveConcurrent bool) {
+ 	next := reflect.ValueOf(after).Elem()
+ 	for i := 0; i < dst.NumField(); i++ {
+ 		field := dst.Type().Field(i)
+-		if field.PkgPath != "" || field.Name == "ID" || field.Name == "RegistrationEpoch" || field.Name == "CredentialVersion" || field.Name == "Generation" || field.Name == "RejectedAccessToken" {
++		if field.PkgPath != "" || field.Name == "ID" || field.Name == "RegistrationEpoch" || field.Name == "CredentialVersion" || field.Name == "Generation" || field.Name == "AdmissionVersion" || field.Name == "RejectedAccessToken" {
+ 			continue
+ 		}
+ 		d, b, n := dst.Field(i), base.Field(i), next.Field(i)

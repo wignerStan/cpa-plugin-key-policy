@@ -1,0 +1,66 @@
+From 4264160a328f12a356ca5969aeb9a21a6ce67107 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (cmd/server/main.go)
+
+---
+ cmd/server/main.go | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 960d5e53009418de652d51f60e7d097c90b337c2..d721582ee3e3a759ef7a44e01f1dd1a6bb3ec125 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -133,6 +133,7 @@ func main() {
+ 	var standalone bool
+ 	var managementBaseURL string
+ 	var localModel bool
++	var traceMode bool
+ 
+ 	// Define command-line flags for different operation modes.
+ 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
+@@ -164,6 +165,8 @@ func main() {
+ 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
+ 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
+ 
++	flag.BoolVar(&traceMode, "trace", false, "Enable trace logging")
++
+ 	flag.CommandLine.Usage = func() {
+ 		out := flag.CommandLine.Output()
+ 		_, _ = fmt.Fprintf(out, "Usage of %s\n", os.Args[0])
+@@ -192,6 +195,7 @@ func main() {
+ 	}
+ 
+ 	pluginHost := pluginhost.New()
++	pluginHost.SetConfigPath(configPath)
+ 	if !isDiscoverMode {
+ 		if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
+ 			pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
+@@ -201,6 +205,7 @@ func main() {
+ 
+ 	// Parse the command-line flags.
+ 	flag.Parse()
++	pluginHost.SetConfigPath(configPath)
+ 
+ 	if discoverGateways || discoverJSON {
+ 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
+@@ -640,6 +645,10 @@ func main() {
+ 
+ 	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+ 
++	if traceMode {
++		cfg.Trace = true
++	}
++
+ 	// Set the log level based on the configuration.
+ 	util.SetLogLevel(cfg)
+ 
+@@ -682,6 +691,7 @@ func main() {
+ 
+ 	// Register built-in access providers before constructing services.
+ 	configaccess.Register(&cfg.SDKConfig)
++	pluginHost.SetConfigPath(configFilePath)
+ 	pluginHost.ApplyConfig(context.Background(), cfg)
+ 	if configLoadedFromHome && homePluginStatusReady {
+ 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)

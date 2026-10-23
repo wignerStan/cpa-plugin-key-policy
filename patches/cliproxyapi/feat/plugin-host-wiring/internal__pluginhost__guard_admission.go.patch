@@ -1,0 +1,65 @@
+From 71afc216d415be83bb177518f1026ce8bb66c234 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (internal/pluginhost/guard_admission.go)
+
+---
+ internal/pluginhost/guard_admission.go | 48 ++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+ create mode 100644 internal/pluginhost/guard_admission.go
+
+diff --git a/internal/pluginhost/guard_admission.go b/internal/pluginhost/guard_admission.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e54b7b1f383ea032264b82ca734fa126421c22fc
+--- /dev/null
++++ b/internal/pluginhost/guard_admission.go
+@@ -0,0 +1,48 @@
++package pluginhost
++
++import (
++	"fmt"
++	"sync"
++)
++
++const guardExchangeMethod = "model_guard.exchange"
++
++// Limit guard marshaling, native calls and decoding together. Ordinary plugin
++// RPCs and cleanup callbacks do not use this admission pool.
++var guardExchangeSlots = make(chan struct{}, 8)
++
++type guardCallLease struct {
++	mu   sync.Mutex
++	refs int
++}
++
++func acquireGuardCall() (*guardCallLease, error) {
++	select {
++	case guardExchangeSlots <- struct{}{}:
++		return &guardCallLease{refs: 1}, nil
++	default:
++		return nil, fmt.Errorf("model guard call capacity exhausted")
++	}
++}
++
++func (l *guardCallLease) retain() {
++	if l == nil {
++		return
++	}
++	l.mu.Lock()
++	l.refs++
++	l.mu.Unlock()
++}
++
++func (l *guardCallLease) release() {
++	if l == nil {
++		return
++	}
++	l.mu.Lock()
++	l.refs--
++	last := l.refs == 0
++	l.mu.Unlock()
++	if last {
++		<-guardExchangeSlots
++	}
++}

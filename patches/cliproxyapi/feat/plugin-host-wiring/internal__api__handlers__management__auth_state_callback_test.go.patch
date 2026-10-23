@@ -1,0 +1,72 @@
+From e3ff54f89217f95a77dfa8be66bf0eaecb21cd92 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/handlers/management/auth_state_callback_test.go)
+
+---
+ .../management/auth_state_callback_test.go    | 55 +++++++++++++++++++
+ 1 file changed, 55 insertions(+)
+ create mode 100644 internal/api/handlers/management/auth_state_callback_test.go
+
+diff --git a/internal/api/handlers/management/auth_state_callback_test.go b/internal/api/handlers/management/auth_state_callback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..143047f6ee59ff58478c3c119cbcb0d3b91d2542
+--- /dev/null
++++ b/internal/api/handlers/management/auth_state_callback_test.go
+@@ -0,0 +1,55 @@
++package management
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestPluginAuthDisablePersistsNativeConfigExclusion(t *testing.T) {
++	cfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "test-key", BaseURL: "https://example.invalid/v1", ExcludedModels: []string{"blocked-model"}}}}
++	path := filepath.Join(t.TempDir(), "config.yaml")
++	if err := os.WriteFile(path, []byte("config-version: 8\n"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := config.SaveConfigPreserveComments(path, cfg, true); err != nil {
++		t.Fatal(err)
++	}
++	id, _ := synthesizer.NewStableIDGenerator().Next("codex:apikey", "test-key", "https://example.invalid/v1", "", "", "")
++	m := coreauth.NewManager(nil, nil, nil)
++	_, err := m.Register(context.Background(), &coreauth.Auth{ID: id, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"source": "config:codex[test]", "api_key": "test-key", "base_url": "https://example.invalid/v1"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	h := NewHandler(cfg, path, m)
++	reloads := 0
++	h.SetConfigReloadHook(func(context.Context, *config.Config) { reloads++ })
++	state, err := m.AuthState(id, "model")
++	if err != nil {
++		t.Fatal(err)
++	}
++	disabled := true
++	state, err = h.SetAuthState(context.Background(), pluginapi.HostAuthStateRequest{AuthID: id, Model: "model", Version: state.Version, Disabled: &disabled})
++	if err != nil || !state.Disabled || reloads != 1 {
++		t.Fatal("native disable/reload failed", state, reloads, err)
++	}
++	loaded, err := config.LoadConfig(path)
++	if err != nil || len(loaded.CodexKey) != 1 {
++		t.Fatal(err)
++	}
++	found := false
++	for _, model := range loaded.CodexKey[0].ExcludedModels {
++		if model == "*" {
++			found = true
++		}
++	}
++	if !found {
++		t.Fatal("disable not persisted in native excluded-models")
++	}
++}

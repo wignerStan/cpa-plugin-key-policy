@@ -1,0 +1,40 @@
+From c0865824d71b18982dfb094b2455979abadffb00 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(codex): preserve execution session and response metadata
+ (internal/runtime/executor/codex_websockets_executor.go)
+
+---
+ internal/runtime/executor/codex_websockets_executor.go | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/internal/runtime/executor/codex_websockets_executor.go b/internal/runtime/executor/codex_websockets_executor.go
+index 65ec499c690eeb627ab9ed2bec1b4d858ef14b7d..74c983e749f0be37d9be90040babfa6bf71b062a 100644
+--- a/internal/runtime/executor/codex_websockets_executor.go
++++ b/internal/runtime/executor/codex_websockets_executor.go
+@@ -10,6 +10,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	log "github.com/sirupsen/logrus"
+@@ -214,6 +215,7 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
+ 	sess.connMu.Lock()
+ 	conn := sess.conn
+ 	authID := sess.authID
++	wsURL := sess.wsURL
+ 	sess.connMu.Unlock()
+ 	if conn == nil {
+ 		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+@@ -253,6 +255,9 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
+ 	if !authEnabled {
+ 		return fmt.Errorf("websocket credential is no longer enabled")
+ 	}
++	helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
++		URL: wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: authID,
++	})
+ 	if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+ 		return errWrite
+ 	}

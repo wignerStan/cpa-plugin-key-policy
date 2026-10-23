@@ -4,8 +4,8 @@ Codex 0.162 enables immediate interruption by default. A proxy that rejects
 `response.interrupt` can therefore fail when new input steers an active turn.
 The default change is specific to 0.162; the wire message already existed in
 0.161. CLIProxyAPI v8.0.22 includes the official interrupt implementation.
-The host now pins commit `67465884ca179a8f9098328d03a361b50003fdd7`.
-Local patch 0013 is retired in favor of the upstream fix.
+The host now pins v8.0.33 commit `2422c6b0f5fe16495320fa29456493874c1977a0`.
+The former local interrupt patch is retired in favor of the upstream fix.
 
 ## Verified client history
 
@@ -65,14 +65,14 @@ leaves configuration defaults unchanged.
 
 ## Local patches and diagnostics
 
-The ordered patch set retains patches 0001–0012. Patch 0012 preserves private,
+The consolidated infra diagnostics patch preserves private,
 bounded diagnostic capture through the new reader and interrupt writer. It
 captures the original downstream frame once, including binary frames, and uses
 the existing upstream request capture helper. It carries the diagnostic session
 ID through the upstream's new local-interrupt error and response writers.
 These changes do not alter interrupt routing, credential selection, or payloads.
 
-Patch 0004 preserves `codex.response.metadata` for Codex model ETag updates.
+The Codex session-context patch preserves `codex.response.metadata` for Codex model ETag updates.
 When that event carries turn state, a separate, minimal `response.metadata`
 event supplies it to the client. See the [metadata compatibility notes](codex-response-metadata.md)
 for the captured evidence and transport contract.
@@ -84,7 +84,7 @@ allowed. Native model-list gating remains unchanged. Upstream's new
 does not extend the existing list gate to that new route.
 
 The ignored materialized source is a build result. The infra translator's separate
-SDK v7.3.20 pin is unchanged. The host uses official v8.0.22 plus the local ordered,
+SDK v7.3.20 pin is unchanged. The host uses official v8.0.33 plus the local ordered,
 checksummed patches, with no parallel source fork.
 
 ## Temporary client workaround
@@ -100,7 +100,9 @@ instant_interrupt = false
 It disables immediate preemption. This remains a client fallback when the native
 WebSocket route is unavailable.
 
-## Verification
+## Verification of the v8.0.22 integration
+
+For the current rebase checks, see [v8.0.33 and API-key web search](cliproxyapi-v8.0.33-web-search.md).
 
 The ordered 12-patch materialization check and CPA module tests passed. Official
 interrupt tests passed for steering disabled and enabled, exact control bytes,

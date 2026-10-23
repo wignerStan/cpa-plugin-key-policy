@@ -1,0 +1,66 @@
+From b66f527eb2c15336728fc1c77fc20c721e9b0e60 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/handlers.go)
+
+---
+ sdk/api/handlers/handlers.go | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
+index 5e8df3a7cbc49d5da88d0997c68e1d9efe8b77a2..bb7ad35e8e7099ef12d678acf04112ca9e859a87 100644
+--- a/sdk/api/handlers/handlers.go
++++ b/sdk/api/handlers/handlers.go
+@@ -15,6 +15,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+@@ -266,7 +267,22 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
+ 		}
+ 	}
+ 
+-	meta := make(map[string]any)
++	// A host identity, independent of user-supplied idempotency or session IDs.
++	meta := map[string]any{"model_guard_request_id": uuid.NewString()}
++	if ginCtx != nil {
++		if raw, ok := ginCtx.Get("accessMetadata"); ok {
++			switch metadata := raw.(type) {
++			case map[string]string:
++				if group := metadata["group"]; group != "" {
++					meta["group"] = group
++				}
++			case map[string]any:
++				if group, ok := metadata["group"].(string); ok {
++					meta["group"] = group
++				}
++			}
++		}
++	}
+ 	if key != "" {
+ 		meta[idempotencyKeyMetadataKey] = key
+ 	}
+@@ -287,7 +303,8 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
+ 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
+ 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+ 	}
+-	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
++	callerScope := requestCallerScope(ginCtx)
++	if callerScope != "" {
+ 		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
+ 	}
+ 	if disallowFreeAuthFromContext(ctx) {
+@@ -681,6 +698,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
+ // StartNonStreamingKeepAlive emits blank lines every 5 seconds while waiting for a non-streaming response.
+ // It returns a stop function that must be called before writing the final response.
+ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.Context) func() {
++	if h != nil && h.AuthManager != nil && h.AuthManager.ModelGuardEnabled() {
++		return func() {}
++	}
+ 	if h == nil || c == nil {
+ 		return func() {}
+ 	}

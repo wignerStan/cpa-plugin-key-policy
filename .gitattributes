@@ -1,3 +1,4 @@
 # Mail patches contain leading context spaces before Go tabs; check source files
 # after strict application rather than interpreting patch syntax as indentation.
-patches/cliproxyapi/*.patch -whitespace
+patches/cliproxyapi/**/*.patch -whitespace
+patches/cliproxyapi-sdk/**/*.patch -whitespace

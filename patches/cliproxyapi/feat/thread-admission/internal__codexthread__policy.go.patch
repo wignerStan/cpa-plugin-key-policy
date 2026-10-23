@@ -1,0 +1,134 @@
+From 2b8aba01d87236dbc33566fc262b489cd95ad291 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (internal/codexthread/policy.go)
+
+---
+ internal/codexthread/policy.go | 117 +++++++++++++++++++++++++++++++++
+ 1 file changed, 117 insertions(+)
+ create mode 100644 internal/codexthread/policy.go
+
+diff --git a/internal/codexthread/policy.go b/internal/codexthread/policy.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..49dda72a535bc1881eb963c1bd5e5cd5e17d37ff
+--- /dev/null
++++ b/internal/codexthread/policy.go
+@@ -0,0 +1,117 @@
++// Package codexthread reads plugin-owned thread exclusions. It never writes them.
++package codexthread
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"time"
++
++	"github.com/wignerStan/infra/go/cache/disk"
++	"github.com/wignerStan/infra/go/cache/writeback"
++)
++
++const ThreadTTL = time.Hour
++
++type Scope struct {
++	Caller string `json:"caller"`
++	Prefix string `json:"prefix"`
++	Thread string `json:"thread"`
++	Model  string `json:"model"`
++}
++type Target struct {
++	AuthID   string `json:"auth_id"`
++	Model    string `json:"model"`
++	Revision string `json:"revision"`
++}
++type DisabledLease struct {
++	BaselineID string    `json:"baseline_id"`
++	Until      time.Time `json:"until"`
++}
++type Store struct {
++	directory string
++	cache     *disk.Store
++	records   *writeback.Cache
++	now       func() time.Time
++}
++
++func Open(dir string) (*Store, error) { return openClock(dir, time.Now) }
++func openClock(dir string, now func() time.Time) (*Store, error) {
++	// No SingleWriter ownership and no Put/Delete calls: this is a clean L1 reader.
++	d, err := disk.Open(disk.Options{Directory: dir, DiskEntries: 100000, MaxValueBytes: 16384, Now: now})
++	if err != nil {
++		return nil, err
++	}
++	c, err := writeback.NewDisk(d, writeback.Options{MemoryBytes: 64 << 20, PendingBytes: 8 << 20, Now: now})
++	if err != nil {
++		d.Close()
++		return nil, err
++	}
++	return &Store{dir, d, c, now}, nil
++}
++func (s *Store) Close() error {
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	return errors.Join(s.records.Close(ctx), s.cache.Close())
++}
++func disabledKey(scope Scope, t Target) string {
++	b, _ := json.Marshal([]string{scope.Caller, scope.Thread, t.AuthID})
++	sum := sha256.Sum256(b)
++	return "disabled-thread-target:" + hex.EncodeToString(sum[:])
++}
++func (s Scope) Validate() error {
++	if s.Caller == "" || s.Thread == "" || s.Model == "" {
++		return errors.New("caller, thread and model required")
++	}
++	return nil
++}
++
++// Check reads disk on the final dispatch/release boundary. Watch notifications
++// are asynchronous and therefore cannot authorize release on their own.
++func (s *Store) Check(ctx context.Context, scope Scope, t Target, fresh bool) error {
++	if scope.Caller == "" || scope.Thread == "" {
++		return nil
++	}
++	key := disabledKey(scope, t)
++	var b []byte
++	var found bool
++	var err error
++	if fresh {
++		err = s.cache.Update(ctx, func(tx *disk.Transaction) error { b, found, err = tx.Get(key); return err })
++	} else {
++		b, found, err = s.records.Get(ctx, key)
++	}
++	if err != nil {
++		return err
++	}
++	if !found {
++		return nil
++	}
++	var v DisabledLease
++	if json.Unmarshal(b, &v) != nil || v.BaselineID == "" || v.Until.IsZero() || v.Until.After(s.now().Add(ThreadTTL)) {
++		return errors.New("invalid thread exclusion record")
++	}
++	if s.now().Before(v.Until) {
++		return ErrExcluded
++	}
++	return nil
++}
++
++var ErrExcluded = errors.New("thread target lease disabled")
++
++func (s *Store) Filter(ctx context.Context, scope Scope, targets []Target) ([]Target, bool, error) {
++	out := make([]Target, 0, len(targets))
++	for _, t := range targets {
++		err := s.Check(ctx, scope, t, false)
++		if errors.Is(err, ErrExcluded) {
++			continue
++		}
++		if err != nil {
++			return nil, false, err
++		}
++		out = append(out, t)
++	}
++	return out, false, nil
++}

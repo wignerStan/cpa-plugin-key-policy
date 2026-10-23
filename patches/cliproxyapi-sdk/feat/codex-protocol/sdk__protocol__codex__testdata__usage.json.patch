@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/testdata/usage.json)
+
+---
+diff --git a/sdk/protocol/codex/testdata/usage.json b/sdk/protocol/codex/testdata/usage.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..2849ab02fcc23a9318d8358a45ab2c9d9e20b6aa
+--- /dev/null
++++ b/sdk/protocol/codex/testdata/usage.json
+@@ -0,0 +1,77 @@
++[
++  {
++    "name": "unknown input",
++    "wire": "{}",
++    "valid": false
++  },
++  {
++    "name": "zero input",
++    "wire": "{\"input_tokens\":0}",
++    "valid": true
++  },
++  {
++    "name": "unknown reads",
++    "wire": "{\"input_tokens\":100}",
++    "valid": true
++  },
++  {
++    "name": "read not write",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":20}}",
++    "valid": true
++  },
++  {
++    "name": "overlapping writes",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":21}}",
++    "valid": false
++  },
++  {
++    "name": "negative",
++    "wire": "{\"input_tokens\":-1}",
++    "valid": false
++  },
++  {
++    "name": "duplicate input",
++    "wire": "{\"input_tokens\":100,\"input_tokens\":100}",
++    "valid": false
++  },
++  {
++    "name": "null write",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cache_write_tokens\":null}}",
++    "valid": false
++  },
++  {
++    "name": "unrelated attribution extension",
++    "wire": "{\"input_tokens\":100,\"attribution\":{\"future\":true}}",
++    "valid": true
++  },
++  {
++    "name": "explicit empty partition",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":0},\"attribution\":{\"items\":{}}}",
++    "valid": false
++  },
++  {
++    "name": "complete partition",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":80,\"cached_tokens\":50}},\"request_fields\":{\"instructions\":{\"input_tokens\":20,\"cached_tokens\":20}}}}",
++    "valid": true
++  },
++  {
++    "name": "hidden rows",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":80,\"cached_tokens\":50}}}}",
++    "valid": false
++  },
++  {
++    "name": "duplicate identity",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70},\"a\":{\"input_tokens\":100,\"cached_tokens\":70}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested overcount",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70,\"content\":[{\"input_tokens\":101,\"cached_tokens\":70}]}}}}",
++    "valid": false
++  },
++  {
++    "name": "nested descendant overcount",
++    "wire": "{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":70},\"attribution\":{\"items\":{\"a\":{\"input_tokens\":100,\"cached_tokens\":70,\"content\":[{\"input_tokens\":50,\"cached_tokens\":40,\"content\":[{\"input_tokens\":51,\"cached_tokens\":40}]}]}}}}",
++    "valid": false
++  }
++]

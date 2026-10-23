@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/tools.go)
+
+---
+diff --git a/sdk/protocol/codex/tools.go b/sdk/protocol/codex/tools.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9cd8204058a22877398c6d972192d355e8139b7
+--- /dev/null
++++ b/sdk/protocol/codex/tools.go
+@@ -0,0 +1,165 @@
++package codex
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"strings"
++)
++
++type Tool struct {
++	Type       string          `json:"type"`
++	Name       string          `json:"name"`
++	Tools      json.RawMessage `json:"tools"`
++	Parameters struct {
++		Properties map[string]json.RawMessage `json:"properties"`
++	} `json:"parameters"`
++}
++
++func ToolNames(raw json.RawMessage, prefix string, depth int, budget *int, names map[string]string) bool {
++	if depth > 8 {
++		return false
++	}
++	var tools []Tool
++	if json.Unmarshal(raw, &tools) != nil || tools == nil {
++		return false
++	}
++	for _, tool := range tools {
++		*budget--
++		if *budget < 0 || tool.Type == "" {
++			return false
++		}
++		if tool.Type == "namespace" {
++			if tool.Name == "" || !ToolNames(tool.Tools, prefix+tool.Name+".", depth+1, budget, names) {
++				return false
++			}
++		} else if tool.Name != "" {
++			names[prefix+tool.Name] = tool.Type
++		} else {
++			names[prefix+tool.Type] = tool.Type
++		}
++	}
++	return true
++}
++
++func RequestToolNames(raw []byte) (map[string]string, bool) {
++	var request struct {
++		Tools json.RawMessage `json:"tools"`
++		Input []struct {
++			Type  string          `json:"type"`
++			Tools json.RawMessage `json:"tools"`
++		} `json:"input"`
++	}
++	if json.Unmarshal(raw, &request) != nil {
++		return nil, false
++	}
++	names, budget := map[string]string{}, 1024
++	if len(request.Tools) > 0 && string(request.Tools) != "null" && !ToolNames(request.Tools, "", 0, &budget, names) {
++		return nil, false
++	}
++	for _, item := range request.Input {
++		if item.Type == "additional_tools" && !ToolNames(item.Tools, "", 0, &budget, names) {
++			return nil, false
++		}
++	}
++	return names, true
++}
++
++// Native Lite puts the tool table and instruction prefix in input items. Keep
++// their original IDs and give only plugin-authored items a new identity, as the
++// Codex history writer does. Subsequent steers replay these items unchanged.
++func IsLite(headers http.Header, input []json.RawMessage) bool {
++	for name, values := range headers {
++		if strings.EqualFold(name, "x-openai-internal-codex-responses-lite") {
++			for _, value := range values {
++				if strings.EqualFold(strings.TrimSpace(value), "true") {
++					return true
++				}
++			}
++		}
++	}
++	for _, raw := range input {
++		_, kind, _ := HistoryItem(raw)
++		if kind == "additional_tools" {
++			return true
++		}
++	}
++	return false
++}
++
++func HistoryItem(raw json.RawMessage) (map[string]json.RawMessage, string, error) {
++	item, err := EvidenceFields(raw)
++	if err != nil {
++		return nil, "", errors.New("invalid_probe_history_item")
++	}
++	var kind string
++	if value, exists := item["type"]; exists {
++		if json.Unmarshal(value, &kind) != nil || kind == "" {
++			return nil, "", errors.New("invalid_probe_history_type")
++		}
++	} else if _, exists := item["role"]; exists {
++		kind = "message"
++	} else {
++		return nil, "", errors.New("missing_probe_history_type")
++	}
++	return item, kind, nil
++}
++
++func ToolCallID(item map[string]json.RawMessage, kind string) (string, error) {
++	var id, name string
++	var value *string
++	field := "arguments"
++	if kind == "custom_tool_call" {
++		field = "input"
++	}
++	if json.Unmarshal(item["call_id"], &id) != nil || strings.TrimSpace(id) == "" || json.Unmarshal(item["name"], &name) != nil || strings.TrimSpace(name) == "" || json.Unmarshal(item[field], &value) != nil || value == nil {
++		return "", errors.New("invalid_probe_tool_call")
++	}
++	return id, nil
++}
++
++// Every tool call already in the business or verification history must have one
++// matching output. Only calls in the newly held response may still be pending.
++func ValidateToolHistory(input []json.RawMessage) (map[string]string, error) {
++	seen := make(map[string]string)
++	pending := make(map[string]string)
++	for _, raw := range input {
++		item, kind, err := HistoryItem(raw)
++		if err != nil {
++			return nil, err
++		}
++		switch kind {
++		case "function_call", "custom_tool_call":
++			id, err := ToolCallID(item, kind)
++			if err != nil {
++				return nil, err
++			}
++			if _, exists := seen[id]; exists {
++				return nil, errors.New("duplicate_probe_tool_call")
++			}
++			seen[id], pending[id] = kind, kind
++		case "function_call_output", "custom_tool_call_output":
++			var id string
++			if json.Unmarshal(item["call_id"], &id) != nil || pending[id]+"_output" != kind {
++				return nil, errors.New("unpaired_probe_tool_output")
++			}
++			value, exists := item["output"]
++			value = json.RawMessage(strings.TrimSpace(string(value)))
++			if !exists || len(value) == 0 || (value[0] != '"' && value[0] != '[') {
++				return nil, errors.New("missing_probe_tool_output")
++			}
++			delete(pending, id)
++		default:
++			if strings.HasSuffix(kind, "_call") || strings.HasSuffix(kind, "_output") {
++				return nil, errors.New("unsupported_probe_tool_type")
++			}
++		}
++	}
++	if len(pending) != 0 {
++		return nil, errors.New("unpaired_probe_tool_call")
++	}
++	return seen, nil
++}
++func IsCompactionType(kind string) bool {
++	return kind == "compaction" || kind == "compaction_summary" || kind == "context_compaction"
++}

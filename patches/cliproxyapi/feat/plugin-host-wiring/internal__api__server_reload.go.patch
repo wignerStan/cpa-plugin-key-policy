@@ -1,0 +1,32 @@
+From c0fa34ba6f0d47c60ecb282f0fb2ec85acc17890 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_reload.go)
+
+---
+ internal/api/server_reload.go | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/internal/api/server_reload.go b/internal/api/server_reload.go
+index 36c8e1cebe99b4605702bd91e1ee0bfb1776b9b2..56dd2ed145d17e0ac609be99d0190b5ed65d2422 100644
+--- a/internal/api/server_reload.go
++++ b/internal/api/server_reload.go
+@@ -92,6 +92,8 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+ 		}
+ 	}
+ 
++	logging.ConfigureCodexDump(cfg.CodexDump, logging.ResolveLogDirectory(cfg))
++
+ 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
+ 		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+ 	}
+@@ -129,7 +131,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
+ 	}
+ 
+ 	// Update log level dynamically when debug flag changes
+-	if oldCfg == nil || oldCfg.Debug != cfg.Debug {
++	if oldCfg == nil || oldCfg.Debug != cfg.Debug || oldCfg.Trace != cfg.Trace {
+ 		util.SetLogLevel(cfg)
+ 	}
+ 

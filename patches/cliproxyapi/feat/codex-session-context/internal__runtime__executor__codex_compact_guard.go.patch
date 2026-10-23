@@ -1,0 +1,625 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/internal/runtime/executor/codex_compact_guard.go b/internal/runtime/executor/codex_compact_guard.go
+new file mode 100644
+index 0000000..c9967ef
+--- /dev/null
++++ b/internal/runtime/executor/codex_compact_guard.go
+@@ -0,0 +1,613 @@
++package executor
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"sort"
++	"strings"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/guardhttp"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/tidwall/gjson"
++)
++
++const codexCompactHoldLimit = 8 << 20
++const codexCompactChunkLimit = 65536
++
++// One request owns one slot through validation and downstream release.
++var codexCompactSlots = make(chan struct{}, 8)
++
++type codexCompactGuardError struct{ reason string }
++
++func (e codexCompactGuardError) Error() string       { return "codex_compact_check: " + e.reason }
++func (e codexCompactGuardError) StatusCode() int     { return http.StatusBadGateway }
++func (e codexCompactGuardError) IsRequestStop() bool { return true }
++
++// Only exhausted upstream validation is retryable by the model guard. Local
++// quotas, cancellation and malformed requests must remain ordinary host errors.
++func (e codexCompactGuardError) ModelGuardRetryReason() string {
++	if strings.HasPrefix(e.reason, "exhausted ") {
++		return "upstream_compact_validation_failed"
++	}
++	return ""
++}
++
++func compactItem(kind string) bool {
++	return kind == "compaction" || kind == "compaction_summary" || kind == "context_compaction"
++}
++
++func compactBoundary(body []byte) (generating, restoring bool) {
++	for _, item := range gjson.GetBytes(body, "input").Array() {
++		generating = generating || item.Get("type").String() == "compaction_trigger"
++		restoring = restoring || compactItem(item.Get("type").String())
++	}
++	return
++}
++
++func (e *CodexExecutor) needsCompactToolGuard(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
++	if opts.Alt != "" || !helps.IsNativeCodexRequest(req.Payload, opts) {
++		return false
++	}
++	generating, _ := compactBoundary(req.Payload)
++	// An old compact is ordinary history, not a new restoration boundary.
++	// Validate newly generated artifacts before release, never every later turn.
++	return generating
++}
++
++func (e *CodexExecutor) compactToolCheckEnabled() bool {
++	return e.cfg == nil || e.cfg.Codex.CompactToolCheck == nil || *e.cfg.Codex.CompactToolCheck
++}
++
++func (e *CodexExecutor) compactAttemptLimit() int {
++	if e.cfg == nil || e.cfg.Codex.CompactMaxAttempts <= 0 {
++		return 5
++	}
++	return min(e.cfg.Codex.CompactMaxAttempts, 16)
++}
++
++// The ordinary executor still owns translation, usage accounting and raw dumps.
++// Only native Lite compact boundaries wait for a terminal response here.
++func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
++	if !e.needsCompactToolGuard(req, opts) {
++		return e.executeStreamOnce(ctx, auth, req, opts)
++	}
++	select {
++	case codexCompactSlots <- struct{}{}:
++	default:
++		return nil, codexCompactGuardError{"hold capacity exhausted"}
++	}
++	releaseSlot := true
++	defer func() {
++		if releaseSlot {
++			<-codexCompactSlots
++		}
++	}()
++	var expected map[string]string
++	if e.compactToolCheckEnabled() {
++		var err error
++		expected, err = compactRequestTools(req.Payload)
++		if err != nil {
++			return nil, err
++		}
++	}
++	limit := e.compactAttemptLimit()
++
++	for attempt := 1; attempt <= limit; attempt++ {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		held, err := e.collectCompactStream(ctx, auth, req, opts)
++		if err == nil {
++			err = e.checkCompactRestoration(ctx, auth, req, opts, held.outputDone, expected)
++		}
++		if err == nil {
++			out := make(chan cliproxyexecutor.StreamChunk)
++			releaseSlot = false
++			go func() {
++				defer func() { <-codexCompactSlots; close(out) }()
++				for _, chunk := range held.chunks {
++					select {
++					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
++					case <-ctx.Done():
++						return
++					}
++				}
++			}()
++			return &cliproxyexecutor.StreamResult{Headers: held.headers, Chunks: out}, nil
++		}
++		if ctx.Err() != nil {
++			return nil, ctx.Err()
++		}
++		if !retryCompactCheck(err) {
++			return nil, err
++		}
++		if attempt == limit {
++			return nil, codexCompactGuardError{fmt.Sprintf("exhausted %d attempts: %s", limit, compactFailureReason(err))}
++		}
++		// Keep the physical session and request input. This is a compact defect,
++		// not failed model identity evidence. No account cooldown is recorded.
++		select {
++		case <-time.After(time.Duration(min(attempt, 4)) * 200 * time.Millisecond):
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		}
++	}
++	panic("unreachable compact retry limit")
++}
++
++func compactFailureReason(err error) string {
++	var checked codexCompactGuardError
++	if errors.As(err, &checked) {
++		return checked.reason
++	}
++	return "upstream compact request failed"
++}
++
++func retryCompactCheck(err error) bool {
++	var checked codexCompactGuardError
++	if errors.As(err, &checked) {
++		return checked.reason != "hold byte limit" && checked.reason != "hold chunk limit"
++	}
++	var status interface{ StatusCode() int }
++	if errors.As(err, &status) {
++		return status.StatusCode() == http.StatusRequestTimeout || status.StatusCode() >= 500
++	}
++	return !errors.Is(err, httptransport.ErrResponseBodyTooLarge) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, guardhttp.ErrIsolation)
++}
++
++type compactHeldStream struct {
++	chunks     [][]byte
++	response   []byte
++	outputDone []json.RawMessage
++	headers    http.Header
++}
++
++func (e *CodexExecutor) collectCompactStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, catalogOnly ...bool) (compactHeldStream, error) {
++	var held compactHeldStream
++	work, cancel := context.WithCancel(httptransport.WithResponseBodyLimit(ctx, codexCompactHoldLimit))
++	defer cancel()
++	stream, err := e.executeStreamOnce(work, auth, req, opts)
++	if err != nil {
++		if errors.Is(err, httptransport.ErrResponseBodyTooLarge) {
++			return held, codexCompactGuardError{"hold byte limit"}
++		}
++		return held, err
++	}
++	if stream == nil || stream.Chunks == nil {
++		return held, codexCompactGuardError{"missing stream"}
++	}
++	held.headers = stream.Headers.Clone()
++	var raw bytes.Buffer
++	for {
++		select {
++		case <-work.Done():
++			return held, work.Err()
++		case chunk, ok := <-stream.Chunks:
++			if !ok {
++				goto complete
++			}
++			if chunk.Err != nil {
++				if errors.Is(chunk.Err, httptransport.ErrResponseBodyTooLarge) {
++					return held, codexCompactGuardError{"hold byte limit"}
++				}
++				return held, chunk.Err
++			}
++			if raw.Len()+len(chunk.Payload)+1 > codexCompactHoldLimit {
++				return held, codexCompactGuardError{"hold byte limit"}
++			}
++			if len(held.chunks) >= codexCompactChunkLimit {
++				return held, codexCompactGuardError{"hold chunk limit"}
++			}
++			if len(chunk.Payload) > 0 {
++				// Native executor chunks are complete SSE lines, not arbitrary
++				// network fragments. Only the private restore check can stop early.
++				if len(catalogOnly) > 0 && catalogOnly[0] {
++					data := bytes.TrimSpace(chunk.Payload)
++					if bytes.HasPrefix(data, []byte("data:")) {
++						data = bytes.TrimSpace(data[5:])
++					}
++					kind := gjson.GetBytes(data, "type").String()
++					if json.Valid(data) && (kind == "response.created" || kind == "response.in_progress") {
++						response := gjson.GetBytes(data, "response")
++						if response.Get("tools").IsArray() && len(response.Get("tools").Array()) > 0 {
++							held.response = []byte(response.Raw)
++							return held, nil
++						}
++					}
++				}
++				copied := bytes.Clone(chunk.Payload)
++				held.chunks = append(held.chunks, copied)
++				raw.Write(copied)
++				// Native executor chunks are complete SSE lines without their delimiter.
++				if copied[len(copied)-1] != '\n' {
++					raw.WriteByte('\n')
++				}
++			}
++		}
++	}
++complete:
++	var outputDone []json.RawMessage
++	scanner := helps.NewCodexSSEScanner(ctx, bytes.NewReader(raw.Bytes()), codexCompactHoldLimit)
++	for scanner.Scan() {
++		line := scanner.Bytes()
++		if !bytes.HasPrefix(line, []byte("data:")) {
++			continue
++		}
++		data := bytes.TrimSpace(line[5:])
++		if bytes.Equal(data, []byte("[DONE]")) {
++			continue
++		}
++		if !json.Valid(data) {
++			return held, codexCompactGuardError{"invalid response event"}
++		}
++		switch gjson.GetBytes(data, "type").String() {
++		case "response.output_item.done":
++			// Codex counts only items emitted before the first completed event.
++			item := gjson.GetBytes(data, "item")
++			if held.response == nil && item.IsObject() {
++				outputDone = append(outputDone, json.RawMessage(item.Raw))
++			}
++		case "response.metadata", "codex.response.metadata":
++			held.headers = mergeCodexMetadataTurnState(held.headers, data)
++		case "response.completed":
++			if held.response != nil {
++				return held, codexCompactGuardError{"ambiguous terminal response"}
++			}
++			r := gjson.GetBytes(data, "response")
++			if !r.IsObject() || r.Get("status").String() != "completed" {
++				return held, codexCompactGuardError{"incomplete response"}
++			}
++			held.response = []byte(r.Raw)
++		}
++	}
++	if scanner.Err() != nil || held.response == nil {
++		return held, codexCompactGuardError{"missing completed response"}
++	}
++	held.outputDone = outputDone
++	// Native Lite can carry output only in output_item.done. Use it for the
++	// private check while keeping the original stream chunks unchanged.
++	if len(gjson.GetBytes(held.response, "output").Array()) == 0 && len(outputDone) > 0 {
++		var proof map[string]json.RawMessage
++		_ = json.Unmarshal(held.response, &proof)
++		proof["output"], _ = json.Marshal(outputDone)
++		held.response, _ = json.Marshal(proof)
++	}
++	return held, nil
++}
++
++func (e *CodexExecutor) executeCompactGuardNonstream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++	stream, err := e.ExecuteStream(ctx, auth, req, opts)
++	if err != nil {
++		return cliproxyexecutor.Response{}, err
++	}
++	var raw bytes.Buffer
++	for chunk := range stream.Chunks {
++		if chunk.Err != nil {
++			return cliproxyexecutor.Response{}, chunk.Err
++		}
++		raw.Write(chunk.Payload)
++		if len(chunk.Payload) > 0 && chunk.Payload[len(chunk.Payload)-1] != '\n' {
++			raw.WriteByte('\n')
++		}
++	}
++	if ctx.Err() != nil {
++		return cliproxyexecutor.Response{}, ctx.Err()
++	}
++	scanner := helps.NewCodexSSEScanner(ctx, &raw, codexCompactHoldLimit)
++	for scanner.Scan() {
++		line := scanner.Bytes()
++		if bytes.HasPrefix(line, []byte("data:")) && gjson.GetBytes(bytes.TrimSpace(line[5:]), "type").String() == "response.completed" {
++			return cliproxyexecutor.Response{Payload: []byte(gjson.GetBytes(bytes.TrimSpace(line[5:]), "response").Raw), Headers: stream.Headers}, nil
++		}
++	}
++	return cliproxyexecutor.Response{}, codexCompactGuardError{"missing completed response"}
++}
++
++// Compare declared tool names and kinds, including namespace paths. Generated
++// calls are not evidence of the entire catalog; ordinary text is not a failure.
++func compactToolSet(raw json.RawMessage, prefix string, out map[string]string, depth int) error {
++	if depth > 16 {
++		return codexCompactGuardError{"invalid tool catalog"}
++	}
++	var tools []struct {
++		Type, Name string
++		Tools      json.RawMessage
++	}
++	if json.Unmarshal(raw, &tools) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++		return codexCompactGuardError{"invalid tool catalog"}
++	}
++	for _, t := range tools {
++		if t.Type == "namespace" {
++			if t.Name == "" {
++				return codexCompactGuardError{"invalid tool namespace"}
++			}
++			if err := compactToolSet(t.Tools, prefix+t.Name+".", out, depth+1); err != nil {
++				return err
++			}
++			continue
++		}
++		name := t.Name
++		if name == "" {
++			name = t.Type
++		}
++		if name == "" {
++			return codexCompactGuardError{"invalid tool name"}
++		}
++		key := prefix + name
++		if previous, ok := out[key]; ok && previous != t.Type {
++			return codexCompactGuardError{"conflicting tool kinds"}
++		}
++		out[key] = t.Type
++	}
++	return nil
++}
++
++func compactRequestTools(body []byte) (map[string]string, error) {
++	var request struct {
++		Tools json.RawMessage
++		Input []struct {
++			Type  string
++			Tools json.RawMessage
++		}
++	}
++	if json.Unmarshal(body, &request) != nil {
++		return nil, codexCompactGuardError{"invalid request"}
++	}
++	out := map[string]string{}
++	if len(request.Tools) > 0 && string(request.Tools) != "null" {
++		if err := compactToolSet(request.Tools, "", out, 0); err != nil {
++			return nil, err
++		}
++	}
++	for _, item := range request.Input {
++		if item.Type == "additional_tools" {
++			if err := compactToolSet(item.Tools, "", out, 0); err != nil {
++				return nil, err
++			}
++		}
++	}
++	return out, nil
++}
++
++func checkCompactTools(response []byte, expected map[string]string) error {
++	if len(expected) == 0 {
++		return nil
++	}
++	var r struct{ Tools json.RawMessage }
++	if json.Unmarshal(response, &r) != nil || len(r.Tools) == 0 || string(r.Tools) == "null" {
++		return codexCompactGuardError{"tool catalog evidence missing"}
++	}
++	actual := map[string]string{}
++	if err := compactToolSet(r.Tools, "", actual, 0); err != nil {
++		return err
++	}
++	for name, kind := range expected {
++		if actual[name] != kind {
++			return codexCompactGuardError{"declared tools missing after compact"}
++		}
++	}
++	return nil
++}
++
++// Prefer a function tool: its arguments can be checked as structured JSON.
++// Tool output is never executed. A successful call proves availability of this
++// declared tool, not the completeness of an omitted catalog.
++func compactProbeTool(expected map[string]string) (string, string) {
++	names := make([]string, 0, len(expected))
++	for name := range expected {
++		names = append(names, name)
++	}
++	sort.Strings(names)
++	for _, kind := range []string{"function", "custom"} {
++		for _, name := range names {
++			if expected[name] == kind {
++				return name, kind
++			}
++		}
++	}
++	return "", ""
++}
++
++func compactToolProbeInstruction(body []byte) string {
++	expected, _ := compactRequestTools(body)
++	name, _ := compactProbeTool(expected)
++	if name == "" {
++		return "Internal compact restoration check. Reply only OK. Do not continue the earlier task."
++	}
++	return "Internal compact restoration check. Do not continue the earlier task. Emit exactly one structured call to the declared tool " + name + ". Use harmless arguments that match its declaration. The diagnostic host will discard this call and will not execute it. Do not describe a call in prose."
++}
++
++func checkCompactToolCapability(held compactHeldStream, expected map[string]string) error {
++	if len(expected) == 0 {
++		return nil
++	}
++	tools := gjson.GetBytes(held.response, "tools")
++	if tools.IsArray() && len(tools.Array()) > 0 {
++		return checkCompactTools(held.response, expected)
++	}
++	// A malformed declared catalog is not an omitted catalog.
++	if tools.Exists() && tools.Type != gjson.Null && !tools.IsArray() {
++		return codexCompactGuardError{"invalid tool catalog"}
++	}
++	name, kind := compactProbeTool(expected)
++	if name == "" {
++		return codexCompactGuardError{"tool capability evidence missing"}
++	}
++	calls := 0
++	for _, raw := range held.outputDone {
++		item := gjson.ParseBytes(raw)
++		typ := item.Get("type").String()
++		if typ != "function_call" && typ != "custom_tool_call" {
++			continue
++		}
++		calls++
++		actualName := item.Get("name").String()
++		if ns := item.Get("namespace").String(); ns != "" {
++			actualName = ns + "." + actualName
++		}
++		if actualName != name || item.Get("call_id").String() == "" ||
++			(kind == "function" && typ != "function_call") || (kind == "custom" && typ != "custom_tool_call") {
++			return codexCompactGuardError{"unexpected tool capability call"}
++		}
++		if kind == "function" {
++			args := item.Get("arguments")
++			if args.Type != gjson.String || !json.Valid([]byte(args.String())) || !gjson.Parse(args.String()).IsObject() {
++				return codexCompactGuardError{"invalid tool capability arguments"}
++			}
++		} else if item.Get("input").Type != gjson.String {
++			return codexCompactGuardError{"invalid custom tool capability input"}
++		}
++	}
++	if calls != 1 {
++		return codexCompactGuardError{"tool capability call missing or ambiguous"}
++	}
++	return nil
++}
++
++// Match remote_compact_v2: exactly one Compaction item in output_item.done.
++// compaction_summary is its wire alias; context_compaction is a different item.
++// A terminal output array cannot prove that Codex received the required event.
++func compactGeneratedOutput(output []json.RawMessage) (json.RawMessage, error) {
++	var compact json.RawMessage
++	count := 0
++	for _, item := range output {
++		kind := gjson.GetBytes(item, "type").String()
++		if kind != "compaction" && kind != "compaction_summary" {
++			continue
++		}
++		encrypted := gjson.GetBytes(item, "encrypted_content")
++		if encrypted.Type != gjson.String || encrypted.String() == "" {
++			return nil, codexCompactGuardError{"invalid compact output"}
++		}
++		count++
++		compact = item
++	}
++	if count != 1 {
++		return nil, codexCompactGuardError{fmt.Sprintf("expected exactly one compaction output item, got %d from %d output items", count, len(output))}
++	}
++	return compact, nil
++}
++
++func (e *CodexExecutor) checkCompactRestoration(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, output []json.RawMessage, expected map[string]string) error {
++	compact, err := compactGeneratedOutput(output)
++	if err != nil {
++		return err
++	}
++	if len(expected) == 0 {
++		return nil
++	}
++	probe, probeOpts, err := compactRestorationRequest(req, opts, compact)
++	if err != nil {
++		return err
++	}
++	probeCtx, err := guardhttp.WithPolicy(ctx, guardhttp.HTTP1)
++	if err != nil {
++		return err
++	}
++	probeExecutor := *e
++	if e.cfg != nil {
++		cfg := *e.cfg
++		cfg.Codex.StreamBootstrapBuffering = false
++		probeExecutor.cfg = &cfg
++	}
++	held, err := probeExecutor.collectCompactStream(probeCtx, auth, probe, probeOpts, true)
++	if err != nil {
++		return err
++	}
++	return checkCompactToolCapability(held, expected)
++}
++
++func compactRestorationRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, compact json.RawMessage) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
++	var body map[string]json.RawMessage
++	if json.Unmarshal(req.Payload, &body) != nil {
++		return req, opts, codexCompactGuardError{"invalid compact request"}
++	}
++	var input []json.RawMessage
++	if json.Unmarshal(body["input"], &input) != nil {
++		return req, opts, codexCompactGuardError{"invalid compact input"}
++	}
++	kept := make([]json.RawMessage, 0, len(input))
++	for _, item := range input {
++		kind, role := gjson.GetBytes(item, "type").String(), gjson.GetBytes(item, "role").String()
++		if kind == "additional_tools" || kind == "configuration_update" || role == "developer" || role == "system" {
++			kept = append(kept, item)
++		}
++	}
++	kept = append(kept, compact)
++	message, _ := json.Marshal(map[string]any{"type": "message", "id": "msg_" + uuid.NewString(), "role": "user", "content": []map[string]string{{"type": "input_text", "text": compactToolProbeInstruction(req.Payload)}}})
++	kept = append(kept, message)
++	body["input"], _ = json.Marshal(kept)
++	delete(body, "previous_response_id")
++	delete(body, "max_output_tokens")
++	delete(body, "tool_choice")
++	for _, key := range []string{"metadata", "client_metadata"} {
++		if value, ok := body[key]; ok {
++			body[key] = clearCompactMetadata(value)
++		}
++	}
++	req.Payload, _ = json.Marshal(body)
++	opts.OriginalRequest = req.Payload
++	opts.Headers = opts.Headers.Clone()
++	if opts.Headers == nil {
++		opts.Headers = http.Header{}
++	}
++	for key, values := range opts.Headers {
++		name := strings.ReplaceAll(strings.ToLower(key), "_", "-")
++		switch name {
++		case "x-codex-turn-state", "x-openai-subagent":
++			delete(opts.Headers, key)
++		case "x-codex-turn-metadata":
++			delete(opts.Headers, key)
++			for _, v := range values {
++				opts.Headers.Add(key, string(clearCompactMetadata([]byte(v))))
++			}
++		}
++	}
++	opts.Headers.Set("X-Client-Request-Id", uuid.NewString())
++	opts.Stream = true
++	return req, opts, nil
++}
++
++func clearCompactMetadata(raw json.RawMessage) json.RawMessage {
++	var value any
++	if json.Unmarshal(raw, &value) != nil {
++		return raw
++	}
++	var visit func(any)
++	visit = func(v any) {
++		switch v := v.(type) {
++		case map[string]any:
++			for k, child := range v {
++				n := strings.ReplaceAll(strings.ToLower(k), "_", "-")
++				n = strings.TrimPrefix(n, "ws-request-header-")
++				if n == "compaction" || n == "is-compaction" || n == "x-openai-subagent" || n == "x-codex-turn-state" || n == "request-kind" {
++					delete(v, k)
++				} else if n == "x-codex-turn-metadata" {
++					if encoded, ok := child.(string); ok {
++						v[k] = string(clearCompactMetadata([]byte(encoded)))
++					} else {
++						visit(child)
++					}
++				} else {
++					visit(child)
++				}
++			}
++		case []any:
++			for _, child := range v {
++				visit(child)
++			}
++		}
++	}
++	visit(value)
++	result, _ := json.Marshal(value)
++	return result
++}

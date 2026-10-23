@@ -1,0 +1,33 @@
+From 44fc2f3080c55e1b7ac348b3b59a284ce101784b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/selector.go)
+
+---
+ sdk/cliproxy/auth/selector.go | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/sdk/cliproxy/auth/selector.go b/sdk/cliproxy/auth/selector.go
+index 9010743365c1509587f5cb1b09ba2a8a8c332453..dab236db00517cb5874204e8732b4ec9c522c076 100644
+--- a/sdk/cliproxy/auth/selector.go
++++ b/sdk/cliproxy/auth/selector.go
+@@ -1098,6 +1098,9 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
+ // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
+ // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
++	if isPluginFallback(opts) {
++		return s.fallback.Pick(ctx, provider, model, opts, auths)
++	}
+ 	entry := selectorLogEntry(ctx)
+ 	if opts.Metadata == nil {
+ 		opts.Metadata = make(map[string]any)
+@@ -1622,7 +1625,7 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
+ 
+ // OnResult handles session affinity binding or release based on execution outcome.
+ func (s *SessionAffinitySelector) OnResult(res Result) {
+-	if s == nil || res.AuthID == "" {
++	if s == nil || res.AuthID == "" || isPluginFallback(res.Options) {
+ 		return
+ 	}
+ 

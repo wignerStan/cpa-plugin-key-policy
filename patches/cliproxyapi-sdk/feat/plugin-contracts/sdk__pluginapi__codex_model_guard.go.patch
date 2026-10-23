@@ -1,0 +1,90 @@
+From 606a7d4a9e684c018f2822ef60bc7dc3142047ee Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(sdk): expose guarded execution and auth state callbacks
+ (sdk/pluginapi/codex_model_guard.go)
+
+---
+ sdk/pluginapi/codex_model_guard.go | 73 ++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+ create mode 100644 sdk/pluginapi/codex_model_guard.go
+
+diff --git a/sdk/pluginapi/codex_model_guard.go b/sdk/pluginapi/codex_model_guard.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..de6e64a4a423b20fa26cac937a49beca3bb6ef8e
+--- /dev/null
++++ b/sdk/pluginapi/codex_model_guard.go
+@@ -0,0 +1,73 @@
++package pluginapi
++
++import (
++	"context"
++	"net/http"
++	"time"
++)
++
++// CodexModelGuard is required and fail-closed when configured. Only the host may
++// supply Scope, Route, RuntimeID and Exhausted. This is not a public API.
++type CodexModelGuard interface {
++	ExchangeModelGuard(context.Context, ModelGuardExchange) (ModelGuardDecision, error)
++}
++type ModelGuardScope struct {
++	Caller string `json:"caller"`
++	Prefix string `json:"prefix"`
++	Thread string `json:"thread"`
++	Model  string `json:"model"`
++}
++type ModelGuardRoute struct {
++	AuthID   string `json:"auth_id"`
++	Model    string `json:"model"`
++	Revision string `json:"revision"`
++}
++type ModelGuardObservation struct {
++	Body    []byte      `json:"body"`
++	Headers http.Header `json:"headers"`
++	Error   string      `json:"error,omitempty"`
++}
++type ModelGuardChallenge struct {
++	ID            string `json:"id"`
++	Prompt        string `json:"prompt"`
++	ExpectedCount int    `json:"expected_count"`
++}
++type ModelGuardExchange struct {
++	HostCallbackID string `json:"host_callback_id,omitempty"`
++	Stream         bool   `json:"stream,omitempty"`
++	Version        int    `json:"version"`
++	Operation      string `json:"operation"`
++	// RequestID is generated once by the host and survives target reselection.
++	RequestID  string                  `json:"request_id,omitempty"`
++	AttemptID  string                  `json:"attempt_id,omitempty"`
++	RuntimeID  string                  `json:"runtime_id,omitempty"`
++	Scope      ModelGuardScope         `json:"scope"`
++	Route      ModelGuardRoute         `json:"route"`
++	Request    []byte                  `json:"request,omitempty"`
++	Headers    http.Header             `json:"headers,omitempty"`
++	Response   ModelGuardObservation   `json:"response"`
++	Probes     []ModelGuardObservation `json:"probes,omitempty"`
++	BaselineID string                  `json:"baseline_id,omitempty"`
++	// Exhausted attests that a nonempty ordinary candidate pool is entirely
++	// excluded by active leases for this caller/thread. Native failures alone
++	// do not qualify. The host rechecks disk before a bound fallback dispatch.
++	Exhausted bool `json:"exhausted,omitempty"`
++}
++type ModelGuardDecision struct {
++	Response       ModelGuardObservation `json:"response,omitempty"`
++	Chunks         [][]byte              `json:"chunks,omitempty"`
++	Receipt        string                `json:"receipt,omitempty"`
++	PolicyRevision string                `json:"policy_revision,omitempty"`
++	Action         string                `json:"action"`
++	Reason         string                `json:"reason,omitempty"`
++	Challenges     []ModelGuardChallenge `json:"challenges,omitempty"`
++	ProofUntil     time.Time             `json:"proof_until,omitempty"`
++	Fresh          bool                  `json:"fresh,omitempty"`
++	Passed         bool                  `json:"passed,omitempty"`
++	BaselineID     string                `json:"baseline_id,omitempty"`
++	RetriesUsed    int                   `json:"retries_used,omitempty"`
++	Until          time.Time             `json:"until,omitempty"`
++	SessionID      string                `json:"session_id,omitempty"`
++	Request        []byte                `json:"request,omitempty"`
++	Headers        http.Header           `json:"headers,omitempty"`
++}

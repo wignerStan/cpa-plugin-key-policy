@@ -1,0 +1,32 @@
+name: Use canonical infra modules
+description: Check out the recorded infra revision and bind its public Go module directly.
+runs:
+  using: composite
+  steps:
+    - name: Read infra revision
+      id: revision
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        source = json.loads(Path("docs/source-relationships/infra-file-notifications.json").read_text())
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write("commit=" + source["commit"] + "\n")
+        PY
+
+    - name: Checkout infra source repository
+      uses: actions/checkout@v5
+      with:
+        repository: wignerStan/infra
+        ref: ${{ steps.revision.outputs.commit }}
+        path: build/infra-source
+        persist-credentials: false
+
+    - name: Bind infra module
+      shell: bash
+      env:
+        INFRA_GO_DIR: ./build/infra-source/go
+      run: bash scripts/prepare-go-workspace.sh

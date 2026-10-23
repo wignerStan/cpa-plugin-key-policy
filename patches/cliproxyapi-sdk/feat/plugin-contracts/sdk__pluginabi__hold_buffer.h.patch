@@ -1,0 +1,38 @@
+From 91e2ea6e99e34bb99f22a185589df93198345c6f Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(sdk): expose guarded execution and auth state callbacks
+ (sdk/pluginabi/hold_buffer.h)
+
+---
+ sdk/pluginabi/hold_buffer.h | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+ create mode 100644 sdk/pluginabi/hold_buffer.h
+
+diff --git a/sdk/pluginabi/hold_buffer.h b/sdk/pluginabi/hold_buffer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..21a5650f7ff68991eb8fc74102fe74e390fd2d46
+--- /dev/null
++++ b/sdk/pluginabi/hold_buffer.h
+@@ -0,0 +1,21 @@
++#ifndef CLIPROXY_HOLD_BUFFER_V1_H
++#define CLIPROXY_HOLD_BUFFER_V1_H
++#include <stddef.h>
++#include <stdint.h>
++#include "infra/plugin_interop.h"
++
++/* Optional, synchronous, same-address-space extension to host.call. The ordinary
++ * CPA ABI v1 table and JSON methods are unchanged. The producer owns an infra
++ * published arena and an active pin covering body for this complete call.
++ * local_data is a local read borrow, never a wire pointer. Metadata is JSON with
++ * an owned host_callback_id and no body. Only bound non-stream execution may use
++ * this entry. The consumer cannot retain either pointer after returning. */
++typedef struct {
++ infra_plugin_abi_header_v1 header;
++ const uint8_t *metadata;
++ size_t metadata_len;
++ infra_plugin_buffer_ref_v1 body;
++ const void *local_data;
++} cliproxy_hold_call_v1;
++static inline const char* hold_method(void){return "host.model.execute_hold.v1";}
++#endif

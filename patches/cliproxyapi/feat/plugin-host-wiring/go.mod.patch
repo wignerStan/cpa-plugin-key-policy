@@ -1,0 +1,41 @@
+From 24bf7820ade53d2208022348fb1affbff8939253 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (go.mod)
+
+---
+ go.mod | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/go.mod b/go.mod
+index 145d668e2a7a23d5a99fd640ad52ee393f18b1b2..8ac4ac2cde7b69ecc57010504674b9d78223426d 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/router-for-me/CLIProxyAPI/v8
+ 
+-go 1.26.0
++go 1.26.6
+ 
+ require (
+ 	github.com/andybalholm/brotli v1.0.6
+@@ -117,8 +117,18 @@ require (
+ 	github.com/tidwall/pretty v1.2.0 // indirect
+ 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+ 	github.com/ugorji/go/codec v1.2.12 // indirect
++	github.com/wignerStan/infra/go/cache/disk v0.0.0
++	github.com/wignerStan/infra/go/cache/writeback v0.0.0
+ 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+ 	golang.org/x/arch v0.8.0 // indirect
+ 	google.golang.org/protobuf v1.34.1
+ 	gopkg.in/ini.v1 v1.67.0 // indirect
+ )
++
++require github.com/maypok86/otter/v2 v2.3.0 // indirect
++
++require (
++ github.com/wignerStan/infra/go/logging v0.0.0
++ github.com/wignerStan/infra/go/observability/diagnosticoutput v0.0.0
++ github.com/wignerStan/infra/go/observability/artifactcapture v0.0.0
++)

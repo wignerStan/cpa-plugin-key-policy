@@ -1,0 +1,266 @@
+From 362ad001c8d93bcae1dd8bea71722f4378968588 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 05:00:00 -0700
+Subject: [PATCH] feat(guard): isolate verification HTTP sockets (sdk/cliproxy/auth/codex_model_guard_transport_test.go)
+
+---
+diff --git a/sdk/cliproxy/auth/codex_model_guard_transport_test.go b/sdk/cliproxy/auth/codex_model_guard_transport_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c0703233d63fab9e56e33711a72b423f1f71a8a
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard_transport_test.go
+@@ -0,0 +1,254 @@
++package auth_test
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	upstream "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++)
++
++type reviewGuardHost struct{}
++
++func (reviewGuardHost) ExchangeModelGuard(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	result, err := pluginapi.ExecutionCallbacksFrom(ctx).Execute(ctx, pluginapi.HostModelExecutionRequest{Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers})
++	if err != nil {
++		return pluginapi.ModelGuardDecision{}, err
++	}
++	return pluginapi.ModelGuardDecision{Action: "release", Receipt: result.Receipt, Response: pluginapi.ModelGuardObservation{Body: result.Body, Headers: result.Headers}}, nil
++}
++
++type isolatedSocketGuardHost struct{}
++
++func (isolatedSocketGuardHost) ExchangeModelGuard(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	callbacks := pluginapi.ExecutionCallbacksFrom(ctx)
++	var last pluginapi.HostModelExecutionResponse
++	for i, policy := range []string{"session", "isolated_http1", "session", "session"} {
++		headers := in.Headers.Clone()
++		session := "first-session"
++		if i == 1 {
++			headers.Set("Thread-Id", "private-child")
++		}
++		if i == 3 {
++			session = "rotated-session"
++		}
++		headers.Set("Session-Id", session)
++		var payload map[string]any
++		if err := json.Unmarshal(in.Request, &payload); err != nil {
++			return pluginapi.ModelGuardDecision{}, err
++		}
++		payload["prompt_cache_key"] = session
++		body, _ := json.Marshal(payload)
++		request := pluginapi.HostModelExecutionRequest{Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: body, Headers: headers, Auxiliary: i == 1, HTTPTransport: policy}
++		if i == 0 {
++			request.Stream = true
++			stream, err := callbacks.Stream(ctx, request)
++			if err != nil {
++				return pluginapi.ModelGuardDecision{}, err
++			}
++			for chunk := range stream.Chunks {
++				if chunk.Err != nil {
++					return pluginapi.ModelGuardDecision{}, chunk.Err
++				}
++			}
++			continue
++		}
++		result, err := callbacks.Execute(ctx, request)
++		if err != nil {
++			return pluginapi.ModelGuardDecision{}, err
++		}
++		if result.Error != "" {
++			return pluginapi.ModelGuardDecision{}, errors.New(result.Error)
++		}
++		last = result
++	}
++	return pluginapi.ModelGuardDecision{Action: "release", Receipt: last.Receipt, Response: pluginapi.ModelGuardObservation{Body: last.Body, Headers: last.Headers}}, nil
++}
++
++func TestGuardNativeCallbacksIsolateSideHTTP1AndRotateSocket(t *testing.T) {
++	var peers, protocols, sessions []string
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		peers = append(peers, r.RemoteAddr)
++		protocols = append(protocols, r.Proto)
++		sessions = append(sessions, r.Header.Get("Session-Id"))
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"total_tokens\":6}}}\n\n")
++	}))
++	server.EnableHTTP2 = true
++	server.StartTLS()
++	defer server.Close()
++	manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
++	if err := manager.ConfigureCodexThreadCooldown(t.TempDir()); err != nil {
++		t.Fatal(err)
++	}
++	defer manager.CloseCodexThreadCooldown()
++	manager.RegisterExecutor(upstream.NewCodexExecutor(&config.Config{}))
++	id := "guard-native-socket"
++	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model"}})
++	defer registry.GetGlobalRegistry().UnregisterClient(id)
++	if _, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "local-test-key", "base_url": server.URL + "/v1"}}); err != nil {
++		t.Fatal(err)
++	}
++	if err := manager.ConfigureCodexModelGuard(isolatedSocketGuardHost{}, "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", server.Client().Transport)
++	opts := core.Options{SourceFormat: translator.FormatOpenAIResponse, Headers: http.Header{"Thread-Id": {"logical-thread"}, "Session-Id": {"session"}, "X-Codex-Turn-Metadata": {`{"thread_id":"logical-thread","turn_id":"turn"}`}}, Metadata: map[string]any{core.CallerScopeMetadataKey: "caller"}}
++	_, err := manager.Execute(ctx, []string{"codex"}, core.Request{Model: "model", Payload: []byte(`{"model":"model","input":"hello"}`)}, opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(peers) != 4 || peers[0] == peers[1] || peers[0] != peers[2] || peers[0] == peers[3] || peers[1] == peers[3] {
++		t.Fatal("socket isolation failed", peers)
++	}
++	if strings.Join(protocols, ",") != "HTTP/2.0,HTTP/1.1,HTTP/2.0,HTTP/2.0" {
++		t.Fatal("wrong protocol", protocols)
++	}
++	if strings.Join(sessions, ",") != "first-session,first-session,first-session,rotated-session" {
++		t.Fatal("session mismatch", sessions)
++	}
++}
++
++type reviewCountBody struct {
++	io.Reader
++	read int
++}
++
++func (b *reviewCountBody) Read(p []byte) (int, error) {
++	n, err := b.Reader.Read(p)
++	b.read += n
++	return n, err
++}
++func (*reviewCountBody) Close() error { return nil }
++
++type reviewTransport struct {
++	body       *reviewCountBody
++	statusCode int
++}
++
++func (tr reviewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	status := tr.statusCode
++	if status == 0 {
++		status = http.StatusOK
++	}
++	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: tr.body, Request: req}, nil
++}
++func TestGuardBoundsUpstreamBeforeReadingWholeBody(t *testing.T) {
++	const bound = 8 << 20
++	manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
++	if err := manager.ConfigureCodexThreadCooldown(t.TempDir()); err != nil {
++		t.Fatal(err)
++	}
++	defer manager.CloseCodexThreadCooldown()
++	manager.RegisterExecutor(upstream.NewCodexExecutor(&config.Config{}))
++	const id = "review-bound-upstream"
++	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model"}})
++	defer registry.GetGlobalRegistry().UnregisterClient(id)
++	if _, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "fake-local-key"}}); err != nil {
++		t.Fatal(err)
++	}
++	if err := manager.ConfigureCodexModelGuard(reviewGuardHost{}, "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	completed := `data: {"type":"response.completed","response":{"id":"local","object":"response","model":"model","status":"completed","output":[{"id":"msg","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}` + "\n\n"
++	opts := core.Options{SourceFormat: translator.FormatOpenAIResponse, Headers: http.Header{"Thread-Id": {"logical-thread"}, "Session-Id": {"session"}, "X-Codex-Turn-Metadata": {`{"thread_id":"logical-thread","turn_id":"turn"}`}}, Metadata: map[string]any{core.CallerScopeMetadataKey: "caller"}}
++	padding := strings.Repeat(":padding\n\n", (bound/10)+1024)
++	for _, text := range []string{padding + completed, completed + padding} {
++		body := &reviewCountBody{Reader: strings.NewReader(text)}
++		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", reviewTransport{body: body})
++		result, err := manager.Execute(ctx, []string{"codex"}, core.Request{Model: "model", Payload: []byte(`{"model":"model","input":"hello"}`)}, opts)
++		if body.read > bound+1 || err == nil {
++			t.Fatalf("guard read %d upstream bytes and returned %d body bytes (err=%v); expected pre-allocation 8MiB bound", body.read, len(result.Payload), err)
++		}
++	}
++}
++
++type nativeWireBoundGuardHost struct {
++	callErr  error
++	modelErr string
++}
++
++func (h *nativeWireBoundGuardHost) ExchangeModelGuard(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	result, err := pluginapi.ExecutionCallbacksFrom(ctx).Execute(ctx, pluginapi.HostModelExecutionRequest{Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers, Auxiliary: true})
++	h.callErr, h.modelErr = err, result.Error
++	if err != nil {
++		return pluginapi.ModelGuardDecision{}, err
++	}
++	if result.Error != "" {
++		return pluginapi.ModelGuardDecision{Action: "upstream_error"}, nil
++	}
++	return pluginapi.ModelGuardDecision{Action: "release", Receipt: result.Receipt, Response: pluginapi.ModelGuardObservation{Body: result.Body, Headers: result.Headers}}, nil
++}
++
++func TestNativeAuxiliarySeparatesWireAndResultLimits(t *testing.T) {
++	const wireLimit = 8 << 20
++	completed := `data: {"type":"response.completed","response":{"id":"local","object":"response","model":"model","status":"completed","output":[{"id":"msg","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}` + "\n\n"
++	for _, tc := range []struct {
++		name, wire           string
++		overWire, overResult bool
++		statusCode           int
++	}{
++		{"wire_over_auxiliary_result_limit", strings.Repeat(":padding\n\n", 31000) + completed, false, false, http.StatusOK},
++		{"wire_over_transport_limit", strings.Repeat(":padding\n\n", wireLimit/10+1024) + completed, true, false, http.StatusOK},
++		{"result_over_auxiliary_limit", strings.Replace(completed, `"text":"ok"`, `"text":"`+strings.Repeat("x", 256<<10)+`"`, 1), false, true, http.StatusOK},
++		{"non2xx_wire_over_transport_limit", strings.Repeat("x", wireLimit+1), true, false, http.StatusInternalServerError},
++		{"non2xx_small_upstream_failure", `{"error":{"message":"upstream test failure"}}`, false, false, http.StatusInternalServerError},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			manager := auth.NewManager(nil, &auth.FillFirstSelector{}, nil)
++			if err := manager.ConfigureCodexThreadCooldown(t.TempDir()); err != nil {
++				t.Fatal(err)
++			}
++			defer manager.CloseCodexThreadCooldown()
++			manager.RegisterExecutor(upstream.NewCodexExecutor(&config.Config{}))
++			id := "native-wire-bound-" + tc.name
++			registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model"}})
++			defer registry.GetGlobalRegistry().UnregisterClient(id)
++			if _, err := manager.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "local-key"}}); err != nil {
++				t.Fatal(err)
++			}
++			host := &nativeWireBoundGuardHost{}
++			if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			body := &reviewCountBody{Reader: strings.NewReader(tc.wire)}
++			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", reviewTransport{body: body, statusCode: tc.statusCode})
++			opts := core.Options{SourceFormat: translator.FormatOpenAIResponse, Headers: http.Header{"Thread-Id": {"logical-thread"}, "Session-Id": {"session"}, "X-Codex-Turn-Metadata": {`{"thread_id":"logical-thread","turn_id":"turn"}`}}, Metadata: map[string]any{core.CallerScopeMetadataKey: "caller"}}
++			result, err := manager.Execute(ctx, []string{"codex"}, core.Request{Model: "model", Payload: []byte(`{"model":"model","input":"hello"}`)}, opts)
++			if tc.overWire || tc.overResult {
++				if err == nil || host.callErr == nil || host.modelErr != "" {
++					t.Fatalf("local bound classified as model failure: execute_type=%T callback_type=%T model=%q", err, host.callErr, host.modelErr)
++				}
++				if !errors.Is(host.callErr, httptransport.ErrResponseBodyTooLarge) {
++					t.Fatalf("missing local bound sentinel: %v", host.callErr)
++				}
++				if tc.overWire && body.read > wireLimit+1 {
++					t.Fatalf("read beyond bound: %d", body.read)
++				}
++				return
++			}
++			if tc.statusCode != http.StatusOK {
++				var statusError interface{ StatusCode() int }
++				if err == nil || host.callErr != nil || host.modelErr != "upstream_failed" || !errors.As(err, &statusError) || statusError.StatusCode() != tc.statusCode {
++					t.Fatalf("ordinary HTTP failure became local: execute=%v callback=%v model=%q", err, host.callErr, host.modelErr)
++				}
++				return
++			}
++			if err != nil || host.callErr != nil || host.modelErr != "" || !strings.Contains(string(result.Payload), `"text":"ok"`) {
++				t.Fatalf("valid large-wire auxiliary failed: execute=%v callback=%v model=%q result=%d", err, host.callErr, host.modelErr, len(result.Payload))
++			}
++		})
++	}
++}

@@ -1,0 +1,82 @@
+From 2cf0eaf3bd6e21412f6416ccbb44dedfc84dade2 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_sdk_config_test.go)
+
+---
+ internal/api/server_sdk_config_test.go | 57 ++++++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+
+diff --git a/internal/api/server_sdk_config_test.go b/internal/api/server_sdk_config_test.go
+index 689bc71a31ae4fc2c01de71f3d96f3716ca82b60..02fa61d0f6dd42a8b60dcc6db293b05492ffbf5b 100644
+--- a/internal/api/server_sdk_config_test.go
++++ b/internal/api/server_sdk_config_test.go
+@@ -55,6 +55,44 @@ func TestEffectiveSDKConfigCopiesCodexResponseSteering(t *testing.T) {
+ 	}
+ }
+ 
++func TestEffectiveSDKConfigCopiesCodexThreadTitleSession(t *testing.T) {
++	enabled := true
++	cfg := &config.Config{Codex: config.CodexConfig{ThreadTitleSession: &enabled}}
++
++	sdkCfg := effectiveSDKConfig(cfg)
++	if sdkCfg == nil || sdkCfg.CodexThreadTitleSession == nil || !*sdkCfg.CodexThreadTitleSession {
++		t.Fatalf("CodexThreadTitleSession = %v, want true", sdkCfg.CodexThreadTitleSession)
++	}
++}
++
++func TestCodexThreadTitleSessionYAMLUnmarshalDefaultsEnabled(t *testing.T) {
++	var cfg config.Config
++	if err := yaml.Unmarshal([]byte("codex: {}\n"), &cfg); err != nil {
++		t.Fatalf("unmarshal error: %v", err)
++	}
++	if cfg.Codex.ThreadTitleSession != nil {
++		t.Fatalf("cfg.Codex.ThreadTitleSession = %v, want nil (default enabled)", *cfg.Codex.ThreadTitleSession)
++	}
++	sdkCfg := effectiveSDKConfig(&cfg)
++	if sdkCfg == nil || sdkCfg.CodexThreadTitleSession != nil {
++		t.Fatalf("sdkCfg.CodexThreadTitleSession = %v, want nil (default enabled)", sdkCfg.CodexThreadTitleSession)
++	}
++}
++
++func TestCodexThreadTitleSessionYAMLUnmarshalExplicitDisabled(t *testing.T) {
++	var cfg config.Config
++	if err := yaml.Unmarshal([]byte("codex:\n  thread-title-session: false\n"), &cfg); err != nil {
++		t.Fatalf("unmarshal error: %v", err)
++	}
++	if cfg.Codex.ThreadTitleSession == nil || *cfg.Codex.ThreadTitleSession {
++		t.Fatalf("cfg.Codex.ThreadTitleSession = %v, want false", cfg.Codex.ThreadTitleSession)
++	}
++	sdkCfg := effectiveSDKConfig(&cfg)
++	if sdkCfg == nil || sdkCfg.CodexThreadTitleSession == nil || *sdkCfg.CodexThreadTitleSession {
++		t.Fatalf("sdkCfg.CodexThreadTitleSession = %v, want false", sdkCfg.CodexThreadTitleSession)
++	}
++}
++
+ func TestCodexResponseSteeringYAMLUnmarshal(t *testing.T) {
+ 	yamlContent := []byte(`
+ codex:
+@@ -72,3 +110,22 @@ codex:
+ 		t.Fatalf("sdkCfg.CodexResponseSteering = false, want true")
+ 	}
+ }
++
++func TestCodexThreadTitleSessionV8Migration(t *testing.T) {
++	for _, body := range []string{
++		"codex: {thread-title-session: false}\n",
++		"oauth: {providers: {codex: {thread-title-session: false}}}\n",
++		"upstream: {codex: {thread-title-session: false}}\n",
++	} {
++		cfg, err := config.ParseConfigBytes([]byte(body))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if cfg.Codex.ThreadTitleSession == nil || *cfg.Codex.ThreadTitleSession {
++			t.Fatalf("thread-title-session lost during v8 migration: %s", body)
++		}
++		if sdk := effectiveSDKConfig(cfg); sdk.CodexThreadTitleSession == nil || *sdk.CodexThreadTitleSession {
++			t.Fatalf("thread-title-session lost in SDK config: %s", body)
++		}
++	}
++}

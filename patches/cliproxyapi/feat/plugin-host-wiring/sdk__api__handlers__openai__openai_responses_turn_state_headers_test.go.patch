@@ -1,0 +1,172 @@
+From ac5475196b76b1ae17e8c6c220df6002632e8994 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] test(host): preserve HTTPS turn-state headers
+ (sdk/api/handlers/openai/openai_responses_turn_state_headers_test.go)
+
+---
+ ...penai_responses_turn_state_headers_test.go | 155 ++++++++++++++++++
+ 1 file changed, 155 insertions(+)
+ create mode 100644 sdk/api/handlers/openai/openai_responses_turn_state_headers_test.go
+
+diff --git a/sdk/api/handlers/openai/openai_responses_turn_state_headers_test.go b/sdk/api/handlers/openai/openai_responses_turn_state_headers_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..86fb67f2c4c3e518232118f24a5ebadbe28f718d
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_turn_state_headers_test.go
+@@ -0,0 +1,155 @@
++package openai
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestResponsesTurnStateHeaderWithDefaultFiltering(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	removeState := func(headers http.Header) http.Header {
++		for key := range headers {
++			if strings.EqualFold(key, "X-Codex-Turn-State") {
++				delete(headers, key)
++			}
++		}
++		return headers
++	}
++	for _, tc := range []struct {
++		name        string
++		state       http.Header
++		intercept   bool
++		mutate      func(http.Header) http.Header
++		passthrough bool
++		want        []string
++	}{
++		{name: "executor", state: http.Header{"X-Codex-Turn-State": {"opaque-state"}}, want: []string{"opaque-state"}},
++		{name: "noop_interceptor", state: http.Header{"X-Codex-Turn-State": {"opaque-state"}}, intercept: true, want: []string{"opaque-state"}},
++		{name: "repeated_conflicting_and_empty", state: http.Header{"X-Codex-Turn-State": {"state-A", "state-B", ""}}, want: []string{"state-A", "state-B", ""}},
++		{name: "mixed_case", state: http.Header{"X-Codex-Turn-State": {"state-A", ""}, "x-codex-turn-state": {"state-B", "state-B"}}, want: []string{"state-A", "", "state-B", "state-B"}},
++		{name: "mixed_case_noop_interceptor", state: http.Header{"X-Codex-Turn-State": {"state-A", ""}, "x-codex-turn-state": {"state-B", "state-B"}}, intercept: true, want: []string{"state-A", "", "state-B", "state-B"}},
++		{name: "empty", state: http.Header{"X-Codex-Turn-State": {""}}, want: []string{""}},
++		{name: "remove", state: http.Header{"X-Codex-Turn-State": {"state-A"}, "x-codex-turn-state": {"state-B"}}, intercept: true, mutate: removeState},
++		{name: "replace", state: http.Header{"X-Codex-Turn-State": {"state-A"}, "x-codex-turn-state": {"state-B"}}, intercept: true, mutate: func(headers http.Header) http.Header {
++			removeState(headers)
++			headers["x-codex-turn-state"] = []string{"replacement", ""}
++			return headers
++		}, want: []string{"replacement", ""}},
++		{name: "clear_all", state: http.Header{"X-Codex-Turn-State": {"state-A"}}, intercept: true, mutate: func(http.Header) http.Header { return http.Header{} }},
++		{name: "connection_scoped", state: http.Header{"X-Codex-Turn-State": {"state-A"}, "Connection": {"x-codex-turn-state"}}},
++		{name: "connection_scoped_noop_interceptor", state: http.Header{"X-Codex-Turn-State": {"state-A"}, "Connection": {"x-codex-turn-state"}}, intercept: true},
++		{name: "absent"},
++		{name: "passthrough_unchanged", state: http.Header{"X-Codex-Turn-State": {"opaque-state"}}, passthrough: true, want: []string{"opaque-state"}},
++	} {
++		for _, stream := range []bool{false, true} {
++			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
++				upstream := http.Header{"X-Upstream-Diagnostic": {"private"}, "X-Ratelimit-Remaining": {"7"}, "Set-Cookie": {"session=private"}}
++				for key, values := range tc.state {
++					upstream[key] = slices.Clone(values)
++				}
++				executor := &turnStateHeaderExecutor{headers: upstream}
++				manager := coreauth.NewManager(nil, nil, nil)
++				manager.RegisterExecutor(executor)
++				model := "turn-state-header-" + tc.name + fmt.Sprint(stream)
++				auth := &coreauth.Auth{ID: model, Provider: executor.Identifier(), Status: coreauth.StatusActive}
++				if _, err := manager.Register(context.Background(), auth); err != nil {
++					t.Fatalf("register auth: %v", err)
++				}
++				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
++				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
++				base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: tc.passthrough}, manager)
++				if tc.intercept {
++					base.SetPluginHost(&turnStateHeaderInterceptor{mutate: tc.mutate})
++				}
++				router := gin.New()
++				router.POST("/v1/responses", NewOpenAIResponsesAPIHandler(base).Responses)
++				request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hello","stream":%t}`, model, stream)))
++				request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
++				request.Header.Set("Content-Type", "application/json")
++				recorder := httptest.NewRecorder()
++				router.ServeHTTP(recorder, request)
++				response := recorder.Result()
++				defer response.Body.Close()
++				if response.StatusCode != http.StatusOK {
++					t.Fatalf("status = %d, body = %s", response.StatusCode, recorder.Body.String())
++				}
++				// Read committed HTTP headers, not the handler's mutable header map.
++				got := slices.Clone(response.Header.Values("X-Codex-Turn-State"))
++				want := slices.Clone(tc.want)
++				slices.Sort(got)
++				slices.Sort(want)
++				if !slices.Equal(got, want) {
++					t.Errorf("committed turn-state values = %#v, want %#v", got, want)
++				}
++				for _, key := range []string{"X-Upstream-Diagnostic", "X-Ratelimit-Remaining"} {
++					if tc.passthrough {
++						if response.Header.Get(key) != upstream.Get(key) {
++							t.Errorf("passthrough header %s = %q, want %q", key, response.Header.Get(key), upstream.Get(key))
++						}
++					} else if _, exists := response.Header[key]; exists {
++						t.Errorf("unrelated upstream header leaked: %s", key)
++					}
++				}
++				if _, exists := response.Header["Set-Cookie"]; exists {
++					t.Error("upstream cookie leaked")
++				}
++			})
++		}
++	}
++}
++
++type turnStateHeaderExecutor struct {
++	websocketDirectCaptureExecutor
++	headers http.Header
++}
++
++func (e *turnStateHeaderExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
++	return coreexecutor.Response{Headers: e.headers.Clone(), Payload: []byte(`{"id":"resp-state","output":[]}`)}, nil
++}
++
++func (e *turnStateHeaderExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
++	chunks := make(chan coreexecutor.StreamChunk, 1)
++	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-state\",\"output\":[]}}\n\n")}
++	close(chunks)
++	return &coreexecutor.StreamResult{Headers: e.headers.Clone(), Chunks: chunks}, nil
++}
++
++type turnStateHeaderInterceptor struct {
++	handlers.PluginInterceptorHost
++	mutate func(http.Header) http.Header
++}
++
++func (*turnStateHeaderInterceptor) HasRequestInterceptors() bool { return false }
++func (*turnStateHeaderInterceptor) HasStreamInterceptors() bool  { return true }
++
++func (h *turnStateHeaderInterceptor) effectiveHeaders(headers http.Header) http.Header {
++	headers = headers.Clone()
++	if h.mutate != nil {
++		return h.mutate(headers)
++	}
++	return headers
++}
++
++func (h *turnStateHeaderInterceptor) InterceptResponse(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
++	return pluginapi.ResponseInterceptResponse{Headers: h.effectiveHeaders(req.ResponseHeaders)}
++}
++
++func (h *turnStateHeaderInterceptor) InterceptStreamChunk(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
++	if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
++		return pluginapi.StreamChunkInterceptResponse{Headers: h.effectiveHeaders(req.ResponseHeaders)}
++	}
++	return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
++}

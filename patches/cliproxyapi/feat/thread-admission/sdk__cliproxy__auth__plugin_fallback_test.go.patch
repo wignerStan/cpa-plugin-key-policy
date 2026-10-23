@@ -1,0 +1,183 @@
+From 0b8b6f1aa1c3b64cd5b222cbf4875ef0005d769b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/plugin_fallback_test.go)
+
+---
+ sdk/cliproxy/auth/plugin_fallback_test.go | 166 ++++++++++++++++++++++
+ 1 file changed, 166 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/plugin_fallback_test.go
+
+diff --git a/sdk/cliproxy/auth/plugin_fallback_test.go b/sdk/cliproxy/auth/plugin_fallback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca5d02569a1723a2a10d95acbe22d40db72a6a60
+--- /dev/null
++++ b/sdk/cliproxy/auth/plugin_fallback_test.go
+@@ -0,0 +1,166 @@
++package auth
++
++import (
++	"context"
++	"fmt"
++	"maps"
++	"reflect"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestPluginFallbackPinsOwnedAuthAndPreservesCaller(t *testing.T) {
++	affinity := NewSessionAffinitySelector(&FillFirstSelector{})
++	t.Cleanup(affinity.Stop)
++	m, normalIDs := threadManager(t, affinity)
++	host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		t.Fatal("PAYG must not enter guard")
++		return pluginapi.ModelGuardDecision{}, nil
++	})
++	if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	id := t.Name() + "-payg"
++	a := &Auth{ID: id, Provider: "test-payg", Prefix: "payg", Status: StatusActive, Attributes: map[string]string{"plugin_owner": "guard", "plugin_fallback_only": "true", "upstream_protocol": "openai-response"}}
++	if _, err := m.Register(context.Background(), a); err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient(id, a.Provider, []*registry.ModelInfo{{ID: "payg/premium"}, {ID: "premium"}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++	calls := 0
++	m.RegisterExecutor(&customStreamMockExecutor{identifier: a.Provider, mockCustomErrorExecutor: mockCustomErrorExecutor{executeFn: func(ctx context.Context, auth *Auth, req core.Request, opts core.Options) (core.Response, error) {
++		calls++
++		if auth.ID != id || opts.Metadata[core.CallerScopeMetadataKey] != "authenticated-caller" || pluginapi.CallingPlugin(ctx) != "guard" {
++			t.Fatal("fallback changed caller or target")
++		}
++		return core.Response{Payload: []byte("payg")}, nil
++	}}, streamFn: func(ctx context.Context, auth *Auth, req core.Request, opts core.Options) (*core.StreamResult, error) {
++		calls++
++		if auth.ID != id || opts.Metadata[core.CallerScopeMetadataKey] != "authenticated-caller" || !isPluginFallback(opts) {
++			t.Fatal("stream fallback changed caller, target or affinity bypass")
++		}
++		chunks := make(chan core.StreamChunk, 1)
++		chunks <- core.StreamChunk{Payload: []byte("payg-stream")}
++		close(chunks)
++		return &core.StreamResult{Chunks: chunks}, nil
++	}})
++	original := guardOptions()
++	if _, err := m.SelectAuth(context.Background(), a.Provider, "payg/premium", original); err == nil {
++		t.Fatal("PAYG auth admitted as ordinary traffic")
++	}
++	for _, normalID := range normalIDs {
++		disableThread(t, m, normalID, original)
++	}
++	// A scheduler for the original pool may reject PAYG's different group. The
++	// already-authorized callback must use its pinned auth without selecting.
++	m.SetPluginScheduler(fallbackSchedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
++		t.Error("PAYG called the normal pool's scheduler")
++		return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("PAYG does not belong to the normal group")
++	}))
++	affinity.cache.Set("original-normal-binding", normalIDs[0])
++	affinity.cache.mu.RLock()
++	before := maps.Clone(affinity.cache.entries)
++	affinity.cache.mu.RUnlock()
++	callback := m.pluginFallbackCallbacks(guardRequest(), original)
++	request := pluginapi.HostModelExecutionRequest{AuthID: id, Model: "payg/premium", Body: []byte(`{"input":"hello"}`), Headers: original.Headers}
++	result, err := callback.Execute(context.Background(), request)
++	if err != nil || string(result.Body) != "payg" || calls != 1 {
++		t.Fatal(result, err, calls)
++	}
++	if _, ok := original.Metadata[core.PinnedAuthMetadataKey]; ok {
++		t.Fatal("original routing mutated")
++	}
++	request.Stream = true
++	stream, err := callback.Stream(context.Background(), request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var output string
++	for chunk := range stream.Chunks {
++		if chunk.Err != nil {
++			t.Fatal(chunk.Err)
++		}
++		output += string(chunk.Payload)
++	}
++	if output != "payg-stream" || calls != 2 {
++		t.Fatal("stream fallback failed", output, calls)
++	}
++	affinity.cache.mu.RLock()
++	after := maps.Clone(affinity.cache.entries)
++	affinity.cache.mu.RUnlock()
++	if !reflect.DeepEqual(before, after) {
++		t.Fatal("PAYG read/refreshed/wrote session affinity", before, after)
++	}
++	request.AuthID = "foreign"
++	if _, err := callback.Execute(context.Background(), request); err == nil {
++		t.Fatal("foreign auth accepted")
++	}
++	request.AuthID = id
++	request.Model = "premium"
++	if _, err := callback.Execute(context.Background(), request); err == nil {
++		t.Fatal("fallback escaped prefix")
++	}
++}
++
++type fallbackSchedulerFunc func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
++
++func (f fallbackSchedulerFunc) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
++	return f(ctx, req)
++}
++
++func (f fallbackSchedulerFunc) AdmitAuth(_ context.Context, req pluginapi.SchedulerPickRequest) ([]string, bool, error) {
++	ids := make([]string, 0, len(req.Candidates))
++	for _, candidate := range req.Candidates {
++		ids = append(ids, candidate.ID)
++	}
++	return ids, true, nil
++}
++
++func TestPluginFallbackSchedulerBypassRejectsForgedMetadata(t *testing.T) {
++	m, ids := threadManager(t, &FillFirstSelector{})
++	if err := m.ConfigureCodexModelGuard(guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		t.Fatal("selection must not execute the guard")
++		return pluginapi.ModelGuardDecision{}, nil
++	}), "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	calls := 0
++	m.SetPluginScheduler(fallbackSchedulerFunc(func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
++		calls++
++		return pluginapi.SchedulerPickResponse{Handled: true, AuthID: req.Candidates[0].ID}, true, nil
++	}))
++	ordinary := guardOptions()
++	if _, err := m.SelectAuth(context.Background(), "codex", "model", ordinary); err != nil || calls != 1 {
++		t.Fatal("ordinary selection bypassed the scheduler", calls, err)
++	}
++	for _, mode := range []string{"flag-only", "calling-plugin-only", "foreign-owner", "normal-auth"} {
++		t.Run(mode, func(t *testing.T) {
++			opts := guardOptions()
++			opts.Metadata[pluginFallbackMetadataKey] = true
++			opts.Metadata[core.PinnedAuthMetadataKey] = ids[0]
++			ctx := context.Background()
++			switch mode {
++			case "calling-plugin-only":
++				ctx = pluginapi.WithCallingPlugin(ctx, "guard")
++			case "foreign-owner":
++				ctx = withPluginFallbackDispatch(pluginapi.WithCallingPlugin(ctx, "guard"), "another-plugin", ids[0])
++			case "normal-auth":
++				ctx = withPluginFallbackDispatch(pluginapi.WithCallingPlugin(ctx, "guard"), "guard", ids[0])
++			}
++			if _, err := m.SelectAuth(ctx, "codex", "model", opts); err == nil {
++				t.Fatal("forged fallback metadata admitted normal auth")
++			}
++			if calls != 1 {
++				t.Fatal("forged fallback capability reached scheduler", calls)
++			}
++		})
++	}
++	// A stale context capability cannot suppress the scheduler by itself.
++	ctx := withPluginFallbackDispatch(pluginapi.WithCallingPlugin(context.Background(), "guard"), "guard", ids[0])
++	if _, err := m.SelectAuth(ctx, "codex", "model", guardOptions()); err != nil || calls != 2 {
++		t.Fatal("ordinary call with no fallback marker bypassed scheduler", calls, err)
++	}
++}

@@ -1,0 +1,116 @@
+From dba78152e7448654e62bc5a1cb42c626bdedaf01 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/scheduler_admission_test.go)
+
+---
+ .../pluginhost/scheduler_admission_test.go    | 99 +++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+ create mode 100644 internal/pluginhost/scheduler_admission_test.go
+
+diff --git a/internal/pluginhost/scheduler_admission_test.go b/internal/pluginhost/scheduler_admission_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9d169717b00af373e5472e82abe9025ed3a7e7e
+--- /dev/null
++++ b/internal/pluginhost/scheduler_admission_test.go
+@@ -0,0 +1,99 @@
++package pluginhost
++
++import (
++	"context"
++	"reflect"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++type schedulerAdmissionFunc func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerAdmissionResponse, error)
++
++func (f schedulerAdmissionFunc) Admit(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerAdmissionResponse, error) {
++	return f(ctx, req)
++}
++
++func TestSchedulerAdmissionDoesNotPickAndRejectsUnknownPolicy(t *testing.T) {
++	for _, mode := range []string{"subset", "native", "empty", "unsupported", "foreign", "duplicate", "panic"} {
++		t.Run(mode, func(t *testing.T) {
++			caps := pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
++				t.Fatal("admission changed scheduler selection state")
++				return pluginapi.SchedulerPickResponse{}, nil
++			})}
++			if mode != "unsupported" {
++				caps.SchedulerAdmission = schedulerAdmissionFunc(func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerAdmissionResponse, error) {
++					if len(req.Candidates) != 2 || req.Plugin.Name != "policy" {
++						t.Fatal("admission lost routing context")
++					}
++					r := pluginapi.SchedulerAdmissionResponse{Handled: true, AuthIDs: []string{"low"}}
++					switch mode {
++					case "native":
++						r.Handled = false
++					case "empty":
++						r.AuthIDs = nil
++					case "foreign":
++						r.AuthIDs = []string{"outside"}
++					case "duplicate":
++						r.AuthIDs = []string{"low", "low"}
++					case "panic":
++						panic("failed")
++					}
++					return r, nil
++				})
++			}
++			host := newHostWithRecords(capabilityRecord{id: "policy", meta: pluginapi.Metadata{Name: "policy"}, plugin: pluginapi.Plugin{Capabilities: caps}})
++			ids, known, err := host.AdmitAuth(context.Background(), schedulerRequest("high", "low"))
++			switch mode {
++			case "subset":
++				if err != nil || !known || !reflect.DeepEqual(ids, []string{"low"}) {
++					t.Fatal(ids, known, err)
++				}
++			case "native":
++				if err != nil || !known || !reflect.DeepEqual(ids, []string{"high", "low"}) {
++					t.Fatal(ids, known, err)
++				}
++			case "empty":
++				if err != nil || !known || len(ids) != 0 {
++					t.Fatal(ids, known, err)
++				}
++			case "unsupported":
++				if err != nil || known {
++					t.Fatal("unknown scheduler policy treated as exhausted", ids, known, err)
++				}
++			default:
++				if err == nil || known {
++					t.Fatal("invalid admission accepted", ids, known, err)
++				}
++			}
++		})
++	}
++}
++
++func TestRPCSchedulerAdmissionUsesOptionalCallback(t *testing.T) {
++	var got pluginapi.SchedulerPickRequest
++	lookup := newTestSymbolLookup(&testPlugin{registerResult: pluginapi.Plugin{
++		Metadata: pluginapi.Metadata{Name: "policy", Version: "1.0.0"},
++		Capabilities: pluginapi.Capabilities{
++			Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
++				t.Fatal("RPC admission called Pick")
++				return pluginapi.SchedulerPickResponse{}, nil
++			}),
++			SchedulerAdmission: schedulerAdmissionFunc(func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerAdmissionResponse, error) {
++				got = req
++				return pluginapi.SchedulerAdmissionResponse{Handled: true, AuthIDs: []string{"low"}}, nil
++			}),
++		},
++	}})
++	p, err := registerRPCPlugin(context.Background(), nil, "policy", lookup, pluginabi.MethodPluginRegister, nil)
++	if err != nil || p.Capabilities.SchedulerAdmission == nil {
++		t.Fatal("missing optional admission capability", err)
++	}
++	req := schedulerRequest("high", "low")
++	req.Options.Metadata = map[string]any{"group": "team"}
++	r, err := p.Capabilities.SchedulerAdmission.Admit(context.Background(), req)
++	if err != nil || !r.Handled || !reflect.DeepEqual(r.AuthIDs, []string{"low"}) || !reflect.DeepEqual(got, req) {
++		t.Fatal("admission RPC contract changed", r, got, err)
++	}
++}

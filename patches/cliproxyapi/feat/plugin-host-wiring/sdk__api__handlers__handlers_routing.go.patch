@@ -1,0 +1,22 @@
+From 42b18a7052a5bf96a59d8b9a9edfc4a394cdbbf1 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/handlers_routing.go)
+
+---
+ sdk/api/handlers/handlers_routing.go | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/sdk/api/handlers/handlers_routing.go b/sdk/api/handlers/handlers_routing.go
+index 0ddd28a911aa3fb3dbc842eb91257df194df1970..ea7c0e6154d596ec0b83b89ad37bf73cee575ec6 100644
+--- a/sdk/api/handlers/handlers_routing.go
++++ b/sdk/api/handlers/handlers_routing.go
+@@ -102,6 +102,7 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
+ }
+ 
+ func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
++
+ 	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
+ 	if forcedProvider == "" || entryProtocol != Interactions {
+ 		return nil

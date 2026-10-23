@@ -1,0 +1,110 @@
+From 3f3027f7217644586f44fbd0dd4ce52c6378dee9 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/rpc_client.go)
+
+---
+ internal/pluginhost/rpc_client.go | 46 +++++++++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.go
+index 96e3785d25963a40c676f3b4ae20c08339c09090..23d0d1c16badbfb920c6250f2c4e7ba51b3fc962 100644
+--- a/internal/pluginhost/rpc_client.go
++++ b/internal/pluginhost/rpc_client.go
+@@ -57,6 +57,8 @@ func (e rpcError) StatusCode() int {
+ 	return e.statusCode
+ }
+ 
++func (e rpcError) ErrorCode() string { return e.Code }
++
+ type rpcResponseNormalizer struct {
+ 	*rpcPluginAdapter
+ 	method string
+@@ -67,7 +69,13 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+ 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
+ 	}
+ 	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
+-		ConfigYAML:    bytes.Clone(configYAML),
++		ConfigYAML: bytes.Clone(configYAML),
++		ConfigPath: func() string {
++			if host == nil {
++				return ""
++			}
++			return host.configPathValue()
++		}(),
+ 		SchemaVersion: pluginabi.SchemaVersion,
+ 	})
+ 	if errCall != nil {
+@@ -92,6 +100,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+ 			ExecutorOutputFormats:         append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
+ 		},
+ 	}
++	if resp.Capabilities.CodexModelGuard {
++		plugin.Capabilities.CodexModelGuard = adapter
++	}
+ 	if resp.Capabilities.ModelRegistrar {
+ 		plugin.Capabilities.ModelRegistrar = adapter
+ 	}
+@@ -117,6 +128,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+ 	if resp.Capabilities.Scheduler {
+ 		plugin.Capabilities.Scheduler = adapter
+ 		plugin.Capabilities.SchedulerAcrossPriorities = resp.Capabilities.SchedulerAcrossPriorities
++		if resp.Capabilities.SchedulerAdmission {
++			plugin.Capabilities.SchedulerAdmission = adapter
++		}
+ 	}
+ 	if resp.Capabilities.ModelRouter {
+ 		plugin.Capabilities.ModelRouter = adapter
+@@ -184,11 +198,26 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+ 
+ func callPlugin[T any](ctx context.Context, client pluginClient, method string, request any) (T, error) {
+ 	var zero T
++	var lease *guardCallLease
++	if method == guardExchangeMethod {
++		var err error
++		lease, err = acquireGuardCall()
++		if err != nil {
++			return zero, err
++		}
++		defer lease.release()
++	}
+ 	rawRequest, errMarshal := json.Marshal(sanitizePluginRequest(request))
+ 	if errMarshal != nil {
+ 		return zero, fmt.Errorf("marshal plugin request %s: %w", method, errMarshal)
+ 	}
+-	rawResp, errCall := client.Call(ctx, method, rawRequest)
++	var rawResp []byte
++	var errCall error
++	if guarded, ok := client.(*guardedPluginClient); ok {
++		rawResp, errCall = guarded.callWithLease(ctx, method, rawRequest, lease)
++	} else {
++		rawResp, errCall = client.Call(ctx, method, rawRequest)
++	}
+ 	if errCall != nil {
+ 		return zero, errCall
+ 	}
+@@ -423,6 +452,10 @@ func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPick
+ 	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
+ }
+ 
++func (a *rpcPluginAdapter) Admit(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerAdmissionResponse, error) {
++	return callPlugin[pluginapi.SchedulerAdmissionResponse](ctx, a.client, pluginabi.MethodSchedulerAdmit, req)
++}
++
+ func (a *rpcPluginAdapter) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+ 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+ 	defer closeCallback()
+@@ -682,3 +715,12 @@ func httpResponseFromPlugin(resp pluginapi.ExecutorHTTPResponse, req *http.Reque
+ 		Request:    req,
+ 	}
+ }
++
++func (a *rpcPluginAdapter) ExchangeModelGuard(ctx context.Context, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	callbackID, closeCallback := a.openHostCallbackContext(ctx)
++	defer closeCallback()
++	in.HostCallbackID = callbackID
++	return callPlugin[pluginapi.ModelGuardDecision](ctx, a.client, "model_guard.exchange", in)
++}

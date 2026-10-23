@@ -1,0 +1,488 @@
+From 81f4116a5e8ab6c2f20cf46ec7cc33c2bdad18d6 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(logging): use direct infra diagnostics and bounded
+ (internal/logging/codex_dump_test.go)
+
+---
+ internal/logging/codex_dump_test.go | 471 ++++++++++++++++++++++++++++
+ 1 file changed, 471 insertions(+)
+ create mode 100644 internal/logging/codex_dump_test.go
+
+diff --git a/internal/logging/codex_dump_test.go b/internal/logging/codex_dump_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1395a535db010a6f882771c7f006b33a88a41d26
+--- /dev/null
++++ b/internal/logging/codex_dump_test.go
+@@ -0,0 +1,471 @@
++package logging
++
++import (
++	"bytes"
++	"net/http"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++
++	log "github.com/sirupsen/logrus"
++	"github.com/tidwall/gjson"
++)
++
++func captureCodexDumpLogs(t *testing.T) *bytes.Buffer {
++	t.Helper()
++	logger := log.StandardLogger()
++	originalOutput := logger.Out
++	originalFormatter := logger.Formatter
++	originalLevel := logger.GetLevel()
++	var output bytes.Buffer
++	logger.SetOutput(&output)
++	logger.SetFormatter(&LogFormatter{})
++	t.Cleanup(func() {
++		ConfigureCodexDump(false, "")
++		logger.SetOutput(originalOutput)
++		logger.SetFormatter(originalFormatter)
++		logger.SetLevel(originalLevel)
++	})
++	return &output
++}
++
++func TestCodexDumpDefaultsOff(t *testing.T) {
++	ConfigureCodexDump(false, "")
++	if CodexDumpEnabled() {
++		t.Fatal("CodexDumpEnabled() = true, want false by default")
++	}
++}
++
++func TestCodexDumpDoesNotChangeSelectedLogLevel(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.DebugLevel)
++	logDir := t.TempDir()
++	ConfigureCodexDump(true, logDir)
++	t.Cleanup(func() { ConfigureCodexDump(false, "") })
++	if log.GetLevel() != log.DebugLevel {
++		t.Fatalf("log level = %v, want DebugLevel", log.GetLevel())
++	}
++	CodexDumpFrame("session", "client_in", []byte(`{"type":"response.create"}`))
++	if output.Len() != 0 {
++		t.Fatalf("debug selection emitted trace diagnostics: %s", output.String())
++	}
++	if runtime.GOOS == "linux" {
++		FlushAllStreamBuffers()
++		files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++		if err != nil {
++			t.Fatalf("read capture directory: %v", err)
++		}
++		if len(files) != 1 {
++			t.Fatalf("capture files = %d, want 1", len(files))
++		}
++	}
++}
++
++func TestCodexDumpTraceViewRedactsSecretsAndPreservesRawOnlyWhenAuthorized(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	logDir := t.TempDir()
++	payload := []byte(`{"type":"response.create","api_key":"fixture-secret","scheme":"Bearer","routing_token":"opaque-public","prompt":"private prompt text"}`)
++
++	ConfigureCodexDump(false, logDir)
++	CodexDumpFrame("session", "client_in", payload)
++	view := output.String()
++	for _, secret := range []string{"fixture-secret", "private prompt text"} {
++		if strings.Contains(view, secret) {
++			t.Fatalf("trace view exposed classified or unclassified payload data %q: %s", secret, view)
++		}
++	}
++	if !strings.Contains(view, "response.create") || !strings.Contains(view, "sha256:") {
++		t.Fatalf("trace view omitted event or sha256: %s", view)
++	}
++	if !strings.Contains(view, "opaque-public") || !strings.Contains(view, "Bearer") {
++		t.Fatalf("trace view changed public fields: %s", view)
++	}
++	if _, err := os.Stat(filepath.Join(logDir, "codex-dumps")); !os.IsNotExist(err) {
++		t.Fatalf("TRACE alone created a raw capture directory, stat error = %v", err)
++	}
++
++	if runtime.GOOS != "linux" {
++		t.Skip("raw capture artifacts are supported on Linux only")
++	}
++	output.Reset()
++	ConfigureCodexDump(true, logDir)
++	CodexDumpFrame("session", "client_in", payload)
++	view = output.String()
++	if strings.Contains(view, "fixture-secret") {
++		t.Fatalf("captured payload leaked into trace view: %s", view)
++	}
++	if !strings.Contains(view, `"capture_queued":true`) {
++		t.Fatalf("capture receipt missing from trace view: %s", view)
++	}
++	FlushAllStreamBuffers()
++	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++	if err != nil {
++		t.Fatalf("read capture directory: %v", err)
++	}
++	if len(files) != 1 {
++		t.Fatalf("capture files = %d, want 1", len(files))
++	}
++	path := filepath.Join(logDir, "codex-dumps", files[0].Name())
++	got, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatalf("read capture artifact: %v", err)
++	}
++	if !bytes.Equal(got, payload) {
++		t.Fatalf("raw capture changed bytes: got %q, want %q", got, payload)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatalf("stat capture artifact: %v", err)
++	}
++	if info.Mode().Perm() != 0o600 {
++		t.Fatalf("capture file mode = %o, want 600", info.Mode().Perm())
++	}
++	dirInfo, err := os.Stat(filepath.Dir(path))
++	if err != nil {
++		t.Fatalf("stat capture directory: %v", err)
++	}
++	if dirInfo.Mode().Perm() != 0o700 {
++		t.Fatalf("capture directory mode = %o, want 700", dirInfo.Mode().Perm())
++	}
++}
++
++func TestCodexDumpHTTPViewRedactsHeadersAndPayload(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, t.TempDir())
++	body := []byte(`{"api_key":"body-secret","scheme":"Bearer","routing_token":"opaque-public","prompt":"private prompt text"}`)
++	headers := http.Header{
++		"Authorization":    []string{"Bearer header-secret"},
++		"Content-Type":     []string{"application/json"},
++		"X-Correlation-Id": []string{"a%252Fb"},
++		"CF-Ray":           []string{"8e12345-SJC"},
++		"Cookie":           []string{"__cf_bm=lb123; __oailb=node-123.456; session=user_secret; access_token=secret_at_123"},
++		"Set-Cookie":       []string{"__oailb=node-123.456; path=/; HttpOnly", "refresh_token=secret_rt_456; path=/; HttpOnly", "__cf_bm=lb123; path=/; HttpOnly"},
++		"X-Private-Note":   []string{"unclassified-header"},
++	}
++	CodexDumpHTTPRequest("session", "upstream_out", "POST", "https://user:pass@api.example/v1/responses?token=query-secret", headers, body)
++	CodexDumpHTTPResponse("session", "upstream_in", 200, headers, body)
++
++	view := output.String()
++	for _, secret := range []string{"body-secret", "private prompt text", "header-secret", "query-secret", "user:pass", "secret_at_123", "secret_rt_456"} {
++		if strings.Contains(view, secret) {
++			t.Fatalf("HTTP trace view exposed %q: %s", secret, view)
++		}
++	}
++	for _, public := range []string{"application/json", "a%252Fb", "opaque-public", "api.example", "8e12345-SJC", "__cf_bm=lb123", "__oailb=node-123.456", "session=user_secret", "access_token=sha256:", "refresh_token=sha256:"} {
++		if !strings.Contains(view, public) {
++			t.Fatalf("HTTP trace view omitted public or classified view value %q: %s", public, view)
++		}
++	}
++}
++
++func TestCodexTraceAndDumpAreIndependentSettings(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	payload := []byte(`{"type":"response.create","model":"gpt-6-astra","usage":{"prompt_tokens":42}}`)
++
++	// 1. Trace ON, Dump OFF: trace logs decision & metadata, but no dump artifacts on disk.
++	log.SetLevel(log.TraceLevel)
++	logDir1 := t.TempDir()
++	ConfigureCodexDump(false, logDir1)
++	CodexDumpFrame("session-1", "client_in", payload)
++	if output.Len() == 0 {
++		t.Fatal("trace on want log output, got empty")
++	}
++	if !strings.Contains(output.String(), "response.create") || !strings.Contains(output.String(), "gpt-6-astra") {
++		t.Fatalf("trace view missing decision metadata: %s", output.String())
++	}
++	if _, err := os.Stat(filepath.Join(logDir1, "codex-dumps")); !os.IsNotExist(err) {
++		t.Fatalf("dump off should not create codex-dumps directory, stat error = %v", err)
++	}
++
++	if runtime.GOOS != "linux" {
++		return
++	}
++
++	// 2. Trace OFF (InfoLevel), Dump ON: suppresses trace log output, preserves payload dump on disk.
++	output.Reset()
++	log.SetLevel(log.InfoLevel)
++	logDir2 := t.TempDir()
++	ConfigureCodexDump(true, logDir2)
++	CodexDumpFrame("session-2", "client_in", payload)
++	if output.Len() != 0 {
++		t.Fatalf("trace off should not emit trace logs, got: %s", output.String())
++	}
++	FlushAllStreamBuffers()
++	files, err := os.ReadDir(filepath.Join(logDir2, "codex-dumps"))
++	if err != nil {
++		t.Fatalf("read capture directory: %v", err)
++	}
++	if len(files) != 1 {
++		t.Fatalf("dump on should preserve 1 artifact, got %d", len(files))
++	}
++	captured, err := os.ReadFile(filepath.Join(logDir2, "codex-dumps", files[0].Name()))
++	if err != nil {
++		t.Fatalf("read capture artifact: %v", err)
++	}
++	if !bytes.Equal(captured, payload) {
++		t.Fatalf("captured payload mismatch: got %q, want %q", captured, payload)
++	}
++}
++
++func TestCodexDumpStreamingBufferPreservesDeltas(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("raw capture artifacts are supported on Linux only")
++	}
++
++	logDir := t.TempDir()
++	ConfigureCodexDump(true, logDir)
++	t.Cleanup(func() { ConfigureCodexDump(false, "") })
++
++	delta1 := []byte(`{"type":"response.custom_tool_call_input.delta","delta":"hello"}`)
++	delta2 := []byte(`{"type":"response.custom_tool_call_input.delta","delta":" world"}`)
++	completed := []byte(`{"type":"response.completed","status":"completed"}`)
++
++	CodexDumpFrame("stream-session-1", "client_out", delta1)
++	CodexDumpFrame("stream-session-1", "client_out", delta2)
++	CodexDumpFrame("stream-session-1", "client_out", completed)
++
++	FlushAllStreamBuffers()
++
++	FlushAllStreamBuffers()
++	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++	if err != nil {
++		t.Fatalf("read capture directory: %v", err)
++	}
++	if len(files) != 1 {
++		t.Fatalf("expected 1 unified stream file, got %d", len(files))
++	}
++
++	content, err := os.ReadFile(filepath.Join(logDir, "codex-dumps", files[0].Name()))
++	if err != nil {
++		t.Fatalf("read stream file: %v", err)
++	}
++	contentStr := string(content)
++	if !strings.Contains(contentStr, "hello") || !strings.Contains(contentStr, " world") || !strings.Contains(contentStr, "response.completed") {
++		t.Fatalf("stream buffer missed deltas, got: %s", contentStr)
++	}
++
++	// Test HTTP chunks
++	chunk1 := []byte("data: {\"type\":\"chunk1\"}\n\n")
++	chunkDone := []byte("data: [DONE]\n\n")
++
++	CodexDumpHTTPChunk("stream-http-1", "upstream_in", chunk1)
++	CodexDumpHTTPChunk("stream-http-1", "upstream_in", chunkDone)
++	CodexDumpHTTPFinish("stream-http-1", "upstream_in")
++
++	FlushAllStreamBuffers()
++
++	files2, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++	if err != nil {
++		t.Fatalf("read capture directory: %v", err)
++	}
++	if len(files2) != 2 {
++		t.Fatalf("expected 2 files total (1 ws stream + 1 http stream), got %d", len(files2))
++	}
++}
++
++func TestCodexDumpMetadataUsesHashNotRedacted(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, t.TempDir())
++	payload := []byte(`{"type":"response.create","model":"gpt-6-astra","client_metadata":{"turn_id":"turn-1","api_key":"secret-token","x-codex-turn-state":"ts-val"}}`)
++	CodexDumpFrame("session", "client_in", payload)
++	view := output.String()
++
++	if strings.Contains(view, "<redacted>") {
++		t.Fatalf("expected metadata not to be redacted with literal '<redacted>', got: %s", view)
++	}
++	if !strings.Contains(view, "sha256:") {
++		t.Fatalf("expected token to be hashed with 'sha256:', got: %s", view)
++	}
++	if !strings.Contains(view, "turn-1") {
++		t.Fatalf("expected public turn_id to be preserved, got: %s", view)
++	}
++}
++
++func TestCodexDumpArtifactStoresExactBytesPrivately(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("Linux raw capture")
++	}
++	logDir := t.TempDir()
++	ConfigureCodexDump(true, logDir)
++	t.Cleanup(func() { ConfigureCodexDump(false, "") })
++	t.Cleanup(func() { ConfigureCodexDump(false, "") })
++	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
++	CodexDumpBinaryFrame("session", "client_in", payload)
++	FlushAllStreamBuffers()
++	files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++	if err != nil || len(files) != 1 {
++		t.Fatalf("artifacts: %v / %v", files, err)
++	}
++	path := filepath.Join(logDir, "codex-dumps", files[0].Name())
++	got, err := os.ReadFile(path)
++	if err != nil || !bytes.Equal(got, payload) {
++		t.Fatalf("exact bytes: %v / %v", got, err)
++	}
++	info, err := os.Stat(path)
++	if err != nil || info.Mode().Perm() != 0600 {
++		t.Fatalf("file permissions: %v / %v", info, err)
++	}
++	dirInfo, err := os.Stat(filepath.Dir(path))
++	if err != nil || dirInfo.Mode().Perm() != 0700 {
++		t.Fatalf("directory permissions: %v / %v", dirInfo, err)
++	}
++}
++
++func TestCodexDumpDirectoryGenerationAndDisableDrain(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("Linux raw capture")
++	}
++	first, second := t.TempDir(), t.TempDir()
++	delta := []byte(`{"type":"response.output_text.delta","delta":"first-generation"}`)
++	ConfigureCodexDump(true, first)
++	CodexDumpFrame("same-session", "client_out", delta)
++	ConfigureCodexDump(true, second) // drains old capture before changing directory
++	CodexDumpFrame("same-session", "client_out", []byte(`{"type":"response.completed","generation":"second"}`))
++	ConfigureCodexDump(false, "") // drain and withdraw; late chunks cannot reopen
++	CodexDumpHTTPChunk("same-session", "client_out", []byte("late"))
++	for index, dir := range []string{first, second} {
++		files, err := os.ReadDir(filepath.Join(dir, "codex-dumps"))
++		if err != nil || len(files) != 1 {
++			t.Fatalf("generation %d: %v / %v", index, files, err)
++		}
++		payload, err := os.ReadFile(filepath.Join(dir, "codex-dumps", files[0].Name()))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if index == 0 && !bytes.Equal(payload, append(delta, '\n')) {
++			t.Fatalf("old generation changed: %q", payload)
++		}
++		if index == 1 && (bytes.Contains(payload, []byte("first-generation")) || bytes.Contains(payload, []byte("late"))) {
++			t.Fatalf("generations mixed: %q", payload)
++		}
++	}
++}
++
++func TestCodexDeltasDoNotProduceTraceRecords(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, t.TempDir())
++	CodexDumpFrame("session", "client_out", []byte(`{"type":"response.output_text.delta","delta":"stream"}`))
++	CodexDumpHTTPChunk("session", "client_out", []byte("data: delta\n\n"))
++	if output.Len() != 0 {
++		t.Fatalf("per-delta trace records: %s", output.String())
++	}
++	CodexDumpFrame("session", "client_out", []byte(`{"type":"response.completed","usage":{"cached_tokens":42}}`))
++	if !strings.Contains(output.String(), "cached_tokens") {
++		t.Fatal("terminal metadata missing")
++	}
++}
++
++func TestCodexDumpProviderReasoningSummariesReadableAtDone(t *testing.T) {
++	for _, payload := range []string{
++		`{"type":"response.reasoning_summary_text.done","text":"I will inspect the route before calling the tool."}`,
++		`{"type":"response.reasoning_summary_part.done","part":{"type":"summary_text","text":"I will inspect the route before calling the tool."}}`,
++		`{"type":"response.reasoning_summary_part.done","part":{"summary_text":"I will inspect the route before calling the tool."}}`,
++		`{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"I will inspect the route before calling the tool."}],"encrypted_content":"hidden-encrypted"}}`,
++		`{"type":"response.completed","response":{"usage":{"total_tokens":7},"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"I will inspect the route before calling the tool.","content":"hidden-answer","encrypted_content":"hidden-encrypted"}],"encrypted_content":"hidden-encrypted"},{"type":"message","content":[{"type":"output_text","text":"hidden-answer"}]}]}}`,
++	} {
++		t.Run(gjson.Get(payload, "type").String(), func(t *testing.T) {
++			output := captureCodexDumpLogs(t)
++			log.SetLevel(log.TraceLevel)
++			ConfigureCodexDump(false, "")
++			raw := []byte(payload)
++			before := bytes.Clone(raw)
++			CodexDumpFrame("plain-session", "upstream_in", raw)
++			view := output.String()
++			if !strings.Contains(view, "I will inspect the route before calling the tool.") {
++				t.Fatalf("summary omitted: %s", view)
++			}
++			for _, hidden := range []string{"hidden-encrypted", "hidden-answer", "sha256:"} {
++				if strings.Contains(view, hidden) {
++					t.Fatalf("unexpected value %s: %s", hidden, view)
++				}
++			}
++			if !bytes.Equal(raw, before) {
++				t.Fatal("trace altered wire payload")
++			}
++		})
++	}
++}
++
++func TestCodexDumpReadableMetadataAndExplicitCredentials(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, "")
++	payload := []byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"opaque-readable-state","x-models-etag":"catalog"},"metadata":{"token":"public-ambiguous-token","routing_token":"public-route","session_id":"plain-session","decision":"continue","total_tokens":42,"api_key":"private-key","authorization":"Bearer private-auth","jwt":"private-jwt","cookie":"__Secure-session=private-session; cf_clearance=public-lb"}}`)
++	CodexDumpFrame("plain-session", "upstream_in", payload)
++	view := output.String()
++	for _, visible := range []string{"opaque-readable-state", "public-ambiguous-token", "public-route", "plain-session", "continue", "42", "public-lb"} {
++		if !strings.Contains(view, visible) {
++			t.Fatalf("public value missing %s: %s", visible, view)
++		}
++	}
++	for _, secret := range []string{"private-key", "private-auth", "private-jwt", "private-session"} {
++		if strings.Contains(view, secret) {
++			t.Fatalf("credential leaked %s: %s", secret, view)
++		}
++	}
++	if !strings.Contains(view, "sha256:") {
++		t.Fatal("credentials lack fingerprints")
++	}
++}
++
++func TestCodexDumpSummarySelectionExcludesPromptsAnswersAndDeltas(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	ConfigureCodexDump(false, "")
++	CodexDumpHTTPRequest("session", "client_in", "POST", "https://example.test/responses", nil, []byte(`{"type":"response.reasoning_summary_text.done","text":"private-prompt","summary":"private-summary","input":[{"text":"private-input"}]}`))
++	CodexDumpFrame("session", "client_in", []byte(`{"type":"response.reasoning_summary_text.done","text":"private-ws-input"}`))
++	CodexDumpHTTPResponse("session", "unknown", 200, nil, []byte(`{"type":"response.reasoning_summary_text.done","text":"private-unknown-leg"}`))
++	CodexDumpFrame("session", "upstream_in", []byte(`{"type":"response.output_item.done","item":{"type":"message","content":[{"text":"private-answer"}]}}`))
++	before := output.Len()
++	CodexDumpFrame("session", "upstream_in", []byte(`{"type":"response.reasoning_summary_text.delta","delta":"private-delta"}`))
++	if output.Len() != before {
++		t.Fatal("delta generated TRACE")
++	}
++	for _, secret := range []string{"private-prompt", "private-summary", "private-input", "private-ws-input", "private-unknown-leg", "private-answer", "private-delta"} {
++		if strings.Contains(output.String(), secret) {
++			t.Fatalf("unselected text leaked %s", secret)
++		}
++	}
++	fields := log.Fields{}
++	addPayloadView(fields, []byte(`{"type":"response.reasoning_summary_text.done","text":"`+strings.Repeat("x", maxCodexDumpViewBytes)+`"}`), true)
++	if fields["payload_view_omitted"] != "input-size-limit" {
++		t.Fatal("large summary view not bounded")
++	}
++}
++
++func TestCodexDumpPayloadViewRejectsNonObjectBodies(t *testing.T) {
++	for _, raw := range []string{`"private-scalar"`, `["private-array"]`, `[{"type":"request"},"private-array"]`} {
++		fields := log.Fields{}
++		addPayloadView(fields, []byte(raw), false)
++		if _, exists := fields["payload_view"]; exists {
++			t.Fatalf("nonobject body disclosed: %s", raw)
++		}
++	}
++}
++
++func TestCodexTraceCookiePolicyMatchesMetadataAndHeaders(t *testing.T) {
++	output := captureCodexDumpLogs(t)
++	log.SetLevel(log.TraceLevel)
++	route := "eyJhbGciOiJIUzI1NiJ9.eyJyb3V0ZSI6Indlc3QifQ.sig"
++	cookie := "__oailb=" + route + "; session=visible-session; sid=visible-sid; at=secret-access; rt=secret-refresh"
++	headers := http.Header{"Cookie": []string{cookie}, "Authorization": []string{"Bearer secret-auth"}}
++	CodexDumpHTTPRequest("cookie-policy", "client_in", "POST", "https://example.test/responses", headers, nil)
++	CodexDumpFrame("cookie-policy", "upstream_in", []byte(`{"type":"response.metadata","headers":{"cookie":"`+cookie+`"}}`))
++	view := output.String()
++	for _, plain := range []string{route, "visible-session", "visible-sid"} {
++		if strings.Count(view, plain) != 2 {
++			t.Fatalf("metadata/header policy differ for %s: %s", plain, view)
++		}
++	}
++	for _, secret := range []string{"secret-access", "secret-refresh", "secret-auth"} {
++		if strings.Contains(view, secret) {
++			t.Fatalf("credential exposed: %s", secret)
++		}
++	}
++}

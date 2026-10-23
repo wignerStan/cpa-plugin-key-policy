@@ -1,0 +1,53 @@
+From 96c209cd3054fb695b9142a477ca0b06de6063eb Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/codex_model_guard.go)
+
+---
+ internal/pluginhost/codex_model_guard.go | 36 ++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+ create mode 100644 internal/pluginhost/codex_model_guard.go
+
+diff --git a/internal/pluginhost/codex_model_guard.go b/internal/pluginhost/codex_model_guard.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9a864d0f9686b1d7e8ca49996d918a8235b82b3
+--- /dev/null
++++ b/internal/pluginhost/codex_model_guard.go
+@@ -0,0 +1,36 @@
++package pluginhost
++
++import (
++	"context"
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++// ExchangeModelGuard never silently bypasses a missing, unloaded or fused guard.
++func (h *Host) ExchangeModelGuard(ctx context.Context, id string, in pluginapi.ModelGuardExchange) (out pluginapi.ModelGuardDecision, err error) {
++	if h == nil {
++		return out, fmt.Errorf("required model guard unavailable")
++	}
++	for _, record := range h.activeRecords() {
++		if record.id != id {
++			continue
++		}
++		guard := record.plugin.Capabilities.CodexModelGuard
++		if guard == nil || h.isPluginFused(id) {
++			break
++		}
++		defer func() {
++			if p := recover(); p != nil {
++				h.fusePlugin(id, "CodexModelGuard.Exchange", p)
++				out = pluginapi.ModelGuardDecision{}
++				err = fmt.Errorf("required model guard panicked")
++			}
++		}()
++		out, err = guard.ExchangeModelGuard(ctx, in)
++		if err == nil && (!h.recordCurrent(record) || h.isPluginFused(id)) {
++			return pluginapi.ModelGuardDecision{}, fmt.Errorf("model guard changed during request")
++		}
++		return out, err
++	}
++	return out, fmt.Errorf("required model guard unavailable")
++}

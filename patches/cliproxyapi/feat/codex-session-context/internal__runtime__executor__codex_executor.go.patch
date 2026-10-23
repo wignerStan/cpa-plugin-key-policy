@@ -1,0 +1,69 @@
+From 34b3b1024b78a0d97bb770681c2ad093baa37662 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(codex): preserve execution session and response metadata
+ (internal/runtime/executor/codex_executor.go)
+
+---
+ internal/runtime/executor/codex_executor.go | 45 ++++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/internal/runtime/executor/codex_executor.go b/internal/runtime/executor/codex_executor.go
+index aeaee31e7255f29fe591476744abc29cdf0967f2..9339dc374b45aff930651e4f6abea030cb448c00 100644
+--- a/internal/runtime/executor/codex_executor.go
++++ b/internal/runtime/executor/codex_executor.go
+@@ -1,6 +1,11 @@
+ package executor
+ 
+-import "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++import (
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++)
+ 
+ // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
+ // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
+@@ -18,3 +23,41 @@ func (e *CodexExecutor) modelLevelCooling() bool {
+ 
+ // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+ func (e *CodexExecutor) SupportsApplyPatch() bool { return e != nil }
++
++// CodexHTTPProviderExecutor reuses native Responses for a plugin-managed auth.
++// The provider name identifies its auth parser, not a separate plugin or wire API.
++// Embedding the HTTP executor intentionally avoids auto/WebSocket selection.
++type CodexHTTPProviderExecutor struct {
++	*CodexExecutor
++	provider string
++}
++
++func NewCodexHTTPProviderExecutor(provider string, cfg *config.Config) *CodexHTTPProviderExecutor {
++	return &CodexHTTPProviderExecutor{CodexExecutor: NewCodexExecutor(cfg), provider: provider}
++}
++
++func (e *CodexHTTPProviderExecutor) Identifier() string { return e.provider }
++
++func (e *CodexHTTPProviderExecutor) UsesConfig(cfg *config.Config) bool { return e.cfg == cfg }
++
++// ForAPIKey retains the plugin provider when Manager applies API-key settings.
++// Inheriting CodexExecutor.ForAPIKey would discard this wrapper.
++func (e CodexHTTPProviderExecutor) ForAPIKey() cliproxyauth.ProviderExecutor {
++	if e.CodexExecutor != nil {
++		e.CodexExecutor = e.CodexExecutor.ForAPIKey().(*CodexExecutor)
++	}
++	return &e
++}
++
++// RequestToFormat reports the wire format independently of the auth provider.
++// Other plugins must see Responses here, even for a custom provider name.
++func (e *CodexHTTPProviderExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
++	switch opts.SourceFormat.String() {
++	case "openai-image", "openai-video", "openai-speech":
++		return opts.SourceFormat
++	}
++	if opts.Alt == "responses/compact" && !opts.Stream {
++		return sdktranslator.FormatOpenAIResponse
++	}
++	return sdktranslator.FormatCodex
++}

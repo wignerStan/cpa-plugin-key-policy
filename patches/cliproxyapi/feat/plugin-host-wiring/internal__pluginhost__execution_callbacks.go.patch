@@ -1,0 +1,74 @@
+From e821815a583a6c4519acbd6aa5c30c8c9f16f27e Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/execution_callbacks.go)
+
+---
+ internal/pluginhost/execution_callbacks.go | 57 ++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+ create mode 100644 internal/pluginhost/execution_callbacks.go
+
+diff --git a/internal/pluginhost/execution_callbacks.go b/internal/pluginhost/execution_callbacks.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f04f481c0b4406010ba844565d3a36435a864582
+--- /dev/null
++++ b/internal/pluginhost/execution_callbacks.go
+@@ -0,0 +1,57 @@
++package pluginhost
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++// A supplied context token must belong to this live plugin instance. Missing
++// tokens retain the legacy background callback behavior for ordinary plugins.
++func (h *Host) ownedExecutionContext(ctx context.Context, id string) (context.Context, error) {
++	bound, err := h.ownedCallbackContext(ctx, id)
++	if err != nil {
++		return nil, err
++	}
++	if err := bound.Err(); err != nil {
++		return nil, err
++	}
++	return bound, nil
++}
++
++// Ownership remains valid until callback cleanup. Legacy model streams detach
++// parent cancellation, while guarded executions additionally require a live ctx.
++func (h *Host) ownedCallbackContext(ctx context.Context, id string) (context.Context, error) {
++	if id == "" {
++		return ctx, nil
++	}
++	bound, owner, instance, ok := h.lookupCallbackContext(id)
++	caller := hostCallbackPluginIDFromContext(ctx)
++	// In-process Go adapters are already trusted and may have no C instance.
++	if !ok || (caller != "" && (owner != caller || instance != hostCallbackInstanceFromContext(ctx))) {
++		return nil, fmt.Errorf("invalid execution context owner")
++	}
++	return bound, nil
++}
++func (h *Host) callHostModelValidate(ctx context.Context, raw []byte) ([]byte, error) {
++	var req struct {
++		HostCallbackID string `json:"host_callback_id"`
++		Receipt        string `json:"receipt"`
++	}
++	if json.Unmarshal(raw, &req) != nil {
++		return nil, fmt.Errorf("invalid receipt request")
++	}
++	bound, err := h.ownedExecutionContext(ctx, req.HostCallbackID)
++	if err != nil {
++		return nil, err
++	}
++	callbacks := pluginapi.ExecutionCallbacksFrom(bound)
++	if callbacks == nil || callbacks.Validate == nil {
++		return nil, fmt.Errorf("no bound execution")
++	}
++	if err = callbacks.Validate(bound, req.Receipt); err != nil {
++		return nil, err
++	}
++	return marshalRPCResult(struct{}{})
++}

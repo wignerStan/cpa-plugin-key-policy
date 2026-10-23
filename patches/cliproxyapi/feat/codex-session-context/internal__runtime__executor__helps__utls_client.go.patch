@@ -1,0 +1,79 @@
+From 84be7f4d836d49079872cfec4b64736254d8eae7 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 05:00:00 -0700
+Subject: [PATCH] feat(guard): isolate verification HTTP sockets (internal/runtime/executor/helps/utls_client.go)
+
+---
+diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
+index 1b497861a9baaf7536ca86eae7a2edcc542d0f74..fbf181575820031be345e9e289efcf169524cbb3 100644
+--- a/internal/runtime/executor/helps/utls_client.go
++++ b/internal/runtime/executor/helps/utls_client.go
+@@ -15,6 +15,7 @@ import (
+ 	tls "github.com/refraction-networking/utls"
+ 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/guardhttp"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+@@ -28,7 +29,8 @@ import (
+ // providers that require browser-like TLS. The HTTP version follows ALPN. Each
+ // request gets a dedicated connection that is closed with the response body.
+ type utlsRoundTripper struct {
+-	dialer proxy.Dialer
++	dialer    proxy.Dialer
++	http1Only bool
+ }
+ 
+ type closeConnectionBody struct {
+@@ -81,6 +83,29 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
+ 
+ 	tlsConfig := &tls.Config{ServerName: host}
+ 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
++	if t.http1Only {
++		spec, err := tls.UTLSIdToSpec(tls.HelloChrome_Auto)
++		if err != nil {
++			_ = conn.Close()
++			return nil, err
++		}
++		extensions := spec.Extensions[:0]
++		for _, extension := range spec.Extensions {
++			switch v := extension.(type) {
++			case *tls.ALPNExtension:
++				v.AlpnProtocols = []string{"http/1.1"}
++			case *tls.ApplicationSettingsExtension, *tls.ApplicationSettingsExtensionNew:
++				continue // h2 application settings cannot accompany HTTP/1.1.
++			}
++			extensions = append(extensions, extension)
++		}
++		spec.Extensions = extensions
++		tlsConn = tls.UClient(conn, tlsConfig, tls.HelloCustom)
++		if err := tlsConn.ApplyPreset(&spec); err != nil {
++			_ = conn.Close()
++			return nil, err
++		}
++	}
+ 
+ 	handshakeCtx, cancelHandshake := handshakeContext(ctx)
+ 	defer cancelHandshake()
+@@ -456,6 +481,20 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+ 		anthropicRT = ctxRoundTripper
+ 		standardTransport = ctxRoundTripper
+ 	}
++	if policy := guardhttp.Policy(ctx); policy != "" {
++		key := proxyURL
++		if key == "" {
++			key = fmt.Sprintf("transport:%p", standardTransport)
++		}
++		standardTransport = guardhttp.Select(ctx, standardTransport, key)
++		// Codex is the only caller that installs this policy. Preserve the
++		// Chrome TLS profile on ChatGPT; each uTLS call already owns its socket.
++		if chrome, ok := chromeRT.(*utlsRoundTripper); ok {
++			chrome.http1Only = policy == guardhttp.HTTP1
++		} else {
++			chromeRT = guardhttp.Select(ctx, chromeRT, key)
++		}
++	}
+ 
+ 	client := &http.Client{
+ 		Transport: &fallbackRoundTripper{

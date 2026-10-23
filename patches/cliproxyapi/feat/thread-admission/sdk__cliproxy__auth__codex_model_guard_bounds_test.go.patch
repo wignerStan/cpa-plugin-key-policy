@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/sdk/cliproxy/auth/codex_model_guard_bounds_test.go b/sdk/cliproxy/auth/codex_model_guard_bounds_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..baac26f3fb9b9e3c9cb85e0fcede29831c683988
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard_bounds_test.go
+@@ -0,0 +1,199 @@
++package auth
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"testing"
++	"time"
++
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestGuardRequestStopDoesNotBecomeFingerprintFailure(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(fmt.Sprint(stream), func(t *testing.T) {
++			manager, ids := threadManager(t, &FillFirstSelector{})
++			stopped := wrapRequestStopError(errors.New("compact tools missing"))
++			manager.RegisterExecutor(&customStreamMockExecutor{
++				identifier: "codex",
++				mockCustomErrorExecutor: mockCustomErrorExecutor{executeFn: func(context.Context, *Auth, core.Request, core.Options) (core.Response, error) {
++					return core.Response{}, stopped
++				}},
++				streamFn: func(context.Context, *Auth, core.Request, core.Options) (*core.StreamResult, error) {
++					return nil, stopped
++				},
++			})
++			host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				callbacks := pluginapi.ExecutionCallbacksFrom(ctx)
++				request := pluginapi.HostModelExecutionRequest{Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers, Stream: stream}
++				var err error
++				var errorField string
++				if stream {
++					r, e := callbacks.Stream(ctx, request)
++					err, errorField = e, r.Response.Error
++				} else {
++					r, e := callbacks.Execute(ctx, request)
++					err, errorField = e, r.Error
++				}
++				if !isRequestStopError(err) || errorField != "" {
++					t.Fatal("compact rejection became an upstream model failure", err, errorField)
++				}
++				return pluginapi.ModelGuardDecision{}, err
++			})
++			if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			target, _ := manager.GetByID(ids[0])
++			_, _, err := manager.runModelGuard(context.Background(), manager.executorFor("codex"), target, guardRequest(), guardOptions(), "model", stream)
++			if !isRequestStopError(err) {
++				t.Fatal("request did not stop", err)
++			}
++		})
++	}
++}
++
++func TestGuardRejectsOversizedBodyWithoutChunks(t *testing.T) {
++	manager, ids := threadManager(t, &FillFirstSelector{})
++	host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		response, err := pluginapi.ExecutionCallbacksFrom(ctx).Execute(ctx, pluginapi.HostModelExecutionRequest{
++			Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers,
++		})
++		if err != nil {
++			return pluginapi.ModelGuardDecision{}, err
++		}
++		return pluginapi.ModelGuardDecision{
++			Action: "release", Receipt: response.Receipt,
++			Response: pluginapi.ModelGuardObservation{Body: make([]byte, 2*guardBufferLimit+1)},
++		}, nil
++	})
++	if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	target, _ := manager.GetByID(ids[0])
++	response, err := manager.executeWithModelGuard(context.Background(), manager.executorFor("codex"), target, guardRequest(), guardOptions(), "model")
++	if err == nil {
++		t.Fatalf("released %d bytes with zero chunks; expected hold limit rejection", len(response.Payload))
++	}
++}
++
++func TestGuardRejectsOversizedPluginChunks(t *testing.T) {
++	for _, lengths := range [][]int{{guardBufferLimit + 1}, {guardBufferLimit / 2, guardBufferLimit/2 + 1}} {
++		t.Run(fmt.Sprint(lengths), func(t *testing.T) {
++			manager, ids := threadManager(t, &FillFirstSelector{})
++			host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				response, err := pluginapi.ExecutionCallbacksFrom(ctx).Execute(ctx, pluginapi.HostModelExecutionRequest{
++					Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers,
++				})
++				if err != nil {
++					return pluginapi.ModelGuardDecision{}, err
++				}
++				decision := pluginapi.ModelGuardDecision{Action: "release", Receipt: response.Receipt, Response: pluginapi.ModelGuardObservation{Body: []byte("tiny completion")}}
++				for _, length := range lengths {
++					decision.Chunks = append(decision.Chunks, make([]byte, length))
++				}
++				return decision, nil
++			})
++			if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			target, _ := manager.GetByID(ids[0])
++			response, chunks, err := manager.runModelGuard(context.Background(), manager.executorFor("codex"), target, guardRequest(), guardOptions(), "model", true)
++			if err == nil || len(response.Payload) != 0 || len(chunks) != 0 {
++				t.Fatal("plugin chunks exceeded stream hold quota", err)
++			}
++		})
++	}
++}
++
++func TestGuardStreamOverflowCancelsBeforeBlockedDelivery(t *testing.T) {
++	for _, lengths := range [][]int{{guardBufferLimit + 1}, {guardBufferLimit / 2, guardBufferLimit/2 + 1}} {
++		t.Run(fmt.Sprint(lengths), func(t *testing.T) {
++			manager, ids := threadManager(t, &FillFirstSelector{})
++			var upstreamCtx context.Context
++			manager.RegisterExecutor(&customStreamMockExecutor{identifier: "codex", streamFn: func(ctx context.Context, _ *Auth, _ core.Request, _ core.Options) (*core.StreamResult, error) {
++				upstreamCtx = ctx
++				chunks := make(chan core.StreamChunk, len(lengths))
++				for _, length := range lengths {
++					chunks <- core.StreamChunk{Payload: make([]byte, length)}
++				}
++				return &core.StreamResult{Chunks: chunks}, nil
++			}})
++			host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				stream, err := pluginapi.ExecutionCallbacksFrom(ctx).Stream(ctx, pluginapi.HostModelExecutionRequest{
++					Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers, Stream: true,
++				})
++				if err != nil {
++					return pluginapi.ModelGuardDecision{}, err
++				}
++				for i := 0; i < len(lengths)-1; i++ {
++					if chunk := <-stream.Chunks; len(chunk.Payload) != lengths[i] || chunk.Err != nil {
++						t.Fatal("valid chunk changed", chunk.Err)
++					}
++				}
++				// Cancel upstream before waiting for the plugin to consume the error.
++				select {
++				case <-upstreamCtx.Done():
++				case <-time.After(5 * time.Second):
++					t.Fatal("oversized stream left upstream active")
++				}
++				chunk := <-stream.Chunks
++				if !errors.Is(chunk.Err, httptransport.ErrResponseBodyTooLarge) || len(chunk.Payload) != 0 {
++					t.Fatal("oversized payload crossed callback", chunk.Err)
++				}
++				if _, ok := <-stream.Chunks; ok {
++					t.Fatal("overflow stream stayed open")
++				}
++				return pluginapi.ModelGuardDecision{}, chunk.Err
++			})
++			if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			target, _ := manager.GetByID(ids[0])
++			if _, err := manager.streamWithModelGuard(context.Background(), manager.executorFor("codex"), target, guardRequest(), guardOptions(), "model"); !isRequestStopError(err) {
++				t.Fatal("local overflow did not stop request without upstream penalty", err)
++			}
++		})
++	}
++}
++
++func TestGuardStreamCancellationClosesBlockedForwarder(t *testing.T) {
++	manager, ids := threadManager(t, &FillFirstSelector{})
++	var upstreamCtx context.Context
++	manager.RegisterExecutor(&customStreamMockExecutor{identifier: "codex", streamFn: func(ctx context.Context, _ *Auth, _ core.Request, _ core.Options) (*core.StreamResult, error) {
++		upstreamCtx = ctx
++		return &core.StreamResult{Chunks: make(chan core.StreamChunk)}, nil
++	}})
++	parent, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		stream, err := pluginapi.ExecutionCallbacksFrom(ctx).Stream(ctx, pluginapi.HostModelExecutionRequest{
++			Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: in.Headers, Stream: true,
++		})
++		if err != nil {
++			return pluginapi.ModelGuardDecision{}, err
++		}
++		cancel()
++		select {
++		case _, ok := <-stream.Chunks:
++			if ok {
++				t.Fatal("canceled stream emitted output")
++			}
++		case <-time.After(5 * time.Second):
++			t.Fatal("canceled stream forwarder did not stop")
++		}
++		if upstreamCtx.Err() == nil {
++			t.Fatal("upstream remained live")
++		}
++		return pluginapi.ModelGuardDecision{}, context.Canceled
++	})
++	if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	target, _ := manager.GetByID(ids[0])
++	if _, err := manager.streamWithModelGuard(parent, manager.executorFor("codex"), target, guardRequest(), guardOptions(), "model"); err == nil {
++		t.Fatal("canceled request was accepted")
++	}
++}
+-- 
+2.47.3

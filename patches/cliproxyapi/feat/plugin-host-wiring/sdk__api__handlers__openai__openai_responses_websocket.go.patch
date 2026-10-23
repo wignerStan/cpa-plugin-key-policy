@@ -1,0 +1,136 @@
+From 36bd3ac6262334ed9763463cf7c8fbae31e21d59 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_websocket.go)
+
+---
+ .../openai/openai_responses_websocket.go      | 66 ++++++++++++++++---
+ 1 file changed, 56 insertions(+), 10 deletions(-)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 2b5ab5e034faf3c77efd0ce6630480a6344a23b9..5a43a3ac6d657a49decba2ce92113d0c8c5885fe 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -16,6 +16,7 @@ import (
+ 	"github.com/google/uuid"
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+@@ -267,12 +268,19 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
+ // response events back as JSON websocket text messages. `response.interrupt`
+ // is forwarded to the current Codex upstream socket without starting a new turn.
+ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
++	if isCodexThreadTitleSession(c.Request.Header) && !codexThreadTitleSessionEnabled(h) {
++		log.Infof("responses websocket: blocked thread_title session-naming sidecar remote=%s", websocketClientAddress(c))
++		c.AbortWithStatus(http.StatusForbidden)
++		return
++	}
++
+ 	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
+ 	if err != nil {
+ 		return
+ 	}
+ 	writer := newResponsesWebsocketWriter(conn)
+ 	passthroughSessionID := uuid.NewString()
++	requestlogging.CodexDumpHTTPRequest(passthroughSessionID, "client_in", c.Request.Method, c.Request.URL.String(), c.Request.Header, nil)
+ 	socketCtx, cancelSocket := context.WithCancelCause(c.Request.Context())
+ 	defer cancelSocket(nil)
+ 	c.Request = c.Request.WithContext(socketCtx)
+@@ -288,9 +296,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 	}
+ 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+ 	localInterrupt := newResponsesLocalInterrupt()
++	interruptCtx := handlers.WithExecutionSessionID(context.WithValue(socketCtx, "gin", c), passthroughSessionID)
+ 	input, inputDone := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, func(payload []byte) error {
+-		return h.forwardResponsesWebsocketInterrupt(socketCtx, passthroughSessionID, payload)
+-	}, localInterrupt, writer, wsTimelineLog)
++		return h.forwardResponsesWebsocketInterrupt(interruptCtx, passthroughSessionID, payload)
++	}, localInterrupt, writer, wsTimelineLog, passthroughSessionID)
+ 	var duplexInput <-chan cliproxyexecutor.WebsocketInput
+ 	if codexResponseSteering {
+ 		duplexInput = input
+@@ -448,13 +457,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+ 			continue
+ 		}
+-		// log.Infof(
+-		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
+-		// 	passthroughSessionID,
+-		// 	msgType,
+-		// 	websocketPayloadEventType(payload),
+-		// 	websocketPayloadPreview(payload),
+-		// )
+ 		wsTimelineLog.BeginRequest()
+ 		wsTimelineLog.Append("request", payload, time.Now())
+ 
+@@ -641,7 +643,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		if errMsg != nil {
+ 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+ 			markAPIResponseTimestamp(c)
+-			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
++			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, passthroughSessionID, errMsg)
+ 			log.Infof(
+ 				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+ 				passthroughSessionID,
+@@ -664,6 +666,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
+ 		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+ 
++		if isCodexThreadTitleRequest(c.Request.Header, requestJSON) && !codexThreadTitleSessionEnabled(h) {
++			log.Infof("responses websocket: blocked thread_title session-naming payload remote=%s", websocketClientAddress(c))
++			errMsg := &interfaces.ErrorMessage{
++				StatusCode: http.StatusForbidden,
++				Error:      fmt.Errorf("thread_title session is disabled"),
++			}
++			_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, passthroughSessionID, errMsg)
++			continue
++		}
++
+ 		if isPrewarm {
+ 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
+ 				requestJSON = updated
+@@ -901,6 +913,40 @@ func websocketClientAddress(c *gin.Context) string {
+ 	return strings.TrimSpace(c.ClientIP())
+ }
+ 
++func isCodexThreadTitleSession(headers http.Header) bool {
++	return isCodexThreadTitleMetadata(headers.Get("X-Codex-Turn-Metadata"))
++}
++
++func isCodexThreadTitleRequest(headers http.Header, body []byte) bool {
++	if isCodexThreadTitleSession(headers) {
++		return true
++	}
++	if len(body) == 0 {
++		return false
++	}
++	for _, path := range []string{"client_metadata.thread_source", "metadata.thread_source"} {
++		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, path).String()), "thread_title") {
++			return true
++		}
++	}
++	return false
++}
++
++func isCodexThreadTitleMetadata(raw string) bool {
++	raw = strings.TrimSpace(raw)
++	if raw == "" {
++		return false
++	}
++	return strings.EqualFold(strings.TrimSpace(gjson.Get(raw, "thread_source").String()), "thread_title")
++}
++
++func codexThreadTitleSessionEnabled(h *OpenAIResponsesAPIHandler) bool {
++	if h == nil || h.Cfg == nil || h.Cfg.CodexThreadTitleSession == nil {
++		return true
++	}
++	return *h.Cfg.CodexThreadTitleSession
++}
++
+ func websocketUpgradeHeaders(req *http.Request) http.Header {
+ 	headers := http.Header{}
+ 	if req == nil {

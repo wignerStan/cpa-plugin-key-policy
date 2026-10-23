@@ -1,0 +1,37 @@
+From f0918a3a32e2efc0ee73aade717da4809fe0dcce Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/conductor_lifecycle.go)
+
+---
+ sdk/cliproxy/auth/conductor_lifecycle.go | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/sdk/cliproxy/auth/conductor_lifecycle.go b/sdk/cliproxy/auth/conductor_lifecycle.go
+index a2952e41a6423668c20407e0f6e470fcec5de830..ccb0f1a1bfa3e98c7a1e035478105933201efacb 100644
+--- a/sdk/cliproxy/auth/conductor_lifecycle.go
++++ b/sdk/cliproxy/auth/conductor_lifecycle.go
+@@ -313,6 +313,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+ 	auth.Success = existing.Success
+ 	auth.Failed = existing.Failed
+ 	auth.recentRequests = existing.recentRequests
++	auth.AdmissionVersion = existing.AdmissionVersion
++	if (auth.Disabled || auth.Status == StatusDisabled) != (existing.Disabled || existing.Status == StatusDisabled) {
++		auth.AdmissionVersion++
++	}
+ 	if auth.Generation <= existing.Generation {
+ 		auth.Generation = existing.Generation + 1
+ 	} else {
+@@ -389,9 +393,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+ 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+ 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
+ 		// A minted Meta key must reach the store before requests can use it.
+-		if persistMetaMint {
++		if persistMetaMint || requiresAuthPersist(ctx) {
+ 			m.mu.Unlock()
+-			return nil, false, false, fmt.Errorf("persist meta auth: %w", errPersist)
++			return nil, false, false, fmt.Errorf("persist auth: %w", errPersist)
+ 		}
+ 		// Ordinary persistence failures remain non-fatal, but never silent.
+ 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)

@@ -1,0 +1,84 @@
+From ea6abfd6cf2acf675e89b549c40f2547de076890 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 05:00:00 -0700
+Subject: [PATCH] feat(guard): isolate verification HTTP sockets (sdk/pluginapi/types.go)
+
+---
+diff --git a/sdk/pluginapi/types.go b/sdk/pluginapi/types.go
+index edd280319ca8f5195b8ed7be8ad18a2a3ae29f2d..04e1de42bba0d55fc69f256d88635ee8413cb42a 100644
+--- a/sdk/pluginapi/types.go
++++ b/sdk/pluginapi/types.go
+@@ -72,6 +72,7 @@ type ConfigField struct {
+ 
+ // Capabilities groups the optional host integration interfaces exposed by a plugin.
+ type Capabilities struct {
++	CodexModelGuard CodexModelGuard
+ 	// ModelRegistrar contributes development-time model metadata to the host registry.
+ 	ModelRegistrar ModelRegistrar
+ 	// ModelProvider contributes provider-native static and per-auth model metadata.
+@@ -84,6 +85,9 @@ type Capabilities struct {
+ 	FrontendAuthProviderExclusive bool
+ 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
+ 	Scheduler Scheduler
++	// SchedulerAdmission reports candidate eligibility without selecting or
++	// changing scheduler state. This optional callback is used before fallback.
++	SchedulerAdmission SchedulerAdmission
+ 	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
+ 	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
+ 	// credentials from the highest available priority tier.
+@@ -484,6 +488,19 @@ type Scheduler interface {
+ 	Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error)
+ }
+ 
++// SchedulerAdmission applies stable request policy, such as group and weight,
++// across all priority tiers. It must not apply transient availability, advance
++// selection state, or read/write affinity. Handled=false delegates to native policy.
++type SchedulerAdmission interface {
++	Admit(context.Context, SchedulerPickRequest) (SchedulerAdmissionResponse, error)
++}
++
++type SchedulerAdmissionResponse struct {
++	Handled bool
++	// AuthIDs is the full admitted subset; an empty set is not lease exhaustion.
++	AuthIDs []string
++}
++
+ // ModelRouter routes matching requests to a plugin executor, the router's own executor,
+ // or a built-in provider before model-to-provider resolution and auth selection.
+ type ModelRouter interface {
+@@ -678,6 +695,17 @@ type HostHTTPClient interface {
+ 
+ // HostModelExecutionRequest describes a model execution request issued through the host.
+ type HostModelExecutionRequest struct {
++	// HTTPTransport is an opt-in bound Codex guard policy: "session" owns a
++	// parent pool until session rotation or guard completion; "isolated" opens
++	// a fresh socket; "isolated_http1" also requires HTTP/1.1. Empty is native.
++	HTTPTransport string `json:"http_transport,omitempty"`
++	// SingleAttempt requires AuthID and non-stream mode. Transport failures are
++	// returned in the response Error field; local faults remain callback errors.
++	SingleAttempt bool `json:"single_attempt,omitempty"`
++	// OperationID reuses host.http.operation_open/cancel for a single attempt.
++	OperationID string `json:"operation_id,omitempty"`
++	// Auxiliary marks a probe that must not replace the main request capture.
++	Auxiliary bool `json:"auxiliary,omitempty"`
+ 	// EntryProtocol is the inbound client protocol format.
+ 	EntryProtocol string `json:"entry_protocol"`
+ 	// ExitProtocol is the target provider protocol format.
+@@ -707,6 +735,8 @@ type HostModelExecutionRequest struct {
+ 
+ // HostModelExecutionResponse describes a non-streaming host model execution response.
+ type HostModelExecutionResponse struct {
++	Receipt string `json:"receipt,omitempty"`
++	Error   string `json:"error,omitempty"`
+ 	// StatusCode is the model execution HTTP status code.
+ 	StatusCode int `json:"status_code"`
+ 	// Headers contains response headers.
+@@ -717,6 +747,8 @@ type HostModelExecutionResponse struct {
+ 
+ // HostModelStreamResponse describes a streaming host model execution response.
+ type HostModelStreamResponse struct {
++	Receipt string `json:"receipt,omitempty"`
++	Error   string `json:"error,omitempty"`
+ 	// StatusCode is the model execution HTTP status code.
+ 	StatusCode int `json:"status_code"`
+ 	// Headers contains response headers.

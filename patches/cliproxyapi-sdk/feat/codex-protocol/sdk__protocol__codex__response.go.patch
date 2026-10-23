@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/response.go)
+
+---
+diff --git a/sdk/protocol/codex/response.go b/sdk/protocol/codex/response.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a83e1b80a865e4fbc140cc27246ebf5ff7796a9d
+--- /dev/null
++++ b/sdk/protocol/codex/response.go
+@@ -0,0 +1,38 @@
++package codex
++
++import "encoding/json"
++
++// Response is an inspection view. Forward the original wire bytes, not this
++// view: unknown fields and opaque/encrypted output must remain unchanged.
++// Raw fields preserve absent/null/empty distinctions without inventing evidence.
++type Response struct {
++	ID           string            `json:"id"`
++	Status       string            `json:"status"`
++	Usage        Usage             `json:"usage"`
++	Output       []json.RawMessage `json:"output"`
++	Tools        json.RawMessage   `json:"tools"`
++	Instructions json.RawMessage   `json:"instructions"`
++	Metadata     json.RawMessage   `json:"metadata"`
++}
++
++// Event describes Responses and Lite lifecycle, output-item and metadata events.
++// Usage and metadata retain deferred errors, so callers can prioritize a later
++// upstream failure over incomplete evidence. They must inspect those errors.
++type Event struct {
++	Type        string          `json:"type"`
++	Response    json.RawMessage `json:"response"`
++	OutputIndex json.RawMessage `json:"output_index"`
++	Item        json.RawMessage `json:"item"`
++	Headers     MetadataHeaders `json:"headers"`
++}
++
++func (e Event) IsMetadata() bool {
++	return e.Type == "response.metadata" || e.Type == "codex.response.metadata"
++}
++
++// TurnMetadata identifies logical work. ThreadID is not a physical session ID.
++type TurnMetadata struct {
++	ThreadID    string `json:"thread_id"`
++	TurnID      string `json:"turn_id"`
++	RequestKind string `json:"request_kind"`
++}

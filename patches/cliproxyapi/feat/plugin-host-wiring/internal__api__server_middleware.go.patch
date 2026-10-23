@@ -1,0 +1,44 @@
+From f4d0322504a1029a6dce02a5c35659c19e26bd7f Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_middleware.go)
+
+---
+ internal/api/server_middleware.go | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
+index f3f73d530caa6809e21c1e189e62c6ea48b92a00..e6d502f848ecb80fb6f64b8dff9cd1c42cd50abe 100644
+--- a/internal/api/server_middleware.go
++++ b/internal/api/server_middleware.go
+@@ -190,6 +190,29 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+ 	return accessAuthMiddleware(manager, false)
+ }
+ 
++// originModelsEndpointMiddleware applies the explicit host-level policy for
++// native CLIProxyAPI api-keys. It is attached after AuthMiddleware on model
++// list routes, so plugin-owned providers and other auth providers retain their
++// own policies and native keys are denied before model generation by default.
++func (s *Server) originModelsEndpointMiddleware() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if s == nil || s.cfg == nil || s.cfg.AllowOriginModelsEndpoint || c == nil || c.Request == nil {
++			c.Next()
++			return
++		}
++
++		provider, _ := c.Get("accessProvider")
++		if providerName, ok := provider.(string); !ok || !strings.EqualFold(strings.TrimSpace(providerName), sdkaccess.DefaultAccessProviderName) {
++			c.Next()
++			return
++		}
++
++		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
++			"error": "model listing is disabled for native api-keys",
++		})
++	}
++}
++
+ func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+ 	return accessAuthMiddleware(manager, true)
+ }

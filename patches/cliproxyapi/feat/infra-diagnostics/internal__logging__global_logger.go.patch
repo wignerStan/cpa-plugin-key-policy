@@ -1,0 +1,65 @@
+From 4c1c97c8eb1ff63481ff5ad272c0cc3db6efd1fe Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(logging): use direct infra diagnostics and bounded
+ (internal/logging/global_logger.go)
+
+---
+ internal/logging/global_logger.go | 41 +++++++++++++++++++++----------
+ 1 file changed, 28 insertions(+), 13 deletions(-)
+
+diff --git a/internal/logging/global_logger.go b/internal/logging/global_logger.go
+index 928fc25014c7f2fdf45e45c8523564e448a160af..baf53a6e8a45facc5cc9cd90f896d4312746221d 100644
+--- a/internal/logging/global_logger.go
++++ b/internal/logging/global_logger.go
+@@ -59,22 +59,37 @@ var logFieldOrder = []string{
+ 	"credential", "auth_id", "auth_index", "connection", "proxy_scheme", "remote_transport",
+ 	"operation", "upstream_host", "reused", "was_idle", "idle_time",
+ 	"media_session_id", "call_id", "peer", "state", "reason",
++	"codex_event", "protocol", "session_id", "leg", "event_type",
++	"size", "method", "host", "status", "headers", "payload_view", "payload_view_omitted",
++	"capture_queued", "capture_path", "capture_bytes", "capture_fidelity", "capture_pruned", "binary",
+ }
+ 
+ var quotedLogFields = map[string]struct{}{
+-	"credential":       {},
+-	"auth_id":          {},
+-	"auth_index":       {},
+-	"upstream_host":    {},
+-	"operation":        {},
+-	"connection":       {},
+-	"proxy_scheme":     {},
+-	"remote_transport": {},
+-	"media_session_id": {},
+-	"call_id":          {},
+-	"peer":             {},
+-	"state":            {},
+-	"reason":           {},
++	"credential":           {},
++	"auth_id":              {},
++	"auth_index":           {},
++	"upstream_host":        {},
++	"operation":            {},
++	"connection":           {},
++	"proxy_scheme":         {},
++	"remote_transport":     {},
++	"media_session_id":     {},
++	"call_id":              {},
++	"peer":                 {},
++	"state":                {},
++	"reason":               {},
++	"codex_event":          {},
++	"protocol":             {},
++	"session_id":           {},
++	"leg":                  {},
++	"event_type":           {},
++	"method":               {},
++	"host":                 {},
++	"headers":              {},
++	"payload_view":         {},
++	"payload_view_omitted": {},
++	"capture_path":         {},
++	"capture_fidelity":     {},
+ }
+ 
+ var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}

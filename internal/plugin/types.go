@@ -27,7 +27,8 @@ const (
 	// candidates by their plan_type attribute so the request only ever lands on
 	// an auth file of that tier. Returning Handled=false falls back to the host
 	// scheduler, so providers without a tier concept behave as before.
-	MethodSchedulerPick = "scheduler.pick"
+	MethodSchedulerPick  = "scheduler.pick"
+	MethodSchedulerAdmit = "scheduler.admit"
 
 	// MethodUsageHandle is the host->plugin call that delivers a finalized
 	// usage record (tokens already parsed by CPA) after a request completes.
@@ -90,6 +91,7 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool `json:"frontend_auth_provider_exclusive,omitempty"`
 	ModelRouter                   bool `json:"model_router"`
 	Scheduler                     bool `json:"scheduler,omitempty"`
+	SchedulerAdmission            bool `json:"scheduler_admission,omitempty"`
 	ResponseInterceptor           bool `json:"response_interceptor"`
 	UsagePlugin                   bool `json:"usage_plugin"`
 	ManagementAPI                 bool `json:"management_api"`
@@ -166,6 +168,11 @@ type SchedulerPickResponse struct {
 	AuthID string `json:"AuthID,omitempty"`
 	// Handled reports whether the plugin made a scheduling decision.
 	Handled bool `json:"Handled"`
+}
+
+type SchedulerAdmissionResponse struct {
+	Handled bool     `json:"Handled"`
+	AuthIDs []string `json:"AuthIDs"`
 }
 
 type ResponseInterceptRequest struct {

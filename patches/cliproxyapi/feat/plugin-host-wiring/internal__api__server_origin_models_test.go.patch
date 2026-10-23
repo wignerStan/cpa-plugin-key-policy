@@ -1,0 +1,66 @@
+From 2c60a01581f30940079198a728f17383092ef511 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_origin_models_test.go)
+
+---
+ internal/api/server_origin_models_test.go | 49 +++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+ create mode 100644 internal/api/server_origin_models_test.go
+
+diff --git a/internal/api/server_origin_models_test.go b/internal/api/server_origin_models_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5960233470add894826a38fc80bacecf22970c5
+--- /dev/null
++++ b/internal/api/server_origin_models_test.go
+@@ -0,0 +1,49 @@
++package api
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
++)
++
++func TestOriginModelsEndpointMiddlewareDefaultsToDeny(t *testing.T) {
++	tests := []struct {
++		name     string
++		allow    bool
++		provider string
++		wantCode int
++	}{
++		{name: "native key denied by default", provider: access.DefaultAccessProviderName, wantCode: http.StatusUnauthorized},
++		{name: "native key explicitly allowed", allow: true, provider: access.DefaultAccessProviderName, wantCode: http.StatusOK},
++		{name: "plugin provider keeps plugin policy", provider: "plugin:cpa-key-policy:cpa-key-policy", wantCode: http.StatusOK},
++		{name: "no access provider keeps unauthenticated legacy behavior", wantCode: http.StatusOK},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			gin.SetMode(gin.TestMode)
++			engine := gin.New()
++			engine.Use(func(c *gin.Context) {
++				if tt.provider != "" {
++					c.Set("accessProvider", tt.provider)
++				}
++				c.Next()
++			})
++			server := &Server{cfg: &config.Config{SDKConfig: config.SDKConfig{AllowOriginModelsEndpoint: tt.allow}}}
++			engine.GET("/v1/models", server.originModelsEndpointMiddleware(), func(c *gin.Context) {
++				c.JSON(http.StatusOK, gin.H{"object": "list"})
++			})
++
++			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
++			recorder := httptest.NewRecorder()
++			engine.ServeHTTP(recorder, req)
++			if recorder.Code != tt.wantCode {
++				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tt.wantCode, recorder.Body.String())
++			}
++		})
++	}
++}

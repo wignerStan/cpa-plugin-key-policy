@@ -1,0 +1,34 @@
+From a0590268824db8070035e2f0e4ab78e4d2125281 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/test_helpers_test.go)
+
+---
+ internal/pluginhost/test_helpers_test.go | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/internal/pluginhost/test_helpers_test.go b/internal/pluginhost/test_helpers_test.go
+index fb199f722d893066b2974b4063e9e08596eb860a..fb3cdfe3f9b2dc694a3175ad620b7cce6777ab29 100644
+--- a/internal/pluginhost/test_helpers_test.go
++++ b/internal/pluginhost/test_helpers_test.go
+@@ -153,6 +153,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
+ 			return nil, errPick
+ 		}
+ 		return marshalRPCResult(resp)
++	case pluginabi.MethodSchedulerAdmit:
++		if l.active.Capabilities.SchedulerAdmission == nil {
++			return nil, fmt.Errorf("missing scheduler admission")
++		}
++		var req pluginapi.SchedulerPickRequest
++		if err := json.Unmarshal(request, &req); err != nil {
++			return nil, err
++		}
++		resp, err := l.active.Capabilities.SchedulerAdmission.Admit(ctx, req)
++		if err != nil {
++			return nil, err
++		}
++		return marshalRPCResult(resp)
+ 	case pluginabi.MethodModelRoute:
+ 		if l.active.Capabilities.ModelRouter == nil {
+ 			return nil, fmt.Errorf("missing model router")

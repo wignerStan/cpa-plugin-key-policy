@@ -1,0 +1,34 @@
+From 97b4949792d3e95b5fc504c885692f6f7c147250 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/pluginhost/host.go)
+
+---
+ sdk/pluginhost/host.go | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/sdk/pluginhost/host.go b/sdk/pluginhost/host.go
+index 077ad81bace819ae714b1b8467e289e3f91a1605..e757dee2f29222bfee2d57691857e9bc7fc039fa 100644
+--- a/sdk/pluginhost/host.go
++++ b/sdk/pluginhost/host.go
+@@ -2,6 +2,7 @@ package pluginhost
+ 
+ import (
+ 	"context"
++	"fmt"
+ 
+ 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	internalpluginhost "github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+@@ -358,3 +359,11 @@ func deepCopyYAMLNode(node *yaml.Node) *yaml.Node {
+ 	}
+ 	return &copyNode
+ }
++
++// ExchangeModelGuard dispatches to one required guard and fails closed when it is unavailable.
++func (h *Host) ExchangeModelGuard(ctx context.Context, id string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	if h == nil || h.inner == nil {
++		return pluginapi.ModelGuardDecision{}, fmt.Errorf("required model guard unavailable")
++	}
++	return h.inner.ExchangeModelGuard(ctx, id, in)
++}

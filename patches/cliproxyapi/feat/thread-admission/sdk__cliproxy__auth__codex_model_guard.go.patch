@@ -1,0 +1,546 @@
+diff --git a/sdk/cliproxy/auth/codex_model_guard.go b/sdk/cliproxy/auth/codex_model_guard.go
+new file mode 100644
+index 0000000..4036841
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard.go
+@@ -0,0 +1,540 @@
++package auth
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexthread"
++	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/guardhttp"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"maps"
++	"net/url"
++	"reflect"
++	"slices"
++	"strings"
++	"sync"
++)
++
++type ModelGuardHost interface {
++	ExchangeModelGuard(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error)
++}
++type modelGuardBinding struct {
++	host        ModelGuardHost
++	id, runtime string
++	prefixes    map[string]bool
++	targets     []internalconfig.CodexModelGuardTarget
++}
++
++const guardBufferLimit = 8 << 20
++
++// ConfigureCodexModelGuard is startup-only. Prefixes are native routing pools.
++func (m *Manager) ConfigureCodexModelGuard(host ModelGuardHost, id string, prefixes []string, targets ...internalconfig.CodexModelGuardTarget) error {
++	if m.modelGuard != nil || m.codexThread.Load() == nil || host == nil || id == "" || len(prefixes) == 0 {
++		return fmt.Errorf("model guard requires thread storage, host, plugin and explicit prefixes")
++	}
++	b := &modelGuardBinding{host: host, id: id, runtime: guardID(), prefixes: map[string]bool{}}
++	for _, p := range prefixes {
++		if strings.Contains(p, "/") {
++			return fmt.Errorf("guard prefix must be a native prefix")
++		}
++		b.prefixes[p] = true
++	}
++	for _, target := range targets {
++		if len(target.AuthIDs)+len(target.BaseURLs)+len(target.Models) == 0 {
++			return fmt.Errorf("guard target must have at least one exact selector")
++		}
++		target.AuthIDs, target.BaseURLs, target.Models = slices.Clone(target.AuthIDs), slices.Clone(target.BaseURLs), slices.Clone(target.Models)
++		for _, values := range [][]string{target.AuthIDs, target.Models} {
++			for _, value := range values {
++				if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "*?[]\r\n\x00") {
++					return fmt.Errorf("guard target requires nonempty exact values, not patterns")
++				}
++			}
++		}
++		for i, raw := range target.BaseURLs {
++			normalized, err := guardBaseURL(raw)
++			if err != nil {
++				return err
++			}
++			target.BaseURLs[i] = normalized
++		}
++		b.targets = append(b.targets, target)
++	}
++	m.modelGuard = b
++	return nil
++}
++func guardID() string {
++	b := make([]byte, 16)
++	if _, e := rand.Read(b); e != nil {
++		panic("system random source unavailable")
++	}
++	return hex.EncodeToString(b)
++}
++
++// Keep one host request ID through all native retries and provider selections.
++// Handlers seed it before request interceptors. Direct Manager callers receive
++// one at the public execution entry, not once per selected target.
++func modelGuardRequestOptions(opts core.Options) core.Options {
++	if modelGuardRequestID(opts) != "" {
++		return opts
++	}
++	opts.Metadata = cloneRequestMetadata(opts.Metadata)
++	opts.Metadata["model_guard_request_id"] = guardID()
++	return opts
++}
++func modelGuardRequestID(opts core.Options) string {
++	id, _ := opts.Metadata["model_guard_request_id"].(string)
++	return id
++}
++
++func (m *Manager) guarded(route string) bool {
++	if m.modelGuard == nil {
++		return false
++	}
++	p, _, ok := strings.Cut(route, "/")
++	if !ok {
++		p = ""
++	}
++	if !m.modelGuard.prefixes[p] {
++		return false
++	}
++	if len(m.modelGuard.targets) == 0 {
++		return true
++	}
++	for _, target := range m.modelGuard.targets {
++		if len(target.Models) == 0 || slices.Contains(target.Models, route) {
++			return true
++		}
++	}
++	return false
++}
++
++type modelGuardReselect struct{}
++
++func (*modelGuardReselect) Error() string {
++	return "model guard disabled this thread's upstream target"
++}
++func isModelGuardReselect(err error) bool { var e *modelGuardReselect; return errors.As(err, &e) }
++func guardStop(err error) error {
++	return wrapRequestStopError(&Error{Code: "model_guard_rejected", Message: err.Error(), HTTPStatus: 503})
++}
++
++func (m *Manager) executeWithModelGuard(ctx context.Context, e ProviderExecutor, a *Auth, req core.Request, opts core.Options, route string) (core.Response, error) {
++	if err := m.beginPluginFallbackDispatch(ctx, a, route, opts); err != nil {
++		return core.Response{}, err
++	}
++	if !m.guardedAuth(a, route) || pluginapi.CallingPlugin(ctx) == m.modelGuard.id {
++		return e.Execute(ctx, a, req, opts)
++	}
++	response, _, err := m.runModelGuard(ctx, e, a, req, opts, route, false)
++	return response, err
++}
++func (m *Manager) streamWithModelGuard(ctx context.Context, e ProviderExecutor, a *Auth, req core.Request, opts core.Options, route string) (*core.StreamResult, error) {
++	if err := m.beginPluginFallbackDispatch(ctx, a, route, opts); err != nil {
++		return nil, err
++	}
++	if !m.guardedAuth(a, route) || pluginapi.CallingPlugin(ctx) == m.modelGuard.id {
++		return e.ExecuteStream(ctx, a, req, opts)
++	}
++	response, chunks, err := m.runModelGuard(ctx, e, a, req, opts, route, true)
++	if err != nil {
++		return nil, err
++	}
++	out := make(chan core.StreamChunk, len(chunks))
++	for _, chunk := range chunks {
++		out <- chunk
++	}
++	close(out)
++	return &core.StreamResult{Headers: response.Headers, Chunks: out}, nil
++}
++
++// The plugin owns hold, probes and retry policy. This binding only admits native
++// execution for the selected target and validates actual dispatch before release.
++func (m *Manager) runModelGuard(ctx context.Context, e ProviderExecutor, a *Auth, req core.Request, opts core.Options, route string, stream bool) (core.Response, []core.StreamChunk, error) {
++	empty := core.Response{}
++	if !m.guardedAuth(a, route) || core.DownstreamWebsocket(ctx) || opts.Alt != "" || (opts.SourceFormat.String() != "openai-response" && opts.SourceFormat.String() != "codex") {
++		return empty, nil, guardStop(fmt.Errorf("guard requires HTTPS unified Codex Responses"))
++	}
++	if len(req.Payload) > guardBufferLimit {
++		return empty, nil, guardStop(fmt.Errorf("guard request too large"))
++	}
++	scope, err := codexThreadScope(route, opts)
++	if err != nil {
++		return empty, nil, err
++	}
++	if err = scope.Validate(); err != nil {
++		return empty, nil, guardStop(err)
++	}
++	target, err := m.codexThreadTarget(a, route)
++	if err != nil {
++		return empty, nil, err
++	}
++	work, cancel := context.WithCancel(httptransport.WithResponseBodyLimit(ctx, guardBufferLimit))
++	defer cancel()
++	transportScope := &guardhttp.Scope{}
++	defer transportScope.Close()
++	var mu sync.Mutex
++	receipts := map[string]bool{}
++	var upstreamErr error
++	validateTarget := func(ctx context.Context) error {
++		current, ok := m.GetByID(a.ID)
++		if !ok || !m.guardedAuth(current, route) || current.RegistrationEpoch != a.RegistrationEpoch || current.CredentialVersion != a.CredentialVersion {
++			return fmt.Errorf("execution target changed")
++		}
++		actual, err := m.codexThreadTarget(current, route)
++		if err != nil || actual != target {
++			return fmt.Errorf("execution route changed")
++		}
++		check := opts
++		return m.beginCodexThreadDispatch(ctx, current, route, &check)
++	}
++	validate := func(ctx context.Context, id string) error {
++		mu.Lock()
++		known := receipts[id]
++		mu.Unlock()
++		if !known {
++			return fmt.Errorf("unknown execution receipt")
++		}
++		return validateTarget(ctx)
++	}
++	prepare := func(ctx context.Context, in pluginapi.HostModelExecutionRequest) (core.Request, core.Options, string, error) {
++		if in.AuthID != a.ID || in.Model != route || in.ProxyURL != "" || in.Alt != "" || len(in.Body) > guardBufferLimit {
++			return req, opts, "", fmt.Errorf("execution outside authorized target")
++		}
++		if err := validateTarget(ctx); err != nil {
++			return req, opts, "", err
++		}
++		physical, options := guardPhysical(req, opts, pluginapi.ModelGuardDecision{Request: in.Body, Headers: in.Headers, SessionID: in.Headers.Get("Session-Id")})
++		options.Stream = in.Stream
++		// Reapply other plugins' authenticated request interceptor to changed bodies.
++		var err error
++		if in.Auxiliary {
++			ctx = pluginapi.WithAuxiliaryExecution(ctx)
++		}
++		if in.Auxiliary || !bytes.Equal(in.Body, req.Payload) || !reflect.DeepEqual(in.Headers, opts.Headers) {
++			physical, options, err = applyRequestAfterAuthInterceptor(ctx, e, a.Provider, physical, options, route)
++			if err != nil {
++				return req, opts, "", err
++			}
++		}
++		// An interceptor may block while the auth or disk exclusion changes.
++		// Recheck the bound logical scope immediately before each dispatch.
++		if err := validateTarget(ctx); err != nil {
++			return req, opts, "", err
++		}
++		id := guardID()
++		mu.Lock()
++		receipts[id] = true
++		mu.Unlock()
++		return physical, options, id, nil
++	}
++	callbacks := &pluginapi.ExecutionCallbacks{Validate: validate}
++	callbacks.Execute = func(ctx context.Context, in pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++		ctx = guardhttp.WithScope(ctx, transportScope, in.Headers.Get("Session-Id"))
++		ctx, policyErr := guardhttp.WithPolicy(ctx, in.HTTPTransport)
++		if policyErr != nil {
++			return pluginapi.HostModelExecutionResponse{}, policyErr
++		}
++		physical, options, id, err := prepare(ctx, in)
++		if err != nil {
++			return pluginapi.HostModelExecutionResponse{}, err
++		}
++		resultLimit := guardBufferLimit
++		if in.Auxiliary {
++			resultLimit = 256 << 10
++		}
++		// Native Execute reads the SSE wire stream before assembling its result.
++		// Keep its transport budget separate from the smaller auxiliary result.
++		ctx = httptransport.WithResponseBodyLimit(ctx, guardBufferLimit)
++		response, err := e.Execute(syncMetadataSessionToContext(ctx, options.Metadata), a, physical, options)
++		if err != nil {
++			if isRequestStopError(err) || errors.Is(err, httptransport.ErrResponseBodyTooLarge) || errors.Is(err, guardhttp.ErrIsolation) {
++				return pluginapi.HostModelExecutionResponse{}, err
++			}
++			mu.Lock()
++			upstreamErr = err
++			mu.Unlock()
++			return pluginapi.HostModelExecutionResponse{Error: "upstream_failed"}, nil
++		}
++		if len(response.Payload) > resultLimit {
++			return pluginapi.HostModelExecutionResponse{}, fmt.Errorf("response exceeds hold bound: %w", httptransport.ErrResponseBodyTooLarge)
++		}
++		return pluginapi.HostModelExecutionResponse{StatusCode: 200, Body: response.Payload, Headers: response.Headers, Receipt: id}, nil
++	}
++	callbacks.Stream = func(ctx context.Context, in pluginapi.HostModelExecutionRequest) (pluginapi.BoundModelStream, error) {
++		ctx = guardhttp.WithScope(ctx, transportScope, in.Headers.Get("Session-Id"))
++		ctx, policyErr := guardhttp.WithPolicy(ctx, in.HTTPTransport)
++		if policyErr != nil {
++			return pluginapi.BoundModelStream{}, policyErr
++		}
++		physical, options, id, err := prepare(ctx, in)
++		if err != nil {
++			return pluginapi.BoundModelStream{}, err
++		}
++		streamCtx, cancelStream := context.WithCancel(httptransport.WithResponseBodyLimit(ctx, guardBufferLimit))
++		response, err := e.ExecuteStream(syncMetadataSessionToContext(streamCtx, options.Metadata), a, physical, options)
++		if err != nil {
++			cancelStream()
++			if isRequestStopError(err) || errors.Is(err, httptransport.ErrResponseBodyTooLarge) || errors.Is(err, guardhttp.ErrIsolation) {
++				return pluginapi.BoundModelStream{}, err
++			}
++			mu.Lock()
++			upstreamErr = err
++			mu.Unlock()
++			return pluginapi.BoundModelStream{Response: pluginapi.HostModelStreamResponse{Error: "upstream_failed"}}, nil
++		}
++		out := make(chan pluginapi.BoundModelChunk)
++		go func() {
++			defer close(out)
++			defer cancelStream()
++			total := 0
++			for {
++				select {
++				case <-ctx.Done():
++					return
++				case chunk, ok := <-response.Chunks:
++					if !ok {
++						return
++					}
++					if len(chunk.Payload) > guardBufferLimit-total {
++						chunk = core.StreamChunk{Err: httptransport.ErrResponseBodyTooLarge}
++					} else {
++						total += len(chunk.Payload)
++					}
++					if chunk.Err != nil {
++						cancelStream()
++						if !errors.Is(chunk.Err, httptransport.ErrResponseBodyTooLarge) {
++							mu.Lock()
++							upstreamErr = chunk.Err
++							mu.Unlock()
++						}
++					}
++					select {
++					case out <- pluginapi.BoundModelChunk{Payload: chunk.Payload, Err: chunk.Err}:
++					case <-ctx.Done():
++						return
++					}
++					if chunk.Err != nil {
++						return
++					}
++				}
++			}
++		}()
++		return pluginapi.BoundModelStream{Response: pluginapi.HostModelStreamResponse{StatusCode: 200, Headers: response.Headers, Receipt: id}, Chunks: out}, nil
++	}
++	bound := pluginapi.WithExecutionCallbacks(work, callbacks)
++	in := pluginapi.ModelGuardExchange{Version: 1, Operation: "execute", RequestID: modelGuardRequestID(opts), RuntimeID: m.modelGuard.runtime, Scope: pluginapi.ModelGuardScope(scope), Route: pluginapi.ModelGuardRoute(target), Request: req.Payload, Headers: opts.Headers, Stream: stream}
++	result, err := m.modelGuard.host.ExchangeModelGuard(bound, m.modelGuard.id, in)
++	if err != nil {
++		return empty, nil, guardStop(err)
++	}
++	if result.Action == "upstream_error" {
++		mu.Lock()
++		err = upstreamErr
++		mu.Unlock()
++		if err != nil {
++			return empty, nil, err
++		}
++	}
++	if result.Action == "reselect" {
++		if err = m.codexThread.Load().Check(work, scope, target, true); !errors.Is(err, codexthread.ErrExcluded) {
++			return empty, nil, guardStop(fmt.Errorf("plugin requested reselect without durable exclusion"))
++		}
++		return empty, nil, &modelGuardReselect{}
++	}
++	if result.Action != "release" {
++		return empty, nil, guardStop(fmt.Errorf("required gate rejected response: %s", result.Reason))
++	}
++	if err = validate(work, result.Receipt); err != nil {
++		return empty, nil, guardStop(err)
++	}
++	if len(result.Response.Body) > guardBufferLimit || len(result.Chunks) > 65536 {
++		return empty, nil, guardStop(fmt.Errorf("plugin hold output too large"))
++	}
++	chunkBytes := 0
++	for _, raw := range result.Chunks {
++		if len(raw) > guardBufferLimit-chunkBytes {
++			return empty, nil, guardStop(fmt.Errorf("plugin hold output too large"))
++		}
++		chunkBytes += len(raw)
++	}
++	chunks := make([]core.StreamChunk, len(result.Chunks))
++	for i, raw := range result.Chunks {
++		chunks[i] = core.StreamChunk{Payload: raw}
++	}
++	return core.Response{Payload: result.Response.Body, Headers: result.Response.Headers}, chunks, nil
++}
++func guardPhysical(req core.Request, opts core.Options, d pluginapi.ModelGuardDecision) (core.Request, core.Options) {
++	req.Payload = d.Request
++	opts.OriginalRequest = d.Request
++	opts.Headers = d.Headers.Clone()
++	if d.SessionID != "" {
++		opts.Metadata = guardSessionMetadata(opts.Metadata, d.SessionID)
++		req.Metadata = guardSessionMetadata(req.Metadata, d.SessionID)
++	}
++	opts.WebSocketResponseObserver = nil
++	return req, opts
++}
++func guardSessionMetadata(meta map[string]any, id string) map[string]any {
++	out := maps.Clone(meta)
++	if out == nil {
++		out = map[string]any{}
++	}
++	for key := range out {
++		if strings.HasPrefix(key, "lcp_") || strings.HasPrefix(key, "session_affinity_") {
++			delete(out, key)
++		}
++	}
++	for _, key := range []string{core.DerivedSessionIDMetadataKey, core.ParentSessionIDMetadataKey, core.IsForkMetadataKey, core.IsCompactionMetadataKey, core.NodeKindMetadataKey} {
++		delete(out, key)
++	}
++	out[core.ExecutionSessionMetadataKey] = id
++	out[core.CanonicalSessionIDMetadataKey] = "execution:" + id
++	return out
++}
++
++// allGuardTargetsThreadExcluded observes the caller's normal route without
++// selecting an auth or touching affinity. Native cooldown/errors are not leases.
++func (m *Manager) allGuardTargetsThreadExcluded(ctx context.Context, route string, opts core.Options) (bool, error) {
++	store := m.codexThread.Load()
++	if store == nil || !m.guarded(route) || m.HomeEnabled() {
++		return false, nil
++	}
++	scope, err := codexThreadScope(route, opts)
++	if err != nil {
++		return false, err
++	}
++	if err = scope.Validate(); err != nil {
++		return false, err
++	}
++	eligibility := authSelectionEligibilityForRequest(ctx, opts)
++	pinned := pinnedAuthIDFromMetadata(opts.Metadata)
++	var candidates []*Auth
++	for _, a := range m.List() {
++		if a == nil || a.Disabled || a.Status == StatusDisabled || a.Provider != "codex" || a.Attributes["plugin_fallback_only"] == "true" {
++			continue
++		}
++		if pinned != "" && a.ID != pinned {
++			continue
++		}
++		if !eligibility.allows(a) || !m.authSupportsRouteModel(registry.GetGlobalRegistry(), a, route) {
++			continue
++		}
++		candidates = append(candidates, a)
++	}
++	admitted, known, err := m.admittedAuthsForRequest(ctx, "codex", route, opts, candidates)
++	if err != nil {
++		return false, err
++	}
++	if !known || len(admitted) == 0 {
++		return false, nil
++	}
++	for _, a := range admitted {
++		// An ordinary OAuth or unmatched API-key candidate prevents PAYG fallback.
++		if !m.guardedAuth(a, route) {
++			return false, nil
++		}
++		// Exclusions cover every model of this AuthID; model/revision are not keys.
++		err = store.Check(ctx, scope, codexthread.Target{AuthID: a.ID}, true)
++		if err == nil {
++			return false, nil
++		}
++		if !errors.Is(err, codexthread.ErrExcluded) {
++			return false, err
++		}
++	}
++	return true, nil
++}
++
++// ModelGuardRouting only offers fallback when all ordinary route candidates have
++// active thread exclusions. An empty pool, native cooldown or transport failure
++// alone does not authorize PAYG. No client header sets Exhausted.
++func (m *Manager) ModelGuardRouting(ctx context.Context, req core.Request, opts core.Options, executionErr error) (pluginapi.ModelGuardDecision, error) {
++	route := authSelectionModelFromOptions(opts, req.Model)
++	if executionErr == nil || !m.guarded(route) || pluginapi.CallingPlugin(ctx) == m.modelGuard.id {
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	}
++	if ctx.Err() != nil {
++		return pluginapi.ModelGuardDecision{}, ctx.Err()
++	}
++	var native *Error
++	candidateFailure := isModelGuardReselect(executionErr) || (errors.As(executionErr, &native) && (native.Code == "auth_not_found" || native.Code == "auth_unavailable" || native.Code == "model_cooldown"))
++	var coded interface{ ErrorCode() string }
++	if !candidateFailure && errors.As(executionErr, &coded) {
++		switch coded.ErrorCode() {
++		case "auth_not_found", "auth_unavailable", "model_cooldown":
++			candidateFailure = true
++		}
++	}
++	if !candidateFailure {
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	}
++	if core.DownstreamWebsocket(ctx) || (opts.SourceFormat.String() != "openai-response" && opts.SourceFormat.String() != "codex") || opts.Alt != "" {
++		return pluginapi.ModelGuardDecision{}, fmt.Errorf("guard requires HTTPS unified Responses")
++	}
++	excluded, err := m.allGuardTargetsThreadExcluded(ctx, route, opts)
++	if err != nil {
++		return pluginapi.ModelGuardDecision{}, err
++	}
++	if !excluded {
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	}
++	scope, _ := codexThreadScope(route, opts)
++	work, cancel := context.WithCancel(ctx)
++	defer cancel()
++	bound := pluginapi.WithExecutionCallbacks(work, m.pluginFallbackCallbacks(req, opts))
++	return m.modelGuard.host.ExchangeModelGuard(bound, m.modelGuard.id, pluginapi.ModelGuardExchange{Version: 1, Operation: "fallback", RequestID: modelGuardRequestID(opts), RuntimeID: m.modelGuard.runtime, Scope: pluginapi.ModelGuardScope(scope), Stream: opts.Stream, Request: req.Payload, Headers: opts.Headers, Exhausted: true})
++}
++func (m *Manager) ModelGuardEnabled() bool { return m != nil && m.modelGuard != nil }
++
++func (m *Manager) ModelGuardProtects(model string) bool { return m != nil && m.guarded(model) }
++
++// Provider identifies a protocol, not a credential kind. OAuth/SIWC must bypass
++// the guard even when it shares a prefix or endpoint with a configured API key.
++func (m *Manager) guardedAuth(a *Auth, route string) bool {
++	if a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "codex") || a.AuthKind() != AuthKindAPIKey || a.Attributes["plugin_fallback_only"] == "true" || !m.guarded(route) {
++		return false
++	}
++	if len(m.modelGuard.targets) == 0 {
++		return true
++	}
++	for _, target := range m.modelGuard.targets {
++		if len(target.AuthIDs) > 0 && !slices.Contains(target.AuthIDs, a.ID) {
++			continue
++		}
++		if len(target.Models) > 0 && !slices.Contains(target.Models, route) {
++			continue
++		}
++		if len(target.BaseURLs) > 0 {
++			base, err := guardBaseURL(a.Attributes["base_url"])
++			if err != nil || !slices.Contains(target.BaseURLs, base) {
++				continue
++			}
++		}
++		return true
++	}
++	return false
++}
++
++func guardBaseURL(raw string) (string, error) {
++	u, err := url.Parse(raw)
++	if err != nil || u == nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(raw, "*\r\n\x00") || raw != strings.TrimSpace(raw) {
++		return "", fmt.Errorf("guard base URL must be a complete HTTP(S) endpoint without credentials, query or wildcard")
++	}
++	u.Host = strings.ToLower(u.Host)
++	return strings.TrimRight(u.String(), "/"), nil
++}
++
++func (m *Manager) codexThreadApplies(a *Auth, route string) bool {
++	if m.modelGuard != nil {
++		return m.guardedAuth(a, route)
++	}
++	return a != nil && strings.EqualFold(a.Provider, "codex")
++}

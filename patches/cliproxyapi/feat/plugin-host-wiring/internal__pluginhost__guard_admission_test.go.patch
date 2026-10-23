@@ -1,0 +1,81 @@
+From b47e8adf709f91b2f6534a657ad6e8b43a517dc6 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (internal/pluginhost/guard_admission_test.go)
+
+---
+ internal/pluginhost/guard_admission_test.go | 64 +++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+ create mode 100644 internal/pluginhost/guard_admission_test.go
+
+diff --git a/internal/pluginhost/guard_admission_test.go b/internal/pluginhost/guard_admission_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5cff77ea5df7a783dfe2df3b831b675cf9b49926
+--- /dev/null
++++ b/internal/pluginhost/guard_admission_test.go
+@@ -0,0 +1,64 @@
++package pluginhost
++
++import (
++	"context"
++	"sync"
++	"sync/atomic"
++	"testing"
++)
++
++type guardAdmissionClient struct {
++	entered chan struct{}
++	release <-chan struct{}
++}
++
++func (c guardAdmissionClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
++	if method == guardExchangeMethod {
++		c.entered <- struct{}{}
++		<-c.release
++	}
++	return []byte(`{"ok":true,"result":{}}`), nil
++}
++func (guardAdmissionClient) Shutdown() {}
++
++type guardMarshalCounter struct{ calls *atomic.Int32 }
++
++func (m guardMarshalCounter) MarshalJSON() ([]byte, error) {
++	m.calls.Add(1)
++	return []byte(`{}`), nil
++}
++
++func TestGuardAdmissionBeforeMarshalSurvivesNativeCancellation(t *testing.T) {
++	release := make(chan struct{})
++	inner := guardAdmissionClient{entered: make(chan struct{}, 8), release: release}
++	client := newGuardedPluginClient(inner)
++	var marshaled atomic.Int32
++	request := guardMarshalCounter{calls: &marshaled}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	var calls sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		calls.Add(1)
++		go func() {
++			defer calls.Done()
++			_, _ = callPlugin[struct{}](ctx, client, guardExchangeMethod, request)
++		}()
++	}
++	for i := 0; i < 8; i++ {
++		<-inner.entered
++	}
++	cancel()
++	calls.Wait()
++	_, err := callPlugin[struct{}](context.Background(), client, guardExchangeMethod, request)
++	if err == nil || marshaled.Load() != 8 {
++		t.Errorf("cancellation admitted another request before native completion: calls=%d, err=%v", marshaled.Load(), err)
++	}
++	if _, err := callPlugin[struct{}](context.Background(), client, "control", struct{}{}); err != nil {
++		t.Errorf("guard quota blocked control method: %v", err)
++	}
++	close(release)
++	client.Shutdown()
++	if len(guardExchangeSlots) != 0 {
++		t.Fatal("native completion did not release guard slots")
++	}
++}

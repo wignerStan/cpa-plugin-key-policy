@@ -1,0 +1,439 @@
+From 12595c2b32568369666fa4234c1815ccf00a1ac2 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_metadata_test.go)
+
+---
+ .../openai/openai_responses_metadata_test.go  | 422 ++++++++++++++++++
+ 1 file changed, 422 insertions(+)
+ create mode 100644 sdk/api/handlers/openai/openai_responses_metadata_test.go
+
+diff --git a/sdk/api/handlers/openai/openai_responses_metadata_test.go b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..36aaffe07d4be0454422ac10f267c69f513ddb60
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_metadata_test.go
+@@ -0,0 +1,422 @@
++package openai
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"fmt"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/tidwall/gjson"
++)
++
++func TestCodexTurnStateMetadataSupplement(t *testing.T) {
++	for _, test := range []struct{ name, payload, state string }{
++		{"etag_and_state", ` {"type":"codex.response.metadata","headers":{"x-models-etag":"W/\"catalog\"","x-codex-turn-state":"opaque"},"future":true} `, `"opaque"`},
++		{"etag_only", `{"type":"codex.response.metadata","headers":{"x-models-etag":"catalog"}}`, ""},
++		{"mixed_case_array", `{"type":"codex.response.metadata","headers":{"X-Codex-Turn-State":[["opaque"],"later"],"x-models-etag":"catalog"}}`, `"opaque"`},
++		{"array_first_only", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":[null,"later"]}}`, ""},
++		{"empty_array", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":[]}}`, ""},
++		{"empty_string", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":""}}`, ""},
++		{"whitespace_only", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"  \t"}}`, ""},
++		{"opaque_spacing", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":" opaque "}}`, `" opaque "`},
++		{"invalid_number", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":42}}`, ""},
++		{"invalid_object", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":{"opaque":true}}}`, ""},
++		{"malformed_json", `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"opaque"}`, ""},
++		{"canonical", `{"type":"response.metadata","headers":{"x-codex-turn-state":"opaque"}}`, ""},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			payload := []byte(test.payload)
++			before := bytes.Clone(payload)
++			got := codexTurnStateMetadataSupplement(payload)
++			if !bytes.Equal(payload, before) {
++				t.Fatal("provider bytes changed")
++			}
++			if test.state == "" {
++				if got != nil {
++					t.Fatalf("unexpected extra frame: %s", got)
++				}
++				return
++			}
++			want := `{"type":"response.metadata","headers":{"x-codex-turn-state":` + test.state + `}}`
++			if string(got) != want {
++				t.Fatalf("supplement = %s, want %s", got, want)
++			}
++		})
++	}
++}
++
++func TestCodexMetadataDeltaPathDoesNotAllocate(t *testing.T) {
++	payload := []byte(`{"type":"response.output_text.delta","delta":"codex.response.metadata is ordinary text"}`)
++	if count := testing.AllocsPerRun(1000, func() {
++		if codexTurnStateMetadataSupplement(payload) != nil {
++			t.Fatal("delta produced metadata")
++		}
++	}); count != 0 {
++		t.Fatalf("delta path allocated %g times", count)
++	}
++}
++
++func TestCodexMetadataSSEPreservesOriginalAndSupplementOrder(t *testing.T) {
++	payload := ` {"type":"codex.response.metadata","headers":{"x-models-etag":"catalog","x-codex-turn-state":["opaque"]},"future":true} `
++	original := []byte(": upstream comment\r\nid: 7\r\nevent: codex.response.metadata\r\ndata: " + payload + "\r\n\r\n")
++	canonical := []byte("event: response.metadata\ndata: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"canonical\"},\"future\":true}\n\n")
++	etagOnly := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-models-etag\":\"catalog\"}}\n\n")
++	supplement := responsesSSEFrameWithEventAndData("response.metadata", codexTurnStateMetadataSupplement([]byte(payload)))
++	for _, official := range []bool{false, true} {
++		wire := bytes.Join([][]byte{original, etagOnly, canonical}, nil)
++		want := canonical
++		if official {
++			want = bytes.Join([][]byte{original, supplement, etagOnly, canonical}, nil)
++		}
++		splits := []int{0, len(wire)}
++		// Fragment every metadata data-body position; complete field names are
++		// required by the existing framer field-recovery contract.
++		for split := bytes.Index(original, []byte("data:")) + len("data:"); split <= len(original); split++ {
++			splits = append(splits, split)
++		}
++		for _, split := range splits {
++			var out bytes.Buffer
++			framer := &responsesSSEFramer{isCodexClient: official}
++			framer.WriteChunk(&out, wire[:split])
++			framer.WriteChunk(&out, wire[split:])
++			framer.Flush(&out)
++			if !bytes.Equal(out.Bytes(), want) {
++				t.Fatalf("official=%t split=%d: SSE changed: %q", official, split, out.Bytes())
++			}
++		}
++	}
++}
++
++// Exercise the actual Gin handler, auth manager and native executor over TCP.
++func TestCodexMetadataWebsocketHandlerPreservesOrder(t *testing.T) {
++	frames := [][]byte{
++		[]byte(`{"type":"codex.response.metadata","headers":{"x-models-etag":"W/\"catalog\"","x-codex-turn-state":"opaque"},"future":[1,true]}`),
++		[]byte(`{"type":"codex.response.metadata","headers":{"x-models-etag":"catalog"}}`),
++		[]byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":[null,"later"]}}`),
++		[]byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"canonical"},"future":true}`),
++		[]byte(`{"type":"response.created","response":{"id":"metadata-response","output":[]}}`),
++		[]byte(`{"type":"response.completed","response":{"id":"metadata-response","output":[]}}`),
++	}
++	var connections atomic.Int32
++	result := make(chan error, 1)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		connections.Add(1)
++		result <- func() error {
++			if r.Header.Get("Authorization") != "Bearer metadata-key" {
++				return fmt.Errorf("wrong upstream credential")
++			}
++			c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++			if err != nil {
++				return err
++			}
++			defer func() { _ = c.Close() }()
++			_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
++			if _, _, err := c.ReadMessage(); err != nil {
++				return err
++			}
++			for _, frame := range frames {
++				if err := c.WriteMessage(websocket.TextMessage, frame); err != nil {
++					return err
++				}
++			}
++			_, _, err = c.ReadMessage()
++			if err == nil {
++				return fmt.Errorf("unexpected follow-up request")
++			}
++			return nil
++		}()
++	}))
++	defer upstream.Close()
++	cfg := &config.Config{}
++	manager := coreauth.NewManager(nil, nil, nil)
++	manager.SetConfig(cfg)
++	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
++	const authID = "metadata-order-auth"
++	if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "metadata-key", "base_url": upstream.URL, "websockets": "true"}}); err != nil {
++		t.Fatal(err)
++	}
++	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "metadata-order-model"}})
++	defer registry.GetGlobalRegistry().UnregisterClient(authID)
++	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	downstream := httptest.NewServer(router)
++	defer downstream.Close()
++	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = c.Close() }()
++	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
++	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"metadata-order-model","input":[]}`)); err != nil {
++		t.Fatal(err)
++	}
++	want := [][]byte{frames[0], codexTurnStateMetadataSupplement(frames[0]), frames[1], frames[2], frames[3]}
++	for i, expected := range want {
++		_, got, err := c.ReadMessage()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, expected) {
++			t.Fatalf("frame %d changed/order wrong: %s", i, got)
++		}
++	}
++	for _, event := range []string{"response.created", "response.completed"} {
++		_, got, err := c.ReadMessage()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if gjson.GetBytes(got, "type").String() != event {
++			t.Fatalf("unexpected extra metadata frame: %s", got)
++		}
++	}
++	_ = c.Close()
++	select {
++	case err := <-result:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("upstream cleanup stalled")
++	}
++	if connections.Load() != 1 {
++		t.Fatal("connection changed")
++	}
++}
++
++type metadataTimeline struct{ frames [][]byte }
++
++func (m *metadataTimeline) Append(_ string, payload []byte, _ time.Time) {
++	m.frames = append(m.frames, bytes.Clone(payload))
++}
++
++func TestCodexMetadataWebsocketWriterPreservesBytesAndTimeline(t *testing.T) {
++	logDir := t.TempDir()
++	requestlogging.ConfigureCodexDump(true, logDir)
++	t.Cleanup(func() { requestlogging.ConfigureCodexDump(false, "") })
++	original := []byte(" \n{\"type\":\"codex.response.metadata\",\"headers\":{\"x-models-etag\":\"catalog\",\"x-codex-turn-state\":\"opaque\"},\"future\":true}\t ")
++	want := [][]byte{original, codexTurnStateMetadataSupplement(original)}
++	result := make(chan error, 1)
++	timeline := &metadataTimeline{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++		if err != nil {
++			result <- err
++			return
++		}
++		defer conn.Close()
++		result <- writeResponsesWebsocketPayload(newResponsesWebsocketWriter(conn), timeline, "metadata-session", original, time.Now())
++	}))
++	defer server.Close()
++	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
++	for i, expected := range want {
++		_, got, err := conn.ReadMessage()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(got, expected) {
++			t.Fatalf("frame %d: %q != %q", i, got, expected)
++		}
++	}
++	if err := <-result; err != nil {
++		t.Fatal(err)
++	}
++	if len(timeline.frames) != len(want) {
++		t.Fatalf("timeline frames: %d", len(timeline.frames))
++	}
++	for i, expected := range want {
++		if !bytes.Equal(timeline.frames[i], expected) {
++			t.Fatalf("timeline %d changed", i)
++		}
++	}
++
++	if runtime.GOOS == "linux" {
++		requestlogging.FlushAllStreamBuffers()
++		files, err := os.ReadDir(filepath.Join(logDir, "codex-dumps"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(files) != len(want) {
++			t.Fatalf("capture files = %d, want %d", len(files), len(want))
++		}
++		found := make(map[string]bool)
++		for _, file := range files {
++			data, err := os.ReadFile(filepath.Join(logDir, "codex-dumps", file.Name()))
++			if err != nil {
++				t.Fatal(err)
++			}
++			found[string(data)] = true
++		}
++		for _, expected := range want {
++			if !found[string(expected)] {
++				t.Fatalf("actual outgoing frame missing from capture: %q", expected)
++			}
++		}
++	}
++}
++
++// Native HTTP execution delivers scanner lines without their newline delimiters.
++// A complete private metadata frame must not retain later business events.
++func TestCodexMetadataSSEScannerLinesReachCompletion(t *testing.T) {
++	metadata := `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"opaque"}}`
++	for _, native := range []bool{false, true} {
++		for _, eventFields := range []bool{false, true} {
++			for _, trailingID := range []bool{false, true} {
++				name := fmt.Sprintf("native=%t/event_fields=%t/trailing_id=%t", native, eventFields, trailingID)
++				t.Run(name, func(t *testing.T) {
++					metadataFrame := "event: codex.response.metadata\ndata: " + metadata
++					if trailingID {
++						metadataFrame += "\nid: metadata-1"
++					}
++					metadataFrame += "\n\n"
++					var business bytes.Buffer
++					for _, event := range []struct{ name, payload string }{
++						{"response.created", `{"type":"response.created","response":{"id":"r1","status":"in_progress"}}`},
++						{"response.output_item.done", `{"type":"response.output_item.done","output_index":0,"item":{"id":"call1","type":"function_call","call_id":"c1","name":"fixture","arguments":"{}"}}`},
++						{"response.completed", `{"type":"response.completed","response":{"id":"r1","status":"completed","output":[{"id":"call1","type":"function_call","call_id":"c1","name":"fixture","arguments":"{}"}]}}`},
++					} {
++						if eventFields {
++							business.WriteString("event: " + event.name + "\n")
++						}
++						business.WriteString("data: " + event.payload + "\n\n")
++					}
++					wire := "event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\"}\n\n" + metadataFrame + business.String()
++					var out bytes.Buffer
++					framer := &responsesSSEFramer{isCodexClient: native}
++					scanner := bufio.NewScanner(strings.NewReader(wire))
++					for scanner.Scan() {
++						if len(scanner.Bytes()) > 0 {
++							framer.WriteChunk(&out, scanner.Bytes())
++						}
++					}
++					if err := scanner.Err(); err != nil {
++						t.Fatal(err)
++					}
++					framer.Flush(&out)
++					want := business.String()
++					if native {
++						supplement := responsesSSEFrameWithEventAndData("response.metadata", codexTurnStateMetadataSupplement([]byte(metadata)))
++						want = metadataFrame + string(supplement) + want
++					}
++					if framer.terminalEvent != "response.completed" || !bytes.Equal(out.Bytes(), []byte(want)) {
++						t.Fatalf("scanner lines lost or changed frames: terminal=%q frames=%d bytes=%d want_bytes=%d", framer.terminalEvent, framer.dataFrames, out.Len(), len(want))
++					}
++				})
++			}
++		}
++	}
++}
++
++func TestCodexMetadataSSEMultilineScannerLinesReachCompletion(t *testing.T) {
++	completed := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}\n\n"
++	for _, native := range []bool{false, true} {
++		for _, data := range []string{
++			"data:\n\n",
++			"data: {\"type\":\"codex.response.metadata\",\ndata: \"headers\":{\"x-codex-turn-state\":\"opaque\"}}\n\n",
++			"data: {\"type\":\"codex.response.metadata\",\ndata: \"headers\":{\ndata: \"x-codex-turn-state\":\"opaque\"}}\n\n",
++			"data: {\"type\":\"codex.response.metadata\",\nid: metadata-1\ndata: \"headers\":{\nretry: 1000\ndata: \"x-codex-turn-state\":\"opaque\"}}\n\n",
++			"data:\ndata: {\"type\":\"codex.response.metadata\",\ndata:\ndata: \"headers\":{\"x-codex-turn-state\":\"opaque\"}}\n\n",
++			"data: {\"type\":\"codex.response.metadata\",\ndata: \"headers\":{\"x-codex-turn-state\":\"opaque\"}}\ndata:\n\n",
++		} {
++			t.Run(fmt.Sprintf("native=%t/bytes=%d", native, len(data)), func(t *testing.T) {
++				metadata := "event: codex.response.metadata\n" + data
++				var out bytes.Buffer
++				framer := &responsesSSEFramer{isCodexClient: native}
++				scanner := bufio.NewScanner(strings.NewReader(metadata + completed))
++				for scanner.Scan() {
++					if len(scanner.Bytes()) > 0 {
++						framer.WriteChunk(&out, scanner.Bytes())
++					}
++				}
++				if err := scanner.Err(); err != nil {
++					t.Fatal(err)
++				}
++				framer.Flush(&out)
++				want := completed
++				if native {
++					payload, _ := responsesSSEDataPayload([]byte(metadata))
++					want = metadata
++					if supplement := codexTurnStateMetadataSupplement(payload); len(supplement) > 0 {
++						want += string(responsesSSEFrameWithEventAndData("response.metadata", supplement))
++					}
++					want += completed
++				}
++				if framer.terminalEvent != "response.completed" || !bytes.Equal(out.Bytes(), []byte(want)) {
++					t.Fatalf("multiline scanner frames changed: terminal=%q frames=%d bytes=%d want_bytes=%d", framer.terminalEvent, framer.dataFrames, out.Len(), len(want))
++				}
++			})
++		}
++	}
++}
++
++func TestCodexMetadataSSEEmptyDataTailWithNextFramePreservesBytes(t *testing.T) {
++	payload := `{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"opaque"}}`
++	for _, newline := range []string{"\n", "\r\n"} {
++		for _, tail := range []string{"data:", "data: ", "data:\t"} {
++			original := []byte("event: codex.response.metadata" + newline + "data: " + payload + newline + tail + newline + newline)
++			completed := []byte("event: response.completed" + newline + "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}" + newline + newline)
++			wire := bytes.Join([][]byte{original, completed}, nil)
++			for _, native := range []bool{false, true} {
++				want := completed
++				if native {
++					want = bytes.Join([][]byte{original, responsesSSEFrameWithEventAndData("response.metadata", codexTurnStateMetadataSupplement([]byte(payload))), completed}, nil)
++				}
++				for split := bytes.Index(original, []byte("data:")) + len("data:"); split <= len(original); split++ {
++					var out bytes.Buffer
++					framer := &responsesSSEFramer{isCodexClient: native}
++					framer.WriteChunk(&out, wire[:split])
++					framer.WriteChunk(&out, wire[split:])
++					framer.Flush(&out)
++					if framer.terminalEvent != "response.completed" || !bytes.Equal(out.Bytes(), want) {
++						t.Fatalf("empty data tail changed: native=%t newline=%q tail=%q split=%d terminal=%q actual=%q want=%q", native, newline, tail, split, framer.terminalEvent, out.Bytes(), want)
++					}
++				}
++			}
++		}
++	}
++}
++
++func TestCodexMetadataSSEFieldPrefixesInsideJSONRemainBytes(t *testing.T) {
++	payload := ` {"type":"codex.response.metadata","headers":{"x-codex-turn-state":"opaque"},"future":"data: event: id: retry: : escaped \"data: \\event:"} `
++	original := []byte("event: codex.response.metadata\ndata: " + payload + "\r\n\r\n")
++	completed := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}\n\n")
++	wire := bytes.Join([][]byte{original, completed}, nil)
++	for _, native := range []bool{false, true} {
++		want := completed
++		if native {
++			want = bytes.Join([][]byte{original, responsesSSEFrameWithEventAndData("response.metadata", codexTurnStateMetadataSupplement([]byte(payload))), completed}, nil)
++		}
++		for split := bytes.Index(original, []byte("data:")) + len("data:"); split <= len(original); split++ {
++			var out bytes.Buffer
++			framer := &responsesSSEFramer{isCodexClient: native}
++			framer.WriteChunk(&out, wire[:split])
++			framer.WriteChunk(&out, wire[split:])
++			framer.Flush(&out)
++			if framer.terminalEvent != "response.completed" || !bytes.Equal(out.Bytes(), want) {
++				t.Fatalf("JSON fragment changed: native=%t split=%d terminal=%q bytes=%d want_bytes=%d", native, split, framer.terminalEvent, out.Len(), len(want))
++			}
++		}
++	}
++}

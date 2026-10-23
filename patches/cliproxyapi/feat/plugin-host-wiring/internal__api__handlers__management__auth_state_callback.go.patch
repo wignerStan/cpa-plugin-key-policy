@@ -1,0 +1,68 @@
+From 34925e34c35556175e33f59d19338f90c6368241 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/handlers/management/auth_state_callback.go)
+
+---
+ .../management/auth_state_callback.go         | 51 +++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+ create mode 100644 internal/api/handlers/management/auth_state_callback.go
+
+diff --git a/internal/api/handlers/management/auth_state_callback.go b/internal/api/handlers/management/auth_state_callback.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf7e7d5a610cdfbac5231c989e8388f734ea181d
+--- /dev/null
++++ b/internal/api/handlers/management/auth_state_callback.go
+@@ -0,0 +1,51 @@
++package management
++
++import (
++	"context"
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++// SetAuthState exposes the native status operation to trusted SDK callbacks.
++// It reuses configuration exclusions and native auth persistence, without a
++// second disable ledger or a new management endpoint.
++func (h *Handler) SetAuthState(ctx context.Context, req pluginapi.HostAuthStateRequest) (pluginapi.HostAuthState, error) {
++	if h == nil || h.authManager == nil {
++		return pluginapi.HostAuthState{}, fmt.Errorf("auth manager unavailable")
++	}
++	h.authStatusMu.Lock()
++	var snapshot configReloadSnapshot
++	state, err := h.authManager.SetAuthDisabled(ctx, req, func(a *coreauth.Auth) error {
++		h.mu.Lock()
++		defer h.mu.Unlock()
++		if h.cfg == nil {
++			return fmt.Errorf("configuration unavailable")
++		}
++		original := h.cfg.CloneForRuntime()
++		handled, err := toggleConfigAPIKeyExcludedAll(h.cfg, a, *req.Disabled)
++		if err != nil {
++			return err
++		}
++		if !handled {
++			return fmt.Errorf("config auth not found")
++		}
++		if err = config.SaveConfigPreserveComments(h.configFilePath, h.cfg, true); err != nil {
++			h.cfg = original
++			return err
++		}
++		snapshot = h.reloadSnapshotConfigLocked()
++		return nil
++	})
++	h.authStatusMu.Unlock()
++	if err != nil {
++		return state, err
++	}
++	if snapshot.cfg != nil {
++		h.reloadConfigAfterManagementSave(ctx, snapshot)
++	} else if a, ok := h.authManager.GetByID(req.AuthID); ok {
++		err = h.invokePostAuthPersistHooks(ctx, []*coreauth.Auth{a})
++	}
++	return state, err
++}

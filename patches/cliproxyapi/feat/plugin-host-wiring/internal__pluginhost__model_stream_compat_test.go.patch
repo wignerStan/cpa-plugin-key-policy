@@ -1,0 +1,153 @@
+From d6940e3591f3c4d624c14df8cd86b0eaa8d5da50 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (internal/pluginhost/model_stream_compat_test.go)
+
+---
+ .../pluginhost/model_stream_compat_test.go    | 136 ++++++++++++++++++
+ 1 file changed, 136 insertions(+)
+ create mode 100644 internal/pluginhost/model_stream_compat_test.go
+
+diff --git a/internal/pluginhost/model_stream_compat_test.go b/internal/pluginhost/model_stream_compat_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b120755ceaf74b0d7a93da8c919d29e2249e405
+--- /dev/null
++++ b/internal/pluginhost/model_stream_compat_test.go
+@@ -0,0 +1,136 @@
++package pluginhost
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestBoundModelStreamQuotaCancelsAndClosesOnce(t *testing.T) {
++	host := New()
++	var upstreamCtx context.Context
++	parent := pluginapi.WithExecutionCallbacks(context.Background(), &pluginapi.ExecutionCallbacks{Stream: func(ctx context.Context, _ pluginapi.HostModelExecutionRequest) (pluginapi.BoundModelStream, error) {
++		upstreamCtx = ctx
++		chunks := make(chan pluginapi.BoundModelChunk, 1)
++		chunks <- pluginapi.BoundModelChunk{Err: fmt.Errorf("bounded wire read: %w", httptransport.ErrResponseBodyTooLarge)}
++		close(chunks)
++		return pluginapi.BoundModelStream{Response: pluginapi.HostModelStreamResponse{StatusCode: 200}, Chunks: chunks}, nil
++	}})
++	instance := &hostCallbackInstance{}
++	callbackID, cleanup := host.openCallbackContextForPluginInstance(parent, "quota-test", instance)
++	defer cleanup()
++	caller := withHostCallbackIdentity(context.Background(), "quota-test", instance)
++	raw, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: callbackID, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Stream: true, Model: "model"}})
++	encoded, err := host.callHostModelExecuteStream(caller, raw)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stream, err := decodeRPCEnvelope[pluginapi.HostModelStreamResponse](encoded)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var closes atomic.Int32
++	host.modelStreams.mu.Lock()
++	entry := host.modelStreams.streams[stream.StreamID]
++	cancel := entry.cancel
++	entry.cancel = func() { closes.Add(1); cancel() }
++	host.modelStreams.streams[stream.StreamID] = entry
++	host.modelStreams.mu.Unlock()
++	raw, _ = json.Marshal(struct {
++		pluginapi.HostModelStreamReadRequest
++		HostCallbackID string `json:"host_callback_id"`
++	}{pluginapi.HostModelStreamReadRequest{StreamID: stream.StreamID}, callbackID})
++	encoded, err = host.callHostModelStreamRead(caller, raw)
++	if !errors.Is(err, httptransport.ErrResponseBodyTooLarge) || len(encoded) != 0 {
++		t.Fatalf("quota did not return callback error: %v %q", err, encoded)
++	}
++	select {
++	case <-upstreamCtx.Done():
++	case <-time.After(time.Second):
++		t.Fatal("quota left upstream active")
++	}
++	host.modelStreams.close(stream.StreamID)
++	cleanup()
++	if closes.Load() != 1 {
++		t.Fatalf("stream closed %d times", closes.Load())
++	}
++}
++
++func TestBoundModelStreamLimitIsCallbackError(t *testing.T) {
++	for _, local := range []bool{false, true} {
++		t.Run(fmt.Sprintf("local=%t", local), func(t *testing.T) {
++			host := New()
++			chunks := make(chan handlers.ModelExecutionChunk, 1)
++			streamErr := &handlers.ModelExecutionStreamError{StatusCode: 503, Message: httptransport.ErrResponseBodyTooLarge.Error()}
++			if local {
++				streamErr = boundStreamError(fmt.Errorf("local read: %w", httptransport.ErrResponseBodyTooLarge))
++			}
++			chunks <- handlers.ModelExecutionChunk{Err: streamErr}
++			close(chunks)
++			id := host.modelStreams.open("", chunks, nil)
++			raw, err := json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: id})
++			if err != nil {
++				t.Fatal(err)
++			}
++			encoded, err := host.callHostModelStreamRead(context.Background(), raw)
++			if local {
++				if !errors.Is(err, httptransport.ErrResponseBodyTooLarge) || len(encoded) != 0 {
++					t.Fatalf("local bound serialized as model failure: callback=%v encoded=%q", err, encoded)
++				}
++			} else {
++				if err != nil {
++					t.Fatalf("upstream error confused with private marker: %v", err)
++				}
++				response, err := decodeRPCEnvelope[pluginapi.HostModelStreamReadResponse](encoded)
++				if err != nil || !response.Done || response.Error != streamErr.Message {
++					t.Fatalf("upstream terminal error changed: decode=%v response=%+v", err, response)
++				}
++			}
++			host.modelStreams.mu.Lock()
++			_, stillOpen := host.modelStreams.streams[id]
++			host.modelStreams.mu.Unlock()
++			if stillOpen {
++				t.Fatal("terminal stream was not closed")
++			}
++		})
++	}
++}
++
++func TestLegacyModelStreamSurvivesParentCancel(t *testing.T) {
++	host := New()
++	chunks := make(chan handlers.ModelExecutionChunk, 1)
++	chunks <- handlers.ModelExecutionChunk{Payload: []byte("queued legacy output")}
++	host.SetModelExecutor(&fakeHostModelExecutor{executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
++		return handlers.ModelExecutionStream{StatusCode: 200, Chunks: chunks}, nil
++	}})
++	parent, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	instance := &hostCallbackInstance{}
++	id, cleanup := host.openCallbackContextForPluginInstance(parent, "legacy", instance)
++	defer cleanup()
++	caller := withHostCallbackIdentity(context.Background(), "legacy", instance)
++	raw, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: id, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Stream: true, Model: "model"}})
++	encoded, err := host.callHostModelExecuteStream(caller, raw)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stream, err := decodeRPCEnvelope[pluginapi.HostModelStreamResponse](encoded)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cancel()
++	raw, _ = json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: stream.StreamID})
++	_, err = host.callHostModelStreamRead(caller, raw)
++	if err != nil {
++		t.Fatalf("legacy stream was detached from parent cancellation, but read now fails: %v", err)
++	}
++}

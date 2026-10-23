@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/internal/config/config_v8.go b/internal/config/config_v8.go
+index 68bd7d98d1927a711bbc1852214d7d63a214849e..d3066330f78234b01e381c1f7d5a7fd17e0f5b9f 100644
+--- a/internal/config/config_v8.go
++++ b/internal/config/config_v8.go
+@@ -32,12 +32,15 @@ var v8ClientPaths = []configPath{
+ 
+ // Canonical upstream fields win by presence; historical OAuth fields precede globals.
+ var v8SharedPaths = []configPath{
++	{"oauth.providers.codex.compact-tool-check", "upstream.codex.compact-tool-check"},
++	{"oauth.providers.codex.compact-max-attempts", "upstream.codex.compact-max-attempts"},
+ 	{"oauth.providers.codex.disable-codex-cloaking", "upstream.codex.disable-codex-cloaking"},
+ 	{"oauth.providers.codex.stream-bootstrap-buffering", "upstream.codex.stream-bootstrap-buffering"},
+ 	{"oauth.providers.codex.stream-bootstrap-timeout", "upstream.codex.stream-bootstrap-timeout"},
+ 	{"oauth.providers.codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
+ 	{"oauth.providers.codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+ 	{"oauth.providers.codex.response-steering", "upstream.codex.response-steering"},
++	{"oauth.providers.codex.thread-title-session", "upstream.codex.thread-title-session"},
+ 	{"oauth.providers.claude.model-level-cooling", "upstream.claude.model-level-cooling"},
+ 	{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "upstream.claude.disable-cloaking-model-list"},
+ 	{"oauth.providers.claude.disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
+@@ -74,10 +77,12 @@ func buildV8Paths() []configPath {
+ 		{"github-token", "server.github-token"},
+ 		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
+ 		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
++		{"allow-origin-models-endpoint", "access.allow-origin-models-endpoint"},
+ 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
+ 		{"force-model-prefix", "routing.force-model-prefix"},
+ 		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
+ 		{"max-retry-interval", "routing.retry.max-retry-interval"},
++		{"codex-thread-cooldown", "routing.cooldown.codex-thread"},
+ 		{"disable-cooling", "routing.cooldown.disable-cooling"}, {"save-cooldown-status", "routing.cooldown.save-cooldown-status"},
+ 		{"transient-error-cooldown-seconds", "routing.cooldown.transient-error-cooldown-seconds"},
+ 		{"proxy-url", "requests.proxy-url"}, {"tls-handshake-timeout-seconds", "requests.tls-handshake-timeout-seconds"}, {"passthrough-headers", "requests.passthrough-headers"},
+@@ -85,12 +90,15 @@ func buildV8Paths() []configPath {
+ 		{"auth-dir", "oauth.auth-dir"}, {"auth-auto-refresh-workers", "oauth.auth-auto-refresh-workers"},
+ 		{"oauth-model-alias", "oauth.model-alias"}, {"oauth-excluded-models", "oauth.excluded-models"},
+ 		{"oauth-request-scoped-errors", "oauth.request-scoped-errors"}, {"oauth-settings", "oauth.settings"}, {"ws-auth", "oauth.providers.aistudio.ws-auth"},
++		{"codex.compact-tool-check", "upstream.codex.compact-tool-check"},
++		{"codex.compact-max-attempts", "upstream.codex.compact-max-attempts"},
+ 		{"codex.disable-codex-cloaking", "upstream.codex.disable-codex-cloaking"},
+ 		{"codex.stream-bootstrap-buffering", "upstream.codex.stream-bootstrap-buffering"},
+ 		{"codex.stream-bootstrap-timeout", "upstream.codex.stream-bootstrap-timeout"},
+ 		{"codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
+ 		{"codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+ 		{"codex.response-steering", "upstream.codex.response-steering"},
++		{"codex.thread-title-session", "upstream.codex.thread-title-session"},
+ 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
+ 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},
+ 		{"disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
+@@ -102,8 +110,9 @@ func buildV8Paths() []configPath {
+ 		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"},
+ 		{"disable-image-generation", "multimedia.disable-image-generation"}, {"gpt-image-2-base-model", "multimedia.gpt-image-2-base-model"},
+ 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
+-		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
++		{"debug", "observability.logs.debug"}, {"trace", "observability.logs.trace"}, {"logging-to-file", "observability.logs.logging-to-file"},
+ 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
++		{"codex-dump", "observability.logs.codex-dump"},
+ 		{"error-logs-max-files", "observability.logs.error-logs-max-files"},
+ 		{"usage-statistics-enabled", "observability.usage.usage-statistics-enabled"},
+ 		{"redis-usage-queue-retention-seconds", "observability.usage.redis-usage-queue-retention-seconds"}, {"pprof", "observability.pprof"},
+-- 
+2.47.3

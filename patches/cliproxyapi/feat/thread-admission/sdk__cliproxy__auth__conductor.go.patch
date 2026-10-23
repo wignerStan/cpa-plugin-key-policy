@@ -1,0 +1,31 @@
+From 2404f426bae159ee32cf1fe3f9b228d5ccb15360 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/conductor.go)
+
+---
+ sdk/cliproxy/auth/conductor.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/sdk/cliproxy/auth/conductor.go b/sdk/cliproxy/auth/conductor.go
+index 6f16017bfefc3ac17c3817fa57aaa53f2ba3ba28..9ea3931882921b903202c7b220d26cf102dddfd2 100644
+--- a/sdk/cliproxy/auth/conductor.go
++++ b/sdk/cliproxy/auth/conductor.go
+@@ -8,6 +8,7 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexthread"
+ 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+@@ -167,6 +168,8 @@ type resultPolicyHolder struct {
+ 
+ // Manager orchestrates auth lifecycle, selection, execution, and persistence.
+ type Manager struct {
++	codexThread               atomic.Pointer[codexthread.Store]
++	modelGuard                *modelGuardBinding
+ 	store                     Store
+ 	cooldownStore             CooldownStateStore
+ 	pendingCooldownStateStore CooldownStateStore

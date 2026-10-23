@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/internal/config/codex_compact_guard_test.go b/internal/config/codex_compact_guard_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a0997e2bd8b0931009a96d4a9ccdb9271bddf8b
+--- /dev/null
++++ b/internal/config/codex_compact_guard_test.go
+@@ -0,0 +1,32 @@
++package config
++
++import (
++	"gopkg.in/yaml.v3"
++	"testing"
++)
++
++func TestCompactGuardConfigAppliesToOAuthAndAPIKeys(t *testing.T) {
++	for _, raw := range []string{
++		"upstream:\n  codex: {compact-tool-check: false, compact-max-attempts: 7}\n",
++		"codex: {compact-tool-check: false, compact-max-attempts: 7}\n",
++		"oauth:\n  providers:\n    codex: {compact-tool-check: false, compact-max-attempts: 7}\n",
++	} {
++		cfg, err := ParseConfigBytes([]byte(raw))
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, scoped := range []*Config{cfg, cfg.ForAPIKey()} {
++			if scoped.Codex.CompactToolCheck == nil || *scoped.Codex.CompactToolCheck || scoped.Codex.CompactMaxAttempts != 7 {
++				t.Fatal("compact configuration lost its shared scope")
++			}
++		}
++		saved, err := yaml.Marshal(cfg)
++		if err != nil {
++			t.Fatal(err)
++		}
++		roundtrip, err := ParseConfigBytes(saved)
++		if err != nil || roundtrip.ForAPIKey().Codex.CompactMaxAttempts != 7 {
++			t.Fatal("snapshot lost compact retry configuration", err)
++		}
++	}
++}
+-- 
+2.47.3

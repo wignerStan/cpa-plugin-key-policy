@@ -1,0 +1,68 @@
+From b67e2a65dbf715cb9a0989991aed77f501d707c7 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/codex_model_guard.go)
+
+---
+ sdk/api/handlers/codex_model_guard.go | 51 +++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+ create mode 100644 sdk/api/handlers/codex_model_guard.go
+
+diff --git a/sdk/api/handlers/codex_model_guard.go b/sdk/api/handlers/codex_model_guard.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb4f2aff1822de3c3cca72c7c8fe4d73e1a6834b
+--- /dev/null
++++ b/sdk/api/handlers/codex_model_guard.go
+@@ -0,0 +1,51 @@
++package handlers
++
++import (
++	"context"
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func guardFallbackError() *interfaces.ErrorMessage {
++	return &interfaces.ErrorMessage{StatusCode: 503, Error: fmt.Errorf("ModelGuard fallback unavailable")}
++}
++func (h *BaseAPIHandler) validateGuardRoute(model string, route modelRouteDecision, opts modelExecutionOptions) *interfaces.ErrorMessage {
++	effective := model
++	if route.Model != "" {
++		effective = route.Model
++	}
++	if h.AuthManager == nil {
++		return nil
++	}
++	requestedProtected := h.AuthManager.ModelGuardProtects(model)
++	effectiveProtected := h.AuthManager.ModelGuardProtects(effective)
++	if (requestedProtected || effectiveProtected) && (route.ExecutorPluginID != "" || !effectiveProtected) {
++		return &interfaces.ErrorMessage{StatusCode: 503, Error: fmt.Errorf("ModelGuard route must remain in a protected native prefix")}
++	}
++	return nil
++}
++
++func (h *BaseAPIHandler) guardRoute(ctx context.Context, req core.Request, opts core.Options, executionErr error) (pluginapi.ModelGuardDecision, *interfaces.ErrorMessage) {
++	if h.AuthManager == nil || executionErr == nil {
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	}
++	d, err := h.AuthManager.ModelGuardRouting(ctx, req, opts, executionErr)
++	if err != nil {
++		return d, guardFallbackError()
++	}
++	if d.Action == "continue" || d.Action == "reject" {
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	}
++	if d.Action != "direct" {
++		return d, guardFallbackError()
++	}
++	return d, nil
++}
++func guardFallbackErrChan(err *interfaces.ErrorMessage) <-chan *interfaces.ErrorMessage {
++	out := make(chan *interfaces.ErrorMessage, 1)
++	out <- err
++	close(out)
++	return out
++}

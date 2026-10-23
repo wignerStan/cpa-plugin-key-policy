@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/event_metadata.go)
+
+---
+diff --git a/sdk/protocol/codex/event_metadata.go b/sdk/protocol/codex/event_metadata.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ac7440fb60baa310b2f92b424d96911a1f00c31
+--- /dev/null
++++ b/sdk/protocol/codex/event_metadata.go
+@@ -0,0 +1,88 @@
++package codex
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++)
++
++// encoding/json invokes this method for every matching headers field, including
++// repeated exact keys. Retain ambiguity instead of letting the last field win.
++// Store evidence errors separately so malformed stream errors retain priority.
++type MetadataHeaders struct {
++	seen  bool
++	State http.Header
++	Err   error
++}
++
++func (h *MetadataHeaders) UnmarshalJSON(raw []byte) error {
++	if h.seen {
++		h.Err = fmt.Errorf("%w: duplicate_held_metadata_headers", ErrTurnState)
++		return nil
++	}
++	h.seen = true
++	h.State, h.Err = MetadataState(raw)
++	return nil
++}
++
++func MetadataState(raw json.RawMessage) (http.Header, error) {
++	if len(raw) == 0 {
++		return nil, nil
++	}
++	invalid := func() (http.Header, error) {
++		return nil, fmt.Errorf("%w: invalid_held_metadata_headers", ErrTurnState)
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	if start, err := decoder.Token(); err != nil || start != json.Delim('{') {
++		return invalid()
++	}
++	var result http.Header
++	// Reuse one value buffer; do not retain a map of unrelated metadata fields.
++	var value json.RawMessage
++	for decoder.More() {
++		member, err := decoder.Token()
++		key, ok := member.(string)
++		if err != nil || !ok || decoder.Decode(&value) != nil {
++			return invalid()
++		}
++		if !strings.EqualFold(key, "x-codex-turn-state") {
++			continue
++		}
++		if result != nil {
++			return nil, fmt.Errorf("%w: conflicting_held_metadata_turn_state", ErrTurnState)
++		}
++		token, err := metadataString(value, 0)
++		if err != nil {
++			return nil, err
++		}
++		result = http.Header{"X-Codex-Turn-State": {token}}
++		if _, _, err := TurnState(result); err != nil {
++			return nil, err
++		}
++	}
++	if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
++		return invalid()
++	}
++	if _, err := decoder.Token(); err != io.EOF {
++		return invalid()
++	}
++	return result, nil
++}
++
++func metadataString(raw json.RawMessage, depth int) (string, error) {
++	if depth > 8 {
++		return "", fmt.Errorf("%w: invalid_held_metadata_turn_state", ErrTurnState)
++	}
++	var text *string
++	if json.Unmarshal(raw, &text) == nil && text != nil {
++		return *text, nil
++	}
++	var values []json.RawMessage
++	if json.Unmarshal(raw, &values) != nil || len(values) != 1 {
++		return "", fmt.Errorf("%w: invalid_held_metadata_turn_state", ErrTurnState)
++	}
++	return metadataString(values[0], depth+1)
++}

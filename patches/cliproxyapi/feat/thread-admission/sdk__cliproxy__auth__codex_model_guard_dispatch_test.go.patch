@@ -1,0 +1,202 @@
+From d4a7396a8d2d1ea92b75cf32451e43dc087e7954 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (sdk/cliproxy/auth/codex_model_guard_dispatch_test.go)
+
+---
+ .../auth/codex_model_guard_dispatch_test.go   | 185 ++++++++++++++++++
+ 1 file changed, 185 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/codex_model_guard_dispatch_test.go
+
+diff --git a/sdk/cliproxy/auth/codex_model_guard_dispatch_test.go b/sdk/cliproxy/auth/codex_model_guard_dispatch_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1af4b81d14d2fc643e545a9c346a4c8296a1afe
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard_dispatch_test.go
+@@ -0,0 +1,185 @@
++package auth
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"github.com/wignerStan/infra/go/cache/disk"
++)
++
++func TestGuardRechecksDispatchAfterBlockedInterceptor(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		for _, auxiliary := range []bool{false, true} {
++			for _, change := range []string{"thread-ban", "provider-disable", "route-change"} {
++				t.Run(fmt.Sprintf("stream=%t/auxiliary=%t/%s", stream, auxiliary, change), func(t *testing.T) {
++					manager, ids := threadManager(t, &FillFirstSelector{})
++					var calls atomic.Int32
++					manager.RegisterExecutor(dispatchCountingExecutor("codex", &calls))
++					entered, release := make(chan struct{}), make(chan struct{})
++					opts := guardOptions()
++					opts.RequestAfterAuthInterceptor = blockedGuardInterceptor(entered, release)
++					host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++						headers := in.Headers.Clone()
++						headers.Set("Session-Id", "rotated-session")
++						request := pluginapi.HostModelExecutionRequest{Model: in.Scope.Model, AuthID: in.Route.AuthID, Body: in.Request, Headers: headers, Stream: stream, Auxiliary: auxiliary}
++						callbacks := pluginapi.ExecutionCallbacksFrom(ctx)
++						var err error
++						if stream {
++							_, err = callbacks.Stream(ctx, request)
++						} else {
++							_, err = callbacks.Execute(ctx, request)
++						}
++						return pluginapi.ModelGuardDecision{}, err
++					})
++					if err := manager.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++						t.Fatal(err)
++					}
++					done := make(chan error, 1)
++					go func() {
++						auth, _ := manager.GetByID(ids[0])
++						_, _, err := manager.runModelGuard(context.Background(), manager.executorFor("codex"), auth, guardRequest(), opts, "model", stream)
++						done <- err
++					}()
++					awaitGuardBarrier(t, entered)
++					switch change {
++					case "thread-ban":
++						disableThread(t, manager, ids[0], opts)
++					case "provider-disable":
++						setThreadProviderState(t, manager, ids[0], "disable-provider")
++					case "route-change":
++						auth, _ := manager.GetByID(ids[0])
++						auth.ProxyURL = "http://changed.invalid:8080"
++						if _, err := manager.Update(context.Background(), auth); err != nil {
++							t.Fatal(err)
++						}
++					}
++					close(release)
++					if err := <-done; err == nil || calls.Load() != 0 {
++						t.Fatalf("stale dispatch reached executor: calls=%d error=%v", calls.Load(), err)
++					}
++				})
++			}
++		}
++	}
++}
++
++func TestFallbackRechecksDispatchAfterBlockedInterceptor(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		for _, change := range []string{"normal-ban-removed", "provider-disable"} {
++			t.Run(fmt.Sprintf("stream=%t/%s", stream, change), func(t *testing.T) {
++				manager, ids := threadManager(t, &FillFirstSelector{})
++				if err := manager.ConfigureCodexModelGuard(guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++					t.Error("PAYG entered model guard")
++					return pluginapi.ModelGuardDecision{}, nil
++				}), "guard", []string{""}); err != nil {
++					t.Fatal(err)
++				}
++				payg := &Auth{ID: t.Name() + "-payg", Provider: "payg-test", Prefix: "payg", Status: StatusActive, Attributes: map[string]string{"plugin_owner": "guard", "plugin_fallback_only": "true", "upstream_protocol": "openai-response"}}
++				if _, err := manager.Register(context.Background(), payg); err != nil {
++					t.Fatal(err)
++				}
++				registry.GetGlobalRegistry().RegisterClient(payg.ID, payg.Provider, []*registry.ModelInfo{{ID: "payg/premium"}, {ID: "premium"}})
++				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(payg.ID) })
++				var calls atomic.Int32
++				manager.RegisterExecutor(dispatchCountingExecutor(payg.Provider, &calls))
++				entered, release := make(chan struct{}), make(chan struct{})
++				opts := guardOptions()
++				opts.RequestAfterAuthInterceptor = blockedGuardInterceptor(entered, release)
++				for _, id := range ids {
++					disableThread(t, manager, id, opts)
++				}
++				callbacks := manager.pluginFallbackCallbacks(guardRequest(), opts)
++				done := make(chan error, 1)
++				go func() {
++					request := pluginapi.HostModelExecutionRequest{Model: "payg/premium", AuthID: payg.ID, Body: []byte(`{"input":"hello"}`), Headers: opts.Headers, Stream: stream}
++					var err error
++					if stream {
++						var result pluginapi.BoundModelStream
++						result, err = callbacks.Stream(context.Background(), request)
++						if err == nil {
++							for chunk := range result.Chunks {
++								if chunk.Err != nil {
++									err = chunk.Err
++								}
++							}
++						}
++					} else {
++						_, err = callbacks.Execute(context.Background(), request)
++					}
++					done <- err
++				}()
++				awaitGuardBarrier(t, entered)
++				if change == "normal-ban-removed" {
++					removeGuardThreadBan(t, manager, ids[0], opts)
++				} else {
++					setThreadProviderState(t, manager, payg.ID, "disable-provider")
++				}
++				close(release)
++				if err := <-done; err == nil || calls.Load() != 0 {
++					t.Fatalf("stale PAYG dispatch reached executor: calls=%d error=%v", calls.Load(), err)
++				}
++			})
++		}
++	}
++}
++
++func dispatchCountingExecutor(provider string, calls *atomic.Int32) *customStreamMockExecutor {
++	return &customStreamMockExecutor{identifier: provider, mockCustomErrorExecutor: mockCustomErrorExecutor{executeFn: func(context.Context, *Auth, core.Request, core.Options) (core.Response, error) {
++		calls.Add(1)
++		return core.Response{Payload: []byte("unexpected dispatch")}, nil
++	}}, streamFn: func(context.Context, *Auth, core.Request, core.Options) (*core.StreamResult, error) {
++		calls.Add(1)
++		chunks := make(chan core.StreamChunk)
++		close(chunks)
++		return &core.StreamResult{Chunks: chunks}, nil
++	}}
++}
++
++func blockedGuardInterceptor(entered, release chan struct{}) func(context.Context, core.RequestAfterAuthInterceptRequest) core.RequestAfterAuthInterceptResponse {
++	return func(ctx context.Context, _ core.RequestAfterAuthInterceptRequest) core.RequestAfterAuthInterceptResponse {
++		close(entered)
++		select {
++		case <-release:
++		case <-ctx.Done():
++		}
++		return core.RequestAfterAuthInterceptResponse{}
++	}
++}
++
++func awaitGuardBarrier(t *testing.T, entered <-chan struct{}) {
++	t.Helper()
++	select {
++	case <-entered:
++	case <-time.After(5 * time.Second):
++		t.Fatal("interceptor barrier not reached")
++	}
++}
++
++func removeGuardThreadBan(t *testing.T, manager *Manager, id string, opts core.Options) {
++	t.Helper()
++	scope, err := codexThreadScope("model", opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dir, _ := threadDirs.Load(manager)
++	writer, err := disk.Open(disk.Options{Directory: dir.(string), SingleWriter: true, DiskEntries: 100000, MaxValueBytes: 16384})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer writer.Close()
++	raw, _ := json.Marshal([]string{scope.Caller, scope.Thread, id})
++	sum := sha256.Sum256(raw)
++	key := "disabled-thread-target:" + hex.EncodeToString(sum[:])
++	if err := writer.Update(context.Background(), func(tx *disk.Transaction) error { return tx.Delete(key) }); err != nil {
++		t.Fatal(err)
++	}
++}

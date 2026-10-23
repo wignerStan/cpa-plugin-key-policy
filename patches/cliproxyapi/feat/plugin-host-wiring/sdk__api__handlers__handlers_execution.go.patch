@@ -1,0 +1,42 @@
+From 97e0a03f658f2ca3264c2de4d3b11c6939a3a39a Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/handlers_execution.go)
+
+---
+ sdk/api/handlers/handlers_execution.go | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
+index 5e4c1962cc7ccc30c86fab15c640758c3fe5268d..430550c2408205b9101126556923700be9555f1d 100644
+--- a/sdk/api/handlers/handlers_execution.go
++++ b/sdk/api/handlers/handlers_execution.go
+@@ -49,6 +49,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
+ 	// Speech-only models are reachable solely through the speech entry protocol.
+ 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
+ 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
++	if errMsg := h.validateGuardRoute(modelName, routeDecision, execOptions); errMsg != nil {
++		return nil, nil, errMsg
++	}
+ 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
+ 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+ 		return nil, nil, errMsg
+@@ -103,6 +106,17 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
+ 	}
+ 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
+ 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
++	if err != nil {
++		guardDecision, guardErr := h.guardRoute(ctx, req, opts, err)
++		if guardErr != nil {
++			lifecycle.completeError(ctx, guardErr)
++			return nil, nil, guardErr
++		}
++		if guardDecision.Action == "direct" {
++			resp = coreexecutor.Response{Payload: guardDecision.Response.Body, Headers: guardDecision.Response.Headers}
++			err = nil
++		}
++	}
+ 	if err != nil {
+ 		err = enrichAuthSelectionError(err, providers, normalizedModel)
+ 		errMsg := executionErrorMessage(err)

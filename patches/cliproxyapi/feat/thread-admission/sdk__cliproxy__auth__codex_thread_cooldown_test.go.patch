@@ -1,0 +1,236 @@
+diff --git a/sdk/cliproxy/auth/codex_thread_cooldown_test.go b/sdk/cliproxy/auth/codex_thread_cooldown_test.go
+new file mode 100644
+index 0000000..c90e29c
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_thread_cooldown_test.go
+@@ -0,0 +1,230 @@
++package auth
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"github.com/wignerStan/infra/go/cache/disk"
++	"net/http"
++	"sync"
++	"testing"
++	"time"
++
++	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func threadManager(t *testing.T, selector Selector) (*Manager, []string) {
++	t.Helper()
++	m := NewManager(&admissionStore{}, selector, nil)
++	dir := t.TempDir()
++	threadDirs.Store(m, dir)
++	t.Cleanup(func() { threadDirs.Delete(m) })
++	if e := m.ConfigureCodexThreadCooldown(dir); e != nil {
++		t.Fatal(e)
++	}
++	t.Cleanup(func() { m.CloseCodexThreadCooldown() })
++	m.RegisterExecutor(&customStreamMockExecutor{identifier: "codex", mockCustomErrorExecutor: mockCustomErrorExecutor{executeFn: func(_ context.Context, a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
++		return cliproxyexecutor.Response{Payload: []byte(a.ID)}, nil
++	}}, streamFn: func(_ context.Context, a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
++		ch := make(chan cliproxyexecutor.StreamChunk, 1)
++		ch <- cliproxyexecutor.StreamChunk{Payload: []byte(a.ID)}
++		close(ch)
++		return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
++	}})
++	ids := []string{t.Name() + "-a", t.Name() + "-b"}
++	for i, id := range ids {
++		a := &Auth{ID: id, Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": fmt.Sprint(2 - i), "auth_kind": "apikey"}}
++		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model"}, {ID: "other"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++		if _, e := m.Register(context.Background(), a); e != nil {
++			t.Fatal(e)
++		}
++	}
++	return m, ids
++}
++func threadOptions(id string) cliproxyexecutor.Options {
++	return cliproxyexecutor.Options{Headers: http.Header{"Thread-Id": {id}, "Session-Id": {"cache-" + id}}, Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "authenticated-caller", "group": "one"}}
++}
++
++var threadDirs sync.Map
++
++func setThreadProviderState(t *testing.T, m *Manager, id, mode string) {
++	t.Helper()
++	state, e := m.AuthState(id, "model")
++	if e != nil {
++		t.Fatal(e)
++	}
++	disabled := mode == "disable-provider"
++	if _, e = m.SetAuthDisabled(context.Background(), pluginapi.HostAuthStateRequest{AuthID: id, Model: "model", Version: state.Version, Disabled: &disabled}, nil); e != nil {
++		t.Fatal(e)
++	}
++}
++func TestCodexThreadCooldownAllLocalSelectionPaths(t *testing.T) {
++	for _, strategy := range []string{"round-robin", "fill-first", "session-affinity", "plugin-delegate"} {
++		t.Run(strategy, func(t *testing.T) {
++			var selector Selector = &RoundRobinSelector{}
++			if strategy == "fill-first" {
++				selector = &FillFirstSelector{}
++			}
++			if strategy == "session-affinity" {
++				selector = NewSessionAffinitySelector(&RoundRobinSelector{})
++			}
++			m, ids := threadManager(t, selector)
++			if strategy == "plugin-delegate" {
++				m.SetPluginScheduler(&fakePluginScheduler{handled: true, acrossPriorities: true, resp: pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinRoundRobin}})
++			}
++			old := threadOptions("old")
++			disableThread(t, m, ids[0], old)
++			if a, e := m.SelectAuth(context.Background(), "codex", "other", old); e != nil || a.ID != ids[1] {
++				t.Fatal("thread ban did not cover another model", a, e)
++			}
++			for _, path := range []string{"select", "mixed", "execute", "stream"} {
++				for _, incumbent := range []bool{true, false} {
++					opts := old
++					want := ids[1]
++					if !incumbent {
++						opts = threadOptions("fork")
++						want = ids[0]
++					}
++					var got string
++					var e error
++					switch path {
++					case "select":
++						var a *Auth
++						a, e = m.SelectAuth(context.Background(), "codex", "model", opts)
++						if a != nil {
++							got = a.ID
++						}
++					case "mixed":
++						var a *Auth
++						a, _, _, e = m.pickNextMixed(context.Background(), []string{"codex"}, "model", opts, nil)
++						if a != nil {
++							got = a.ID
++						}
++					case "execute":
++						var r cliproxyexecutor.Response
++						r, e = m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "model"}, opts)
++						got = string(r.Payload)
++					case "stream":
++						var r *cliproxyexecutor.StreamResult
++						r, e = m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "model"}, opts)
++						if r != nil {
++							for c := range r.Chunks {
++								got += string(c.Payload)
++								if c.Err != nil {
++									e = c.Err
++								}
++							}
++						}
++					}
++					if e != nil || got != want {
++						t.Fatalf("%s incumbent=%v got=%s want=%s err=%v", path, incumbent, got, want, e)
++					}
++				}
++			}
++			setThreadProviderState(t, m, ids[0], "disable-provider")
++			if a, e := m.SelectAuth(context.Background(), "codex", "model", old); e != nil || a.ID != ids[1] {
++				t.Fatal("native disable changed thread exclusion", a, e)
++			}
++		})
++	}
++}
++func TestCodexThreadIdentityIsNotSessionAffinity(t *testing.T) {
++	opts := threadOptions("a")
++	s, e := codexThreadScope("model", opts)
++	if e != nil || s.Thread != "a" {
++		t.Fatal(s, e)
++	}
++	opts.Headers.Set("X-Codex-Turn-Metadata", `{"thread_id":"b"}`)
++	if _, e = codexThreadScope("model", opts); e == nil {
++		t.Fatal("conflicting identities accepted")
++	}
++	opts.Headers.Del("X-Codex-Turn-Metadata")
++	opts.Headers.Del("Thread-Id")
++	s, e = codexThreadScope("model", opts)
++	if e != nil || s.Thread != "" {
++		t.Fatal("session/cache ID became thread", s, e)
++	}
++}
++func TestCodexProviderDisableSurvivesLateHTTP200AndDisableCooling(t *testing.T) {
++	m, ids := threadManager(t, &RoundRobinSelector{})
++	m.SetConfig(&internalconfig.Config{DisableCooling: true})
++	setThreadProviderState(t, m, ids[0], "disable-provider")
++	m.MarkResult(context.Background(), Result{AuthID: ids[0], Provider: "codex", Model: "model", Success: true, ExecutionSeq: 1})
++	opts := threadOptions("new")
++	opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[0]
++	if _, e := m.SelectAuth(context.Background(), "codex", "model", opts); e == nil {
++		t.Fatal("late success or disable-cooling cleared provider disable")
++	}
++	if _, e := m.SelectAuth(context.Background(), "codex", "other", opts); e == nil {
++		t.Fatal("disabled AuthID still serves another model")
++	}
++}
++func TestCodexDispatchRechecksAfterSelection(t *testing.T) {
++	m, ids := threadManager(t, &RoundRobinSelector{})
++	opts := threadOptions("new")
++	a, e := m.SelectAuth(context.Background(), "codex", "model", opts)
++	if e != nil {
++		t.Fatal(e)
++	}
++	disableThread(t, m, ids[0], opts)
++	if e = m.beginCodexThreadDispatch(context.Background(), a, "model", &opts); e == nil {
++		t.Fatal("selected auth escaped later thread exclusion")
++	}
++}
++func TestCodexAliasHardCooldownUsesResolvedModel(t *testing.T) {
++	m, ids := threadManager(t, &RoundRobinSelector{})
++	m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{"codex": {{Name: "model", Alias: "alias", Fork: true}}})
++	for _, id := range ids {
++		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model"}, {ID: "alias"}})
++	}
++	setThreadProviderState(t, m, ids[0], "disable-provider")
++	opts := threadOptions("new")
++	opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey] = ids[0]
++	if _, e := m.SelectAuth(context.Background(), "codex", "alias", opts); e == nil {
++		t.Fatal("alias escaped canonical model cooldown")
++	}
++}
++
++func disableThread(t *testing.T, m *Manager, id string, opts cliproxyexecutor.Options) {
++	t.Helper()
++	scope, e := codexThreadScope("model", opts)
++	if e != nil {
++		t.Fatal(e)
++	}
++	dir, _ := threadDirs.Load(m)
++	writer, e := disk.Open(disk.Options{Directory: dir.(string), SingleWriter: true, DiskEntries: 100000, MaxValueBytes: 16384})
++	if e != nil {
++		t.Fatal(e)
++	}
++	defer writer.Close()
++	keyRaw, _ := json.Marshal([]string{scope.Caller, scope.Thread, id})
++	sum := sha256.Sum256(keyRaw)
++	key := "disabled-thread-target:" + hex.EncodeToString(sum[:])
++	until := time.Now().Add(time.Hour)
++	raw, _ := json.Marshal(map[string]any{"baseline_id": "baseline", "until": until})
++	if e = writer.Update(context.Background(), func(tx *disk.Transaction) error { return tx.Put(key, raw, until) }); e != nil {
++		t.Fatal(e)
++	}
++}
++func TestNativeAuthStateVersionRejectsStaleDisable(t *testing.T) {
++	m, ids := threadManager(t, &FillFirstSelector{})
++	state, e := m.AuthState(ids[0], "model")
++	if e != nil {
++		t.Fatal(e)
++	}
++	a, _ := m.GetByID(ids[0])
++	a.Attributes["base_url"] = "https://different.invalid"
++	if _, e = m.Update(context.Background(), a); e != nil {
++		t.Fatal(e)
++	}
++	disabled := true
++	if _, e = m.SetAuthDisabled(context.Background(), pluginapi.HostAuthStateRequest{AuthID: ids[0], Model: "model", Version: state.Version, Disabled: &disabled}, nil); e == nil {
++		t.Fatal("stale verdict disabled changed auth")
++	}
++}

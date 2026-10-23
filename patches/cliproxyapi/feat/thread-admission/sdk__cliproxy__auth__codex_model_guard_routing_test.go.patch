@@ -1,0 +1,140 @@
+From 171a18a18b92a872c36fb05796f9a33204886b9d Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/codex_model_guard_routing_test.go)
+
+---
+ .../auth/codex_model_guard_routing_test.go    | 123 ++++++++++++++++++
+ 1 file changed, 123 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/codex_model_guard_routing_test.go
+
+diff --git a/sdk/cliproxy/auth/codex_model_guard_routing_test.go b/sdk/cliproxy/auth/codex_model_guard_routing_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..715fcb8cae0d02be81eb6a63b30286daf214ef5b
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard_routing_test.go
+@@ -0,0 +1,123 @@
++package auth
++
++import (
++	"context"
++	"errors"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"testing"
++	"time"
++)
++
++func TestFallbackRefusesExhaustionWhileLowerPriorityTargetAvailable(t *testing.T) {
++	m, ids := threadManager(t, &FillFirstSelector{})
++	registry.GetGlobalRegistry().RegisterClient(ids[0], "codex", []*registry.ModelInfo{{ID: "model"}})
++	called := false
++	host := guardHostFunc(func(_ context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		if in.Operation == "fallback" {
++			called = true
++		}
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	})
++	m.ConfigureCodexModelGuard(host, "guard", []string{""})
++	opts := guardOptions()
++	disableThread(t, m, ids[0], opts)
++	d, err := m.ModelGuardRouting(context.Background(), guardRequest(), opts, &modelGuardReselect{})
++	if err != nil || d.Action != "continue" || called {
++		t.Fatal("PAYG bypassed an available native target")
++	}
++}
++
++func TestFallbackRequiresAllThreadLeasesNotNativeFailures(t *testing.T) {
++	for _, mode := range []string{"all-thread-leases", "one-lease", "native-cooldown", "empty-pool", "other-thread", "other-caller", "transport-failure"} {
++		t.Run(mode, func(t *testing.T) {
++			m, ids := threadManager(t, &FillFirstSelector{})
++			calls := 0
++			host := guardHostFunc(func(_ context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				calls++
++				if in.Operation != "fallback" || !in.Exhausted {
++					t.Fatal("missing thread exclusion attestation")
++				}
++				return pluginapi.ModelGuardDecision{Action: "direct"}, nil
++			})
++			if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			opts := guardOptions()
++			var failure error = &modelGuardReselect{}
++			switch mode {
++			case "all-thread-leases", "other-thread", "other-caller", "transport-failure":
++				for _, id := range ids {
++					disableThread(t, m, id, opts)
++				}
++			case "one-lease":
++				disableThread(t, m, ids[0], opts)
++			case "native-cooldown":
++				for _, id := range ids {
++					a, _ := m.GetByID(id)
++					a.Unavailable = true
++					a.NextRetryAfter = time.Now().Add(time.Hour)
++					if _, err := m.Update(context.Background(), a); err != nil {
++						t.Fatal(err)
++					}
++				}
++				failure = &Error{Code: "model_cooldown"}
++			case "empty-pool":
++				for _, id := range ids {
++					registry.GetGlobalRegistry().UnregisterClient(id)
++				}
++				failure = &Error{Code: "auth_not_found"}
++			}
++			switch mode {
++			case "other-thread":
++				opts = threadOptions("another")
++				opts.SourceFormat = guardOptions().SourceFormat
++			case "other-caller":
++				opts.Metadata[core.CallerScopeMetadataKey] = "someone-else"
++			case "transport-failure":
++				failure = errors.New("upstream connection lost")
++			}
++			d, err := m.ModelGuardRouting(context.Background(), guardRequest(), opts, failure)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if mode == "all-thread-leases" {
++				if calls != 1 || d.Action != "direct" {
++					t.Fatal("thread exhaustion did not offer fallback", d, calls)
++				}
++			} else if calls != 0 || d.Action != "continue" {
++				t.Fatal("non-lease failure triggered PAYG", d, calls)
++			}
++		})
++	}
++}
++
++func TestFallbackRechecksLeasesBeforeCallbackDispatch(t *testing.T) {
++	m, ids := threadManager(t, &FillFirstSelector{})
++	opts := guardOptions()
++	for _, id := range ids {
++		disableThread(t, m, id, opts)
++	}
++	host := guardHostFunc(func(ctx context.Context, _ string, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++		// A new normal credential has no exclusion, so the old fallback capability
++		// must not spend money after the pool becomes usable again.
++		id := t.Name() + "-recovered"
++		if _, err := m.Register(ctx, &Auth{ID: id, Provider: "codex", Status: StatusActive}); err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "model"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++		_, err := pluginapi.ExecutionCallbacksFrom(ctx).Execute(ctx, pluginapi.HostModelExecutionRequest{AuthID: "payg"})
++		if err == nil {
++			t.Fatal("stale fallback capability dispatched")
++		}
++		return pluginapi.ModelGuardDecision{Action: "continue"}, nil
++	})
++	if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := m.ModelGuardRouting(context.Background(), guardRequest(), opts, &modelGuardReselect{}); err != nil {
++		t.Fatal(err)
++	}
++}

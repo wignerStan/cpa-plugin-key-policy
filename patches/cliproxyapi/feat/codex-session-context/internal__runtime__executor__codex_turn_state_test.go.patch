@@ -1,0 +1,121 @@
+From 490f22a66cec52bebb5241244021951e1dba8982 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(codex): retain nonstream metadata state
+ (internal/runtime/executor/codex_turn_state_test.go)
+
+---
+ .../runtime/executor/codex_turn_state_test.go | 104 ++++++++++++++++++
+ 1 file changed, 104 insertions(+)
+ create mode 100644 internal/runtime/executor/codex_turn_state_test.go
+
+diff --git a/internal/runtime/executor/codex_turn_state_test.go b/internal/runtime/executor/codex_turn_state_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5cbc0bf4af56ce02b7a3f73b3fbf38ea6b7ae947
+--- /dev/null
++++ b/internal/runtime/executor/codex_turn_state_test.go
+@@ -0,0 +1,104 @@
++package executor
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"github.com/tidwall/gjson"
++)
++
++type codexStateTestTransport func(*http.Request) (*http.Response, error)
++
++func (f codexStateTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	return f(req)
++}
++
++func TestCodexExecutorExecuteMetadataTurnState(t *testing.T) {
++	for _, eventType := range []string{"response.metadata", "codex.response.metadata"} {
++		t.Run(eventType, func(t *testing.T) {
++			metadata := func(headers string) string {
++				return `data: {"type":"` + eventType + `","headers":` + headers + "}\n\n"
++			}
++			state := metadata(`{"x-codex-turn-state":"new-state"}`)
++			for _, tc := range []struct {
++				name, before, after string
++				headers             http.Header
++				want                []string
++			}{
++				{name: "metadata before completion", before: state, want: []string{"new-state"}},
++				{name: "metadata after completion", after: state, want: []string{"new-state"}},
++				{name: "same token repeated", before: state, after: state, want: []string{"new-state"}},
++				{name: "singleton nested arrays", before: metadata(`{"X-Codex-Turn-State":[["new-state"]]}`), want: []string{"new-state"}},
++				{name: "HTTP only", headers: http.Header{"X-Codex-Turn-State": {"http-state"}}, want: []string{"http-state"}},
++				{name: "missing metadata token", before: metadata(`{"x-models-etag":"etag"}`)},
++				{name: "missing metadata headers", before: `data: {"type":"` + eventType + `"}` + "\n\n"},
++				{name: "same HTTP and SSE token", headers: http.Header{"X-Codex-Turn-State": {"new-state"}}, before: state, want: []string{"new-state"}},
++				{name: "empty HTTP token stays invalid", headers: http.Header{"X-Codex-Turn-State": {""}}, before: state, want: []string{""}},
++				{name: "duplicate HTTP tokens stay invalid", headers: http.Header{"X-Codex-Turn-State": {"new-state", "new-state"}}, before: state, want: []string{"new-state", "new-state"}},
++				{name: "conflicting HTTP and SSE token", headers: http.Header{"X-Codex-Turn-State": {"http-state"}}, before: state, want: []string{"http-state", "new-state"}},
++				{name: "conflict after completion", before: state, after: metadata(`{"x-codex-turn-state":"later-state"}`), want: []string{"new-state", "later-state"}},
++				{name: "empty token cannot inherit", before: metadata(`{"x-codex-turn-state":""}`), want: []string{""}},
++				{name: "null token cannot inherit", before: metadata(`{"x-codex-turn-state":null}`), want: []string{""}},
++				{name: "number token cannot inherit", before: metadata(`{"x-codex-turn-state":12}`), want: []string{""}},
++				{name: "empty array cannot inherit", before: metadata(`{"x-codex-turn-state":[]}`), want: []string{""}},
++				{name: "multiple array values", before: metadata(`{"x-codex-turn-state":["a","b"]}`), want: []string{""}},
++				{name: "newline token cannot inherit", before: metadata(`{"x-codex-turn-state":"a\nb"}`), want: []string{""}},
++				{name: "case duplicate token", before: metadata(`{"x-codex-turn-state":"new-state","X-Codex-Turn-State":"new-state"}`), want: []string{""}},
++				{name: "exact duplicate token", before: metadata(`{"x-codex-turn-state":"new-state","x-codex-turn-state":"other-state"}`), want: []string{""}},
++				{name: "null headers cannot inherit", before: metadata(`null`), want: []string{""}},
++				{name: "array headers cannot inherit", before: metadata(`[]`), want: []string{""}},
++				{name: "malformed metadata cannot inherit", before: `data: {"type":"` + eventType + `","headers":{"x-codex-turn-state":}}` + "\n\n", want: []string{""}},
++				{name: "uppercase headers token", before: `data: {"type":"` + eventType + `","Headers":{"x-codex-turn-state":"new-state"}}` + "\n\n", want: []string{"new-state"}},
++				{name: "uppercase null headers cannot inherit", before: `data: {"type":"` + eventType + `","Headers":null}` + "\n\n", want: []string{""}},
++				{name: "mixed case duplicate headers", before: `data: {"type":"` + eventType + `","Headers":{"x-codex-turn-state":"hidden"},"headers":{"x-codex-turn-state":"new-state"}}` + "\n\n", want: []string{""}},
++				{name: "uppercase duplicate hides token", headers: http.Header{"X-Codex-Turn-State": {"http-state"}}, before: `data: {"type":"` + eventType + `","headers":{"x-codex-turn-state":"hidden"},"Headers":{}}` + "\n\n", want: []string{"http-state", ""}},
++				{name: "escaped mixed case headers", before: `data: {"type":"` + eventType + `","Heade\u0072s":{"x-codex-turn-state":"hidden"},"headers":{"x-codex-turn-state":"new-state"}}` + "\n\n", want: []string{""}},
++				{name: "duplicate headers cannot inherit", before: `data: {"type":"` + eventType + `","headers":{},"headers":{"x-codex-turn-state":"new-state"}}` + "\n\n", want: []string{""}},
++				{name: "split SSE data", before: `data: {"type":"` + eventType + `",` + "\n" + `data: "headers":{"x-codex-turn-state":"new-state"}}` + "\n\n", want: []string{"new-state"}},
++				{name: "invalid after completion preserves HTTP", headers: http.Header{"X-Codex-Turn-State": {"http-state"}}, after: metadata(`{"x-codex-turn-state":null}`), want: []string{"http-state", ""}},
++				{name: "invalid then valid stays invalid", before: metadata(`{"x-codex-turn-state":null}`), after: state, want: []string{""}},
++				{name: "many conflicts remain bounded", before: state, after: strings.Repeat(metadata(`{"x-codex-turn-state":"later-state"}`), 1000), want: []string{"new-state", "later-state"}},
++			} {
++				t.Run(tc.name, func(t *testing.T) {
++					headers := tc.headers.Clone()
++					if headers == nil {
++						headers = make(http.Header)
++					}
++					headers.Set("X-Unrelated", "keep")
++					before := headers.Clone()
++					completed := `data: {"type":"response.completed","response":{"id":"r","object":"response","model":"model","status":"completed","output":[{"id":"fc","type":"function_call","call_id":"call-held","name":"echo","arguments":"{}"}],"usage":{"input_tokens":2048,"input_tokens_details":{"cached_tokens":2048},"output_tokens":1,"total_tokens":2049}}}` + "\n\n"
++					ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", codexStateTestTransport(func(req *http.Request) (*http.Response, error) {
++						if got := req.Header.Get("X-Codex-Turn-State"); got != "outgoing-old-state" {
++							t.Fatalf("outgoing state changed: %q", got)
++						}
++						return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(tc.before + completed + tc.after)), Request: req}, nil
++					}))
++					executor := NewCodexExecutor(&config.Config{})
++					auth := &cliproxyauth.Auth{ID: "offline-state", Provider: "codex", Attributes: map[string]string{"api_key": "fake-local-key"}}
++					result, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{Model: "model", Payload: []byte(`{"model":"model","input":[{"role":"user","content":"probe"}]}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, Headers: http.Header{"X-Codex-Turn-State": {"outgoing-old-state"}}})
++					if err != nil {
++						t.Fatalf("state evidence became an execution failure: %v", err)
++					}
++					if got := result.Headers.Values("X-Codex-Turn-State"); !reflect.DeepEqual(got, tc.want) {
++						t.Fatalf("turn-state=%q, want %q", got, tc.want)
++					}
++					if !reflect.DeepEqual(headers, before) || result.Headers.Get("X-Unrelated") != "keep" {
++						t.Fatal("original HTTP headers were changed")
++					}
++					if gjson.GetBytes(result.Payload, "status").String() != "completed" || gjson.GetBytes(result.Payload, "output.0.call_id").String() != "call-held" {
++						t.Fatalf("held response body changed: %s", result.Payload)
++					}
++				})
++			}
++		})
++	}
++}

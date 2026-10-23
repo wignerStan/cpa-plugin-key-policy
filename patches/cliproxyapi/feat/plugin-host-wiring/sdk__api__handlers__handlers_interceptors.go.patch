@@ -1,0 +1,87 @@
+From 9099854ad2b2f2d425cbee825006af6db8903d2b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/handlers_interceptors.go)
+
+---
+ sdk/api/handlers/handlers_interceptors.go | 45 +++++++++++++++++++++--
+ 1 file changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/sdk/api/handlers/handlers_interceptors.go b/sdk/api/handlers/handlers_interceptors.go
+index b7aa2a5922a5b9e491f15bbb24be1ce995f2a203..27e23044e07fba3924e78823878c17b3df2d379c 100644
+--- a/sdk/api/handlers/handlers_interceptors.go
++++ b/sdk/api/handlers/handlers_interceptors.go
+@@ -4,6 +4,7 @@ import (
+ 	"encoding/json"
+ 	"maps"
+ 	"net/http"
++	"slices"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -290,7 +291,7 @@ func finalInterceptorHeaders(current, intercepted http.Header) http.Header {
+ 
+ func downstreamHeadersFromExecutor(headers http.Header, passthrough bool) http.Header {
+ 	if !passthrough {
+-		return nil
++		return preserveCodexTurnStateHeader(nil, headers)
+ 	}
+ 	return FilterUpstreamHeaders(headers)
+ }
+@@ -299,7 +300,39 @@ func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrou
+ 	if passthrough {
+ 		return FilterUpstreamHeaders(finalRaw)
+ 	}
+-	return FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw))
++	return preserveCodexTurnStateHeader(FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw)), finalRaw)
++}
++
++// Codex HTTPS clients need this protocol continuation header even when optional
++// upstream headers are disabled. Only the final effective headers can supply it:
++// an interceptor may remove or replace the executor's state.
++func preserveCodexTurnStateHeader(dst, finalRaw http.Header) http.Header {
++	const stateHeader = "X-Codex-Turn-State"
++	for key := range dst {
++		if strings.EqualFold(key, stateHeader) {
++			delete(dst, key)
++		}
++	}
++	filtered := FilterUpstreamHeaders(finalRaw)
++	var keys []string
++	for key := range filtered {
++		if strings.EqualFold(key, stateHeader) {
++			keys = append(keys, key)
++		}
++	}
++	if len(keys) == 0 {
++		return dst
++	}
++	if dst == nil {
++		dst = make(http.Header)
++	}
++	// Use one canonical name so the HTTP writer keeps every value. Preserve
++	// repeated, conflicting, and empty values; forwarding must not invent trust.
++	slices.Sort(keys)
++	for _, key := range keys {
++		dst[stateHeader] = append(dst[stateHeader], filtered[key]...)
++	}
++	return dst
+ }
+ 
+ func diffHeaders(base, next http.Header) http.Header {
+@@ -525,8 +558,12 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCa
+ 		return nil
+ 	}
+ 	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
+-		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, requestID, skipPluginID)
+-		if capture != nil {
++		id := requestID
++		if pluginapi.AuxiliaryExecution(ctx) {
++			id = uuid.NewString()
++		}
++		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, id, skipPluginID)
++		if capture != nil && !pluginapi.AuxiliaryExecution(ctx) {
+ 			capture.record(req, resp)
+ 		}
+ 		return resp

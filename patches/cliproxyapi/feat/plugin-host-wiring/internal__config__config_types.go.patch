@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/internal/config/config_types.go b/internal/config/config_types.go
+index 5205bf2f2eefe5a5cfd4c6d76009dac0b38f0e73..09d1f08dc9cdf8367582755172b58a255a8f9936 100644
+--- a/internal/config/config_types.go
++++ b/internal/config/config_types.go
+@@ -228,6 +228,14 @@ type AntigravityConnectionPoolConfig struct {
+ 
+ // CodexConfig configures provider-wide Codex request behavior.
+ type CodexConfig struct {
++	// CompactToolCheck validates native Lite tools after encrypted compaction.
++	// Nil enables the check. It does not change account health or affinity.
++	// Generated compact output is validated even when tool checks are disabled.
++	CompactToolCheck *bool `yaml:"compact-tool-check,omitempty" json:"compact-tool-check,omitempty"`
++	// CompactMaxAttempts includes the initial attempt, for compact generation
++	// including restoration checks. Zero defaults to 5; capped at 16.
++	CompactMaxAttempts int `yaml:"compact-max-attempts,omitempty" json:"compact-max-attempts,omitempty"`
++
+ 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
+ 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
+ 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
+@@ -265,6 +273,9 @@ type CodexConfig struct {
+ 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
+ 	// upstream model/account/socket for their entire lifetime. Default is false.
+ 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
++	// ThreadTitleSession allows Codex thread_source=thread_title websocket
++	// upgrades and HTTP /v1/responses naming calls. Default is true (allowed).
++	ThreadTitleSession *bool `yaml:"thread-title-session,omitempty" json:"thread-title-session,omitempty"`
+ 	// SignInWithChatGPTIdentifier configures the identifier (agent_name_hint and User-Agent prefix)
+ 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
+ 	// Defaults to "CLIProxyAPI".

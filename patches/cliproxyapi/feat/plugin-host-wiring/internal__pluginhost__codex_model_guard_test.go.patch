@@ -1,0 +1,73 @@
+From 0afa76a3e6c5c5a5f7ea1be2653d77c400becf3b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/codex_model_guard_test.go)
+
+---
+ internal/pluginhost/codex_model_guard_test.go | 56 +++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+ create mode 100644 internal/pluginhost/codex_model_guard_test.go
+
+diff --git a/internal/pluginhost/codex_model_guard_test.go b/internal/pluginhost/codex_model_guard_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfcb05c109f89c4c8a8d1f57fed74f5f042f5745
+--- /dev/null
++++ b/internal/pluginhost/codex_model_guard_test.go
+@@ -0,0 +1,56 @@
++package pluginhost
++
++import (
++	"context"
++	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"testing"
++)
++
++type guardFunc func(context.Context, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error)
++
++func (f guardFunc) ExchangeModelGuard(ctx context.Context, in pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++	return f(ctx, in)
++}
++func TestRequiredGuardNeverUsesAnotherPluginOrFallsOpen(t *testing.T) {
++	for _, mode := range []string{"missing", "error", "panic", "accept"} {
++		t.Run(mode, func(t *testing.T) {
++			calls := 0
++			id := "guard"
++			if mode == "missing" {
++				id = "other"
++			}
++			h := newHostWithRecords(capabilityRecord{id: id, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{CodexModelGuard: guardFunc(func(context.Context, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				calls++
++				switch mode {
++				case "panic":
++					panic("failure")
++				case "error":
++					return pluginapi.ModelGuardDecision{}, fmt.Errorf("failed")
++				}
++				return pluginapi.ModelGuardDecision{Action: "accept"}, nil
++			})}}})
++			d, e := h.ExchangeModelGuard(context.Background(), "guard", pluginapi.ModelGuardExchange{Version: 1})
++			if mode == "accept" {
++				if e != nil || d.Action != "accept" {
++					t.Fatal(e)
++				}
++				return
++			}
++			if e == nil || d.Action == "accept" {
++				t.Fatal("required guard failed open")
++			}
++			if mode == "missing" && calls != 0 {
++				t.Fatal("another guard was used")
++			}
++			if mode == "panic" {
++				if !h.isPluginFused(id) {
++					t.Fatal("panic did not fuse")
++				}
++				if _, e = h.ExchangeModelGuard(context.Background(), id, pluginapi.ModelGuardExchange{}); e == nil {
++					t.Fatal("fused guard bypassed")
++				}
++			}
++		})
++	}
++}

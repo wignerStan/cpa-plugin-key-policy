@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"cpa-key-policy/internal/infra/files/notify"
 	"cpa-key-policy/internal/policy"
+	"github.com/wignerStan/infra/go/files/notify"
 	"gopkg.in/yaml.v3"
 )
 

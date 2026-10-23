@@ -1,0 +1,264 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 12:00:00 +0800
+Subject: [PATCH] feat(sdk): expose standalone Codex protocol (sdk/protocol/codex/usage.go)
+
+---
+diff --git a/sdk/protocol/codex/usage.go b/sdk/protocol/codex/usage.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..45aa6c6b765a88dab9fe6ff667f297248983b01d
+--- /dev/null
++++ b/sdk/protocol/codex/usage.go
+@@ -0,0 +1,252 @@
++package codex
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"io"
++	"strings"
++)
++
++var ErrUsage = errors.New("invalid_cache_usage")
++
++type Usage struct {
++	Input       int
++	InputKnown  bool
++	Cached      *int
++	Written     *int
++	Attribution json.RawMessage
++	seen        bool
++	EvidenceErr error
++}
++
++// encoding/json calls this method for each root usage field, including case
++// aliases. Reject repeated evidence instead of letting the last value win.
++func (u *Usage) UnmarshalJSON(raw []byte) error {
++	if u.seen {
++		u.EvidenceErr = ErrUsage
++		return nil
++	}
++	u.seen = true
++	// Keep decoding the response. Failed status or malformed output must retain
++	// its upstream-failure classification ahead of incomplete cache evidence.
++	u.EvidenceErr = u.decode(raw)
++	return nil
++}
++
++func (u *Usage) decode(raw []byte) error {
++	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++		return nil
++	}
++	fields, err := EvidenceFields(raw, "input_tokens", "input_tokens_details", "attribution")
++	if err != nil {
++		return err
++	}
++	if rawInput := fields["input_tokens"]; len(rawInput) > 0 {
++		var input *int
++		if json.Unmarshal(rawInput, &input) != nil {
++			return ErrUsage
++		}
++		if input != nil {
++			u.Input, u.InputKnown = *input, true
++		}
++	}
++	u.Attribution = fields["attribution"]
++	if details := fields["input_tokens_details"]; len(details) > 0 && !bytes.Equal(bytes.TrimSpace(details), []byte("null")) {
++		fields, err := EvidenceFields(details, "cached_tokens", "cache_write_tokens")
++		if err != nil {
++			return err
++		}
++		if cached := fields["cached_tokens"]; len(cached) > 0 && json.Unmarshal(cached, &u.Cached) != nil {
++			return ErrUsage
++		}
++		if written, present := fields["cache_write_tokens"]; present {
++			if json.Unmarshal(written, &u.Written) != nil || u.Written == nil {
++				return ErrUsage
++			}
++		}
++	}
++	return nil
++}
++
++// Read each evidence key once. Named fields use the same case matching as Go's
++// struct decoder. With no names, keys are case-sensitive item IDs. Values are
++// not traversed, so nested content and unrelated extensions remain opaque.
++func EvidenceFields(raw json.RawMessage, names ...string) (map[string]json.RawMessage, error) {
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
++		return nil, ErrUsage
++	}
++	fields := make(map[string]json.RawMessage)
++	for decoder.More() {
++		token, err := decoder.Token()
++		if err != nil {
++			return nil, ErrUsage
++		}
++		key, ok := token.(string)
++		if !ok {
++			return nil, ErrUsage
++		}
++		var value json.RawMessage
++		if decoder.Decode(&value) != nil {
++			return nil, ErrUsage
++		}
++		if len(names) > 0 {
++			matched := false
++			for _, name := range names {
++				if strings.EqualFold(key, name) {
++					key, matched = name, true
++					break
++				}
++			}
++			if !matched {
++				continue
++			}
++		}
++		if _, duplicate := fields[key]; duplicate {
++			return nil, ErrUsage
++		}
++		fields[key] = value
++	}
++	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
++		return nil, ErrUsage
++	}
++	if _, err := decoder.Token(); err != io.EOF {
++		return nil, ErrUsage
++	}
++	return fields, nil
++}
++
++func ValidateAttribution(raw json.RawMessage, input int, cached, written *int) error {
++	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
++		return nil
++	}
++	attribution, err := EvidenceFields(raw, "items", "request_fields")
++	if err != nil {
++		return err
++	}
++	items, hasItems := attribution["items"]
++	fields, hasFields := attribution["request_fields"]
++	if !hasItems && !hasFields {
++		// An unrelated extension makes no item-accounting claim.
++		return nil
++	}
++	if cached == nil {
++		return ErrUsage
++	}
++	decode := func(raw json.RawMessage) (map[string]CacheRow, bool) {
++		if len(raw) == 0 {
++			return nil, true
++		}
++		entries, err := EvidenceFields(raw)
++		if err != nil {
++			return nil, false
++		}
++		return DecodeAttributionRows(entries)
++	}
++	itemRows, valid := decode(items)
++	if !valid {
++		return ErrUsage
++	}
++	fieldRows, valid := decode(fields)
++	if !valid || !validDetails(cacheDetails{
++		Input: input, Cached: *cached, Written: written, Items: itemRows, Fields: fieldRows,
++	}) {
++		return ErrUsage
++	}
++	return nil
++}
++
++// AttributionRow validates the full breakdown. If content is false, it returns
++// only aggregate counts after validating any supplied children.
++func AttributionRow(raw json.RawMessage, content bool) (CacheRow, bool) {
++	row, ok := decodeAttributionRow(raw, 0)
++	if !content {
++		row.Content = nil
++	}
++	return row, ok
++}
++func decodeAttributionRow(raw json.RawMessage, depth int) (CacheRow, bool) {
++	var row CacheRow
++	if depth > 64 {
++		return row, false
++	}
++	fields, err := EvidenceFields(raw, "input_tokens", "cached_tokens", "cache_write_tokens", "content")
++	var input, cached *int
++	if err != nil || json.Unmarshal(fields["input_tokens"], &input) != nil || json.Unmarshal(fields["cached_tokens"], &cached) != nil || input == nil || cached == nil || *input < 0 || *cached < 0 || *cached > *input {
++		return row, false
++	}
++	row.Input, row.Cached = *input, *cached
++	if value, present := fields["cache_write_tokens"]; present {
++		var written *int
++		if json.Unmarshal(value, &written) != nil || written == nil || *written < 0 || *written > row.Input-row.Cached {
++			return row, false
++		}
++		row.Written, row.WriteKnown = *written, true
++	}
++	if raw, found := fields["content"]; found {
++		var children []json.RawMessage
++		if json.Unmarshal(raw, &children) != nil || children == nil {
++			return row, false
++		}
++		for _, child := range children {
++			part, ok := decodeAttributionRow(child, depth+1)
++			if !ok {
++				return row, false
++			}
++			row.Content = append(row.Content, part)
++		}
++	}
++	return row, validRowRoot(row)
++}
++
++func AttributionTables(raw json.RawMessage) (map[string]json.RawMessage, map[string]json.RawMessage, bool) {
++	tables, err := EvidenceFields(raw, "items", "request_fields")
++	if err != nil {
++		return nil, nil, false
++	}
++	items, err := EvidenceFields(tables["items"])
++	if err != nil || len(items) == 0 {
++		return nil, nil, false
++	}
++	fields := map[string]json.RawMessage{}
++	if value, exists := tables["request_fields"]; exists {
++		fields, err = EvidenceFields(value)
++	}
++	return items, fields, err == nil
++}
++
++// DecodeAttributionRows is the Responses usage-attribution adapter. The
++// infra core consumes decoded counters and knows no upstream field names.
++func DecodeAttributionRows(table map[string]json.RawMessage) (map[string]CacheRow, bool) {
++	rows := make(map[string]CacheRow, len(table))
++	for key, raw := range table {
++		row, valid := AttributionRow(raw, true)
++		if !valid {
++			return nil, false
++		}
++		rows[key] = row
++	}
++	return rows, true
++}
++func DeclaresAttribution(raw json.RawMessage) bool {
++	var tables map[string]json.RawMessage
++	if json.Unmarshal(raw, &tables) != nil {
++		return false
++	}
++	_, items := tables["items"]
++	_, fields := tables["request_fields"]
++	return items || fields
++}
++
++// Validate checks reported evidence. InputKnown must also be checked by a caller
++// that requires an explicit input count; a state-only response may omit usage.
++func (u Usage) Validate() error {
++	if u.EvidenceErr != nil {
++		return u.EvidenceErr
++	}
++	if validateCounts(u.Input, u.Cached, u.Written) != nil {
++		return ErrUsage
++	}
++	return ValidateAttribution(u.Attribution, u.Input, u.Cached, u.Written)
++}

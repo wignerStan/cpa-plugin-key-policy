@@ -1,0 +1,531 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 18:00:00 +0000
+Subject: [PATCH] feat(codex): validate compact tool restoration
+
+---
+diff --git a/internal/runtime/executor/codex_compact_guard_test.go b/internal/runtime/executor/codex_compact_guard_test.go
+new file mode 100644
+index 0000000..73f70df
+--- /dev/null
++++ b/internal/runtime/executor/codex_compact_guard_test.go
+@@ -0,0 +1,519 @@
++package executor
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"github.com/tidwall/gjson"
++)
++
++const compactTestTools = `[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec","description":"Run a harmless command","format":{"type":"text"}},{"type":"function","name":"wait","parameters":{"type":"object","properties":{}}}]}]`
++
++func compactTestRequest(generating bool) (core.Request, core.Options) {
++	boundary := `{"type":"compaction","id":"cmp_installed","encrypted_content":"old-compact"}`
++	if generating {
++		boundary = `{"type":"compaction_trigger"}`
++	}
++	body := []byte(`{"model":"gpt-5.6-sol","reasoning":{"effort":"high"},"input":[{"type":"additional_tools","id":"at_original","tools":` + compactTestTools + `},{"type":"message","role":"developer","content":"Original instructions"},{"type":"message","role":"user","content":"Original task"},` + boundary + `],"client_metadata":{"request_kind":"compaction"},"prompt_cache_key":"physical-session"}`)
++	headers := http.Header{"Session-Id": {"physical-session"}, "Thread-Id": {"logical-thread"}, "X-Codex-Turn-State": {"parent-state"}, "X-Openai-Subagent": {"compact"}}
++	headers.Set(codexResponsesLiteHeader, "true")
++	headers.Set("X-Codex-Turn-Metadata", `{"thread_id":"logical-thread","turn_id":"turn","request_kind":"compaction"}`)
++	return core.Request{Model: "gpt-5.6-sol", Payload: body}, core.Options{SourceFormat: translator.FormatOpenAIResponse, Headers: headers, Stream: true}
++}
++
++func compactTestCompletion(w http.ResponseWriter, id, tools, output string) {
++	w.Header().Set("Content-Type", "text/event-stream")
++	fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":%q}}\n\n", id)
++	for _, item := range gjson.Parse(output).Array() {
++		fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"item\":%s}\n\n", item.Raw)
++	}
++	fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":%q,\"status\":\"completed\",\"tools\":%s,\"output\":%s,\"usage\":{\"input_tokens\":20000,\"input_tokens_details\":{\"cached_tokens\":19968},\"output_tokens\":1}}}\n\n", id, tools, output)
++}
++
++func TestCompactToolCatalogEvidence(t *testing.T) {
++	req, _ := compactTestRequest(true)
++	expected, err := compactRequestTools(req.Payload)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, tc := range []struct {
++		name, tools string
++		pass        bool
++	}{
++		{"complete-without-call", compactTestTools, true},
++		{"empty", `[]`, false},
++		{"server-image-only", `[{"type":"image_generation"}]`, false},
++		{"partial", `[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}]`, false},
++		{"wrong-namespace", strings.ReplaceAll(compactTestTools, "functions", "other"), false},
++		{"wrong-kind", strings.ReplaceAll(compactTestTools, `"custom"`, `"function"`), false},
++		{"missing-evidence", `null`, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			err := checkCompactTools([]byte(`{"tools":`+tc.tools+`,"output":[],"usage":{"input_tokens_details":{"cached_tokens":19968}}}`), expected)
++			if (err == nil) != tc.pass {
++				t.Fatalf("pass=%t: %v", tc.pass, err)
++			}
++		})
++	}
++	if err := checkCompactTools([]byte(`{}`), nil); err != nil {
++		t.Fatal("no declared tools need no proof", err)
++	}
++}
++
++func TestCompactGuardRegeneratesOriginalAndHoldsUntilProbe(t *testing.T) {
++	for _, nonstream := range []bool{false, true} {
++		t.Run(fmt.Sprint("nonstream=", nonstream), func(t *testing.T) {
++			var mu sync.Mutex
++			var originals [][]byte
++			var originalSockets, probeSockets []string
++			calls := 0
++			probeEntered, releaseProbe := make(chan struct{}), make(chan struct{})
++			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				mu.Lock()
++				calls++
++				number := calls
++				mu.Unlock()
++				generating, _ := compactBoundary(body)
++				if r.Header.Get("Session-Id") != "physical-session" || gjson.GetBytes(body, "prompt_cache_key").String() != "physical-session" {
++					t.Error("changed physical session")
++				}
++				if gjson.GetBytes(body, "reasoning.effort").String() != "high" {
++					t.Error("changed effort")
++				}
++				if generating {
++					if r.Proto != "HTTP/2.0" {
++						t.Error("parent lost HTTP/2", r.Proto)
++					}
++					mu.Lock()
++					originals = append(originals, body)
++					originalSockets = append(originalSockets, r.RemoteAddr)
++					mu.Unlock()
++					fmt.Fprint(w, "data: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-codex-turn-state\":\"generated-state\"}}\n\n")
++					compactTestCompletion(w, fmt.Sprintf("compact_%d", number), compactTestTools, fmt.Sprintf(`[{"type":"compaction","id":"cmp_%d","encrypted_content":"cipher-%d"}]`, number, number))
++					return
++				}
++				mu.Lock()
++				probeSockets = append(probeSockets, r.RemoteAddr)
++				mu.Unlock()
++				if r.Proto != "HTTP/1.1" || r.Header.Get("X-Codex-Turn-State") != "" || r.Header.Get("X-Openai-Subagent") != "" {
++					t.Error("probe protocol or compact controls", r.Proto)
++				}
++				if strings.Contains(string(body), "compaction_trigger") || strings.Contains(string(body), `"request_kind":"compaction"`) {
++					t.Error("probe retained compact controls")
++				}
++				if number == 2 {
++					compactTestCompletion(w, "probe_bad", `[]`, `[]`)
++					return
++				}
++				close(probeEntered)
++				<-releaseProbe
++				fmt.Fprint(w, "data: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-codex-turn-state\":\"probe-state\"}}\n\n")
++				compactTestCompletion(w, "probe_good", compactTestTools, `[]`)
++			}))
++			server.EnableHTTP2 = true
++			server.StartTLS()
++			defer server.Close()
++			req, opts := compactTestRequest(true)
++			original := bytes.Clone(req.Payload)
++			executor := NewCodexExecutor(&config.Config{})
++			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), "cliproxy.roundtripper", server.Client().Transport), 10*time.Second)
++			defer cancel()
++			type result struct {
++				body    []byte
++				headers http.Header
++				err     error
++			}
++			done := make(chan result, 1)
++			go func() {
++				if nonstream {
++					opts.Stream = false
++					r, err := executor.Execute(ctx, codexTestAuth(server.URL), req, opts)
++					done <- result{r.Payload, r.Headers, err}
++					return
++				}
++				r, err := executor.ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
++				if err != nil {
++					done <- result{err: err}
++					return
++				}
++				var buf bytes.Buffer
++				for chunk := range r.Chunks {
++					if chunk.Err != nil {
++						done <- result{err: chunk.Err}
++						return
++					}
++					buf.Write(chunk.Payload)
++				}
++				done <- result{buf.Bytes(), r.Headers, nil}
++			}()
++			select {
++			case <-probeEntered:
++			case r := <-done:
++				t.Fatal("returned before final probe", r.err)
++			case <-ctx.Done():
++				t.Fatal(ctx.Err())
++			}
++			select {
++			case r := <-done:
++				t.Fatal("held response escaped", r.err)
++			default:
++			}
++			close(releaseProbe)
++			r := <-done
++			if r.err != nil {
++				t.Fatal(r.err)
++			}
++			if !bytes.Contains(r.body, []byte("compact_3")) || bytes.Contains(r.body, []byte("compact_1")) || bytes.Contains(r.body, []byte("probe_")) {
++				t.Fatal("released rejected compact or probe", string(r.body))
++			}
++			if r.headers.Get("X-Codex-Turn-State") != "generated-state" {
++				t.Fatal("probe state replaced parent state", r.headers)
++			}
++			mu.Lock()
++			defer mu.Unlock()
++			if len(originals) != 2 || !bytes.Equal(originals[0], originals[1]) || !bytes.Equal(req.Payload, original) {
++				t.Fatal("did not replay original compact body")
++			}
++			if originalSockets[0] != originalSockets[1] {
++				t.Fatal("compact retry dropped reusable parent socket")
++			}
++			for _, socket := range probeSockets {
++				if socket == originalSockets[0] {
++					t.Fatal("probe shared parent socket")
++				}
++			}
++		})
++	}
++}
++
++func TestCompactGuardExhaustionAndNoOrdinaryReplay(t *testing.T) {
++	for _, generating := range []bool{true, false} {
++		t.Run(fmt.Sprint("generation=", generating), func(t *testing.T) {
++			calls := 0
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				calls++
++				gen, _ := compactBoundary(body)
++				if gen {
++					compactTestCompletion(w, "compact", compactTestTools, `[{"type":"compaction","encrypted_content":"broken"}]`)
++				} else {
++					compactTestCompletion(w, "missing", `[]`, `[]`)
++				}
++			}))
++			defer server.Close()
++			req, opts := compactTestRequest(generating)
++			executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{CompactMaxAttempts: 3}})
++			r, err := executor.ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
++			if !generating {
++				if err != nil {
++					t.Fatal("historical compact triggered a new boundary check", err)
++				}
++				for chunk := range r.Chunks {
++					if chunk.Err != nil {
++						t.Fatal(chunk.Err)
++					}
++				}
++				if calls != 1 {
++					t.Fatal("ordinary history was retried", calls)
++				}
++				return
++			}
++			var stopped interface{ IsRequestStop() bool }
++			if r != nil || !errors.As(err, &stopped) || !stopped.IsRequestStop() {
++				t.Fatal("exhaustion exposed bytes or allowed account penalty", err)
++			}
++			want := 1
++			if generating {
++				want = 6
++			}
++			if calls != want {
++				t.Fatalf("requests=%d, want %d", calls, want)
++			}
++		})
++	}
++}
++
++func TestCompactGuardCancelWhileHeld(t *testing.T) {
++	entered := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		fmt.Fprint(w, "data: {\"type\":\"response.created\"}\n\n")
++		w.(http.Flusher).Flush()
++		close(entered)
++		<-r.Context().Done()
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithCancel(context.Background())
++	req, opts := compactTestRequest(true)
++	done := make(chan error, 1)
++	go func() {
++		_, err := NewCodexExecutor(&config.Config{}).ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
++		done <- err
++	}()
++	<-entered
++	cancel()
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.Canceled) {
++			t.Fatal(err)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("cancel did not release hold")
++	}
++}
++
++func TestCompactGuardDefaultsAndScope(t *testing.T) {
++	e := NewCodexExecutor(&config.Config{})
++	if e.compactAttemptLimit() != 5 {
++		t.Fatal("default attempts")
++	}
++	req, opts := compactTestRequest(true)
++	if !e.needsCompactToolGuard(req, opts) {
++		t.Fatal("native compact skipped")
++	}
++	opts.Headers.Del(codexResponsesLiteHeader)
++	if e.needsCompactToolGuard(req, opts) {
++		t.Fatal("non-Lite changed")
++	}
++	opts.Headers.Set(codexResponsesLiteHeader, "true")
++	opts.Alt = "responses/compact"
++	if e.needsCompactToolGuard(req, opts) {
++		t.Fatal("legacy endpoint changed")
++	}
++	var value map[string]any
++	if json.Unmarshal(clearCompactMetadata([]byte(`{"ws":{"request_kind":"compaction","thread_id":"thread"},"session_id":"session"}`)), &value) != nil {
++		t.Fatal("metadata invalid")
++	}
++}
++
++func TestCompactGeneratedOutputMatchesCodexV2(t *testing.T) {
++	for _, tc := range []struct {
++		name, output string
++		pass         bool
++	}{
++		{"compact", `[{"type":"compaction","encrypted_content":"cipher"}]`, true},
++		{"summary-alias", `[{"type":"compaction_summary","encrypted_content":"cipher"}]`, true},
++		{"reasoning-and-compact", `[{"type":"reasoning","summary":[]},{"type":"compaction","encrypted_content":"cipher"}]`, true},
++		{"zero-of-two", `[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[]}]`, false},
++		{"empty", `[]`, false},
++		{"context-is-not-compaction", `[{"type":"context_compaction","encrypted_content":"cipher"}]`, false},
++		{"duplicate", `[{"type":"compaction","encrypted_content":"one"},{"type":"compaction","encrypted_content":"two"}]`, false},
++		{"missing-cipher", `[{"type":"compaction"}]`, false},
++		{"invalid-cipher-type", `[{"type":"compaction","encrypted_content":42}]`, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var items []json.RawMessage
++			if err := json.Unmarshal([]byte(tc.output), &items); err != nil {
++				t.Fatal(err)
++			}
++			_, err := compactGeneratedOutput(items)
++			if (err == nil) != tc.pass {
++				t.Fatalf("pass=%t: %v", tc.pass, err)
++			}
++		})
++	}
++}
++
++func TestCompactGuardRetriesClientVisibleOutputDefects(t *testing.T) {
++	for _, defect := range []string{"zero-of-two", "terminal-only", "contradictory-terminal", "after-completed"} {
++		t.Run(defect, func(t *testing.T) {
++			attempts, probes := 0, 0
++			var original []byte
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				body, _ := io.ReadAll(r.Body)
++				generating, _ := compactBoundary(body)
++				if !generating {
++					probes++
++					fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"tools\":%s}}\n\n", compactTestTools)
++					return
++				}
++				attempts++
++				if original == nil {
++					original = bytes.Clone(body)
++				} else if !bytes.Equal(original, body) {
++					t.Error("compact retry changed original body")
++				}
++				if attempts > 1 {
++					compactTestCompletion(w, "accepted", compactTestTools, `[{"type":"reasoning","summary":[]},{"type":"compaction","encrypted_content":"good"}]`)
++					return
++				}
++				compact := `{"type":"compaction","encrypted_content":"terminal-cipher"}`
++				bad := `[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[]}]`
++				if defect == "zero-of-two" || defect == "contradictory-terminal" {
++					for _, item := range gjson.Parse(bad).Array() {
++						fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"item\":%s}\n\n", item.Raw)
++					}
++				}
++				terminal := "[" + compact + "]"
++				if defect == "zero-of-two" {
++					terminal = bad
++				}
++				fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"rejected\",\"status\":\"completed\",\"output\":%s}}\n\n", terminal)
++				if defect == "after-completed" {
++					fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"item\":%s}\n\n", compact)
++				}
++			}))
++			defer server.Close()
++			req, opts := compactTestRequest(true)
++			disabled := false
++			e := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{CompactToolCheck: &disabled, CompactMaxAttempts: 2}})
++			if !e.needsCompactToolGuard(req, opts) {
++				t.Fatal("tool-check opt-out disabled compact shape validation")
++			}
++			result, err := e.ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
++			if err != nil {
++				t.Fatal(err)
++			}
++			var returned bytes.Buffer
++			for chunk := range result.Chunks {
++				if chunk.Err != nil {
++					t.Fatal(chunk.Err)
++				}
++				returned.Write(chunk.Payload)
++			}
++			if attempts != 2 || probes != 0 || bytes.Contains(returned.Bytes(), []byte("rejected")) || !bytes.Contains(returned.Bytes(), []byte("accepted")) {
++				t.Fatal("invalid compact escaped or original was not retried", attempts, probes)
++			}
++		})
++	}
++}
++
++func TestCompactGuardUsesEarlyToolCatalogWithoutModelAnswer(t *testing.T) {
++	probeClosed := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		generation, _ := compactBoundary(body)
++		if generation {
++			compactTestCompletion(w, "compact_good", compactTestTools, `[{"type":"compaction","encrypted_content":"good"}]`)
++			return
++		}
++		w.Header().Set("Content-Type", "text/event-stream")
++		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"probe\",\"tools\":%s}}\n\n", compactTestTools)
++		w.(http.Flusher).Flush()
++		<-r.Context().Done()
++		close(probeClosed)
++	}))
++	defer server.Close()
++	req, opts := compactTestRequest(true)
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	e := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: true}})
++	result, err := e.ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for chunk := range result.Chunks {
++		if chunk.Err != nil {
++			t.Fatal(chunk.Err)
++		}
++	}
++	select {
++	case <-probeClosed:
++	case <-ctx.Done():
++		t.Fatal("waited for model answer or left probe running")
++	}
++	if !e.cfg.Codex.StreamBootstrapBuffering {
++		t.Fatal("probe mutated parent configuration")
++	}
++}
++
++func TestCompactGuardOverflowStopsWithoutRetry(t *testing.T) {
++	var mu sync.Mutex
++	calls := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		mu.Lock()
++		calls++
++		mu.Unlock()
++		w.Header().Set("Content-Type", "text/event-stream")
++		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"")
++		io.CopyN(w, strings.NewReader(strings.Repeat("x", codexCompactHoldLimit+1)), codexCompactHoldLimit+1)
++		fmt.Fprint(w, "\"}\n\n")
++	}))
++	defer server.Close()
++	req, opts := compactTestRequest(true)
++	result, err := NewCodexExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
++	var checked codexCompactGuardError
++	if result != nil || !errors.As(err, &checked) || checked.reason != "hold byte limit" {
++		t.Fatal("overflow was not a local stop", err)
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	if calls != 1 {
++		t.Fatal("local overflow charged more upstream requests", calls)
++	}
++}
++
++func TestCompactToolCapabilityWithoutEcho(t *testing.T) {
++	expected, _ := compactRequestTools(func() []byte { r, _ := compactTestRequest(true); return r.Payload }())
++	valid := `{"type":"function_call","namespace":"functions","name":"wait","call_id":"call-probe","arguments":"{}"}`
++	for _, tc := range []struct {
++		name, tools, call string
++		ok                bool
++	}{
++		{"empty", `[]`, valid, true}, {"null", `null`, valid, true},
++		{"missing", ``, valid, true},
++		{"prose", `[]`, `{"type":"message","content":[{"type":"output_text","text":"Tools available"}]}`, false},
++		{"unknown", `[]`, strings.Replace(valid, `"wait"`, `"other"`, 1), false},
++		{"bad-args", `[]`, strings.Replace(valid, `"{}"`, `"not-json"`, 1), false},
++		{"no-call-id", `[]`, strings.Replace(valid, `"call-probe"`, `""`, 1), false},
++		{"partial-echo", `[{"type":"function","name":"other"}]`, valid, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			response := []byte(`{}`)
++			if tc.tools != "" {
++				response = []byte(`{"tools":` + tc.tools + `}`)
++			}
++			err := checkCompactToolCapability(compactHeldStream{response: response, outputDone: []json.RawMessage{json.RawMessage(tc.call)}}, expected)
++			if (err == nil) != tc.ok {
++				t.Fatal(err)
++			}
++		})
++	}
++}
++
++func TestCompactGuardEmptyEchoUsesPrivateToolCall(t *testing.T) {
++	calls := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		calls++
++		generating, _ := compactBoundary(body)
++		if generating {
++			compactTestCompletion(w, "compact_empty", `[]`, `[{"type":"compaction","encrypted_content":"cipher"}]`)
++			return
++		}
++		if !strings.Contains(string(body), "structured call") {
++			t.Error("no behavioral tool request")
++		}
++		fmt.Fprint(w, `data: {"type":"response.created","response":{"tools":[]}}`+"\n\n")
++		compactTestCompletion(w, "private_probe", `[]`, `[{"type":"function_call","namespace":"functions","name":"wait","call_id":"private_call","arguments":"{}"}]`)
++	}))
++	defer server.Close()
++	req, opts := compactTestRequest(true)
++	stream, err := NewCodexExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var out bytes.Buffer
++	for chunk := range stream.Chunks {
++		if chunk.Err != nil {
++			t.Fatal(chunk.Err)
++		}
++		out.Write(chunk.Payload)
++	}
++	if calls != 2 || !strings.Contains(out.String(), "compact_empty") || strings.Contains(out.String(), "private_") {
++		t.Fatal("private probe leaked or compact was retried", calls, out.String())
++	}
++}

@@ -1,0 +1,23 @@
+From 658fea23632b97d87ebeadca4be479c66b5eff3a Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/loader_unix_test.go)
+
+---
+ internal/pluginhost/loader_unix_test.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/internal/pluginhost/loader_unix_test.go b/internal/pluginhost/loader_unix_test.go
+index 9bfd515a1afac621efdf3bc5980d022151d4c711..b6dc382d91bc00c0021e45429ff65da92d71e76c 100644
+--- a/internal/pluginhost/loader_unix_test.go
++++ b/internal/pluginhost/loader_unix_test.go
+@@ -36,7 +36,7 @@ func buildReloadTestPlugin(t *testing.T, version int, outPath string) {
+ 	case 3:
+ 		cflags = "-DPLUGIN_VERSION=3"
+ 	}
+-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "CGO_CFLAGS="+cflags)
++	cmd.Env = append(os.Environ(), "GOWORK=off", "CGO_ENABLED=1", "CGO_CFLAGS="+cflags)
+ 	if output, errBuild := cmd.CombinedOutput(); errBuild != nil {
+ 		t.Fatalf("build test plugin (v%d): %v\n%s", version, errBuild, output)
+ 	}

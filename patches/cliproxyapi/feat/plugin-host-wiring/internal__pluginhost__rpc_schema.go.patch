@@ -1,0 +1,52 @@
+From ef09957c4414c696782a9c6615d3a5fab7c9af3b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/pluginhost/rpc_schema.go)
+
+---
+ internal/pluginhost/rpc_schema.go | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/internal/pluginhost/rpc_schema.go b/internal/pluginhost/rpc_schema.go
+index 188ed246c73e7973573f68d9fdda58292723d1c6..d069e92dff1b7b68ff3498154d1bdcf18eea69a8 100644
+--- a/internal/pluginhost/rpc_schema.go
++++ b/internal/pluginhost/rpc_schema.go
+@@ -9,6 +9,7 @@ import (
+ 
+ type rpcLifecycleRequest struct {
+ 	ConfigYAML    []byte `json:"config_yaml"`
++	ConfigPath    string `json:"config_path,omitempty"`
+ 	SchemaVersion uint32 `json:"schema_version"`
+ }
+ 
+@@ -19,12 +20,14 @@ type rpcRegistration struct {
+ }
+ 
+ type rpcCapabilities struct {
++	CodexModelGuard               bool                         `json:"codex_model_guard,omitempty"`
+ 	ModelRegistrar                bool                         `json:"model_registrar"`
+ 	ModelProvider                 bool                         `json:"model_provider"`
+ 	AuthProvider                  bool                         `json:"auth_provider"`
+ 	FrontendAuthProvider          bool                         `json:"frontend_auth_provider"`
+ 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`
+ 	Scheduler                     bool                         `json:"scheduler"`
++	SchedulerAdmission            bool                         `json:"scheduler_admission,omitempty"`
+ 	SchedulerAcrossPriorities     bool                         `json:"scheduler_across_priorities,omitempty"`
+ 	ModelRouter                   bool                         `json:"model_router"`
+ 	Executor                      bool                         `json:"executor"`
+@@ -161,12 +164,14 @@ func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
+ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
+ 	caps := plugin.Capabilities
+ 	return rpcCapabilities{
++		CodexModelGuard:               caps.CodexModelGuard != nil,
+ 		ModelRegistrar:                caps.ModelRegistrar != nil,
+ 		ModelProvider:                 caps.ModelProvider != nil,
+ 		AuthProvider:                  caps.AuthProvider != nil,
+ 		FrontendAuthProvider:          caps.FrontendAuthProvider != nil,
+ 		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
+ 		Scheduler:                     caps.Scheduler != nil,
++		SchedulerAdmission:            caps.Scheduler != nil && caps.SchedulerAdmission != nil,
+ 		SchedulerAcrossPriorities:     schedulerWantsAcrossPriorities(caps),
+ 		ModelRouter:                   caps.ModelRouter != nil,
+ 		Executor:                      caps.Executor != nil,

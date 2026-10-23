@@ -1,0 +1,57 @@
+diff --git a/sdk/cliproxy/builder.go b/sdk/cliproxy/builder.go
+index 532bde1..3e26919 100644
+--- a/sdk/cliproxy/builder.go
++++ b/sdk/cliproxy/builder.go
+@@ -6,6 +6,8 @@ package cliproxy
+ import (
+ 	"context"
+ 	"fmt"
++	"path/filepath"
++	"strings"
+ 
+ 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+@@ -241,6 +243,9 @@ func (b *Builder) Build() (*Service, error) {
+ 	if pluginHost == nil {
+ 		pluginHost = pluginhost.New()
+ 	}
++	if b.configPath != "" {
++		pluginHost.SetConfigPath(b.configPath)
++	}
+ 	if b.cfg != nil {
+ 		pluginHost.ApplyConfig(context.Background(), b.cfg)
+ 		pluginHost.RegisterFrontendAuthProviders()
+@@ -269,8 +274,25 @@ func (b *Builder) Build() (*Service, error) {
+ 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+ 	coreManager.SetConfig(b.cfg)
+ 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
++	if b.cfg.CodexThreadCooldown.Enabled {
++		dir := strings.TrimSpace(b.cfg.CodexThreadCooldown.CacheDir)
++		if dir == "" {
++			dir = filepath.Join(b.cfg.AuthDir, ".codex-thread-cache")
++		}
++		if err := coreManager.ConfigureCodexThreadCooldown(dir); err != nil {
++			return nil, fmt.Errorf("configure Codex thread cooldown: %w", err)
++		}
++
++	}
++
+ 	if pluginHost != nil {
+ 		coreManager.SetPluginScheduler(pluginHost)
++		if id := strings.TrimSpace(b.cfg.CodexThreadCooldown.GuardPlugin); id != "" {
++			if err := coreManager.ConfigureCodexModelGuard(pluginHost, id, b.cfg.CodexThreadCooldown.GuardPrefixes, b.cfg.CodexThreadCooldown.GuardTargets...); err != nil {
++				coreManager.CloseCodexThreadCooldown()
++				return nil, err
++			}
++		}
+ 	}
+ 	if b.resultPolicy != nil {
+ 		coreManager.SetResultPolicy(b.resultPolicy)
+@@ -296,6 +318,7 @@ func (b *Builder) Build() (*Service, error) {
+ 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
+ 	}
+ 	service.serverOptions = append(service.serverOptions,
++		api.WithMiddleware(modelListPluginMiddleware(pluginHost)),
+ 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
+ 		api.WithPluginHost(pluginHost),
+ 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {

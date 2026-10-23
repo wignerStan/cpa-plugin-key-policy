@@ -1,0 +1,31 @@
+From c9175628d10e467c9e4e365d66556d18d8386fa7 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server.go)
+
+---
+ internal/api/server.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/internal/api/server.go b/internal/api/server.go
+index fc1646c9da74430dec872907ea3d333588c3c425..f7f4bc8ba265cb6ae301278fb71aed927a76a932 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -218,12 +218,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 	// Initialize management handler
+ 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+ 	s.mgmt.SetPluginHost(optionState.pluginHost)
++	if optionState.pluginHost != nil {
++		optionState.pluginHost.SetAuthStateHandler(s.mgmt.SetAuthState)
++	}
+ 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
+ 	if optionState.localPassword != "" {
+ 		s.mgmt.SetLocalPassword(optionState.localPassword)
+ 	}
+ 	logDir := logging.ResolveLogDirectory(cfg)
+ 	s.mgmt.SetLogDirectory(logDir)
++	logging.ConfigureCodexDump(cfg.CodexDump, logDir)
+ 	if optionState.postAuthHook != nil {
+ 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
+ 	}

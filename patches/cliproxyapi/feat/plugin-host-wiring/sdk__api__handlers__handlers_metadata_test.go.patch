@@ -1,0 +1,35 @@
+From 397b2090d0ed14d49447ccab44868920d8a0cc7c Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/handlers_metadata_test.go)
+
+---
+ sdk/api/handlers/handlers_metadata_test.go | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/sdk/api/handlers/handlers_metadata_test.go b/sdk/api/handlers/handlers_metadata_test.go
+index 7aab08893f50ce9deee0ddd3a377d7d8f2886e30..269eb8f9fedb1fc0e88115b49c2c05bf962e0604 100644
+--- a/sdk/api/handlers/handlers_metadata_test.go
++++ b/sdk/api/handlers/handlers_metadata_test.go
+@@ -323,3 +323,20 @@ func TestEnrichContextWithSessionHierarchyFromBody(t *testing.T) {
+ 		t.Fatalf("OpenCode parent_id session = (%q, %q), want (session:opencode-sess-1, session:opencode-root-1)", meta8.SessionID, meta8.ParentSessionID)
+ 	}
+ }
++
++func TestThreadCooldownScopeUsesAuthenticatedGroup(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++	c.Request.Header.Set("X-Group", "forged")
++	c.Set("userApiKey", "test-only-client")
++	c.Set("accessMetadata", map[string]string{"group": "authenticated-group"})
++	meta := requestExecutionMetadata(context.WithValue(context.Background(), "gin", c))
++	if meta["group"] != "authenticated-group" || meta[coreexecutor.CallerScopeMetadataKey] == "" {
++		t.Fatal(meta)
++	}
++	c.Set("accessMetadata", map[string]string{})
++	if meta = requestExecutionMetadata(context.WithValue(context.Background(), "gin", c)); meta["group"] != nil {
++		t.Fatal("group inferred from untrusted header")
++	}
++}

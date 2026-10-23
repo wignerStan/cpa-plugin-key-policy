@@ -1,0 +1,210 @@
+diff --git a/sdk/cliproxy/auth/codex_thread_cooldown.go b/sdk/cliproxy/auth/codex_thread_cooldown.go
+new file mode 100644
+index 0000000..2fb0b84
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_thread_cooldown.go
+@@ -0,0 +1,204 @@
++package auth
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"maps"
++	"net/http"
++	"strings"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexthread"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++)
++
++// ConfigureCodexThreadCooldown is startup-only. Configuration errors fail startup.
++// Closing HTTP sessions does not delete thread leases. Shutdown closes the watcher.
++func (m *Manager) ConfigureCodexThreadCooldown(dir string) error {
++	if m.HomeEnabled() {
++		return fmt.Errorf("Codex thread cooldown currently requires local CPA scheduling")
++	}
++	if m.codexThread.Load() != nil {
++		return fmt.Errorf("Codex thread cooldown already configured")
++	}
++	store, err := codexthread.Open(dir)
++	if err != nil {
++		return err
++	}
++	if !m.codexThread.CompareAndSwap(nil, store) {
++		store.Close()
++		return fmt.Errorf("Codex thread cooldown already configured")
++	}
++	return nil
++}
++func (m *Manager) CloseCodexThreadCooldown() error {
++	if s := m.codexThread.Load(); s != nil {
++		return s.Close()
++	}
++	return nil
++}
++func threadError(err error) error {
++	return wrapRequestStopError(&Error{Code: "codex_thread_cooldown", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable})
++}
++
++func codexThreadScope(model string, opts cliproxyexecutor.Options) (codexthread.Scope, error) {
++	scope := codexthread.Scope{Model: strings.TrimSpace(model)}
++	scope.Caller, _ = opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey].(string)
++	if prefix, _, found := strings.Cut(scope.Model, "/"); found {
++		scope.Prefix = prefix
++	}
++	ids := codexHeaderValues(opts.Headers, "Thread-Id")
++	if len(ids) > 1 {
++		return scope, fmt.Errorf("conflicting thread-id headers")
++	}
++	if len(ids) == 1 {
++		scope.Thread = strings.TrimSpace(ids[0])
++	}
++	meta := codexHeaderValues(opts.Headers, "X-Codex-Turn-Metadata")
++	if len(meta) > 1 {
++		return scope, fmt.Errorf("conflicting turn metadata headers")
++	}
++	if len(meta) == 1 && meta[0] != "" {
++		if len(meta[0]) > 16384 {
++			return scope, fmt.Errorf("turn metadata too large")
++		}
++		var v struct {
++			ThreadID string `json:"thread_id"`
++		}
++		if json.Unmarshal([]byte(meta[0]), &v) != nil {
++			return scope, fmt.Errorf("invalid turn metadata")
++		}
++		if v.ThreadID != "" {
++			if scope.Thread != "" && scope.Thread != v.ThreadID {
++				return scope, fmt.Errorf("thread identity mismatch")
++			}
++			scope.Thread = v.ThreadID
++		}
++	}
++	if len(scope.Thread) > 256 || strings.ContainsAny(scope.Thread, "\r\n\x00") {
++		return scope, fmt.Errorf("invalid thread identity")
++	}
++	return scope, nil
++}
++func (m *Manager) codexThreadTarget(a *Auth, route string) (codexthread.Target, error) {
++	t := codexthread.Target{AuthID: a.ID}
++	routing := m.loadAPIKeyModelRouting()
++	requested := rewriteModelForAuth(route, a)
++	alias := m.resolveExecutionAliasResultForRequestedWithRouting(routing, a, requested)
++	upstream := executionAliasPoolModel(a, requested, alias)
++	pool := resolveOpenAICompatUpstreamModelPool(routing.config, a, upstream)
++	if len(pool) > 1 {
++		return t, fmt.Errorf("Codex thread cooldown requires a single upstream model per alias")
++	}
++	resolved := m.applyAPIKeyModelAliasWithRouting(routing, a, upstream)
++	if len(pool) == 1 {
++		resolved = pool[0]
++	}
++	if resolved == "" {
++		resolved = upstream
++	}
++	t.Model = canonicalModelKey(resolved)
++	if t.Model == "" {
++		return t, fmt.Errorf("empty Codex cooldown model")
++	}
++	attributes := maps.Clone(a.Attributes)
++	for _, key := range []string{"priority", "weight", "plan_type", "tier"} {
++		delete(attributes, key)
++	}
++	raw, _ := json.Marshal([]any{a.Provider, a.Prefix, a.AuthKind(), attributes, a.ProxyURL, a.Metadata["account_id"], resolved})
++	sum := sha256.Sum256(raw)
++	t.Revision = hex.EncodeToString(sum[:])
++	return t, nil
++}
++func (m *Manager) filterCodexThreadCandidates(ctx context.Context, model string, opts cliproxyexecutor.Options, candidates []*Auth) ([]*Auth, error) {
++	s := m.codexThread.Load()
++	if s == nil {
++		return candidates, nil
++	}
++	if m.HomeEnabled() {
++		return nil, threadError(fmt.Errorf("Codex thread cooldown cannot run through Home scheduling"))
++	}
++	applies := false
++	for _, a := range candidates {
++		applies = applies || m.codexThreadApplies(a, model)
++	}
++	if !applies {
++		return candidates, nil
++	}
++	scope, e := codexThreadScope(model, opts)
++	if e != nil {
++		return nil, threadError(e)
++	}
++	targets := make([]codexthread.Target, 0, len(candidates))
++	for _, a := range candidates {
++		if m.codexThreadApplies(a, model) {
++			t, e := m.codexThreadTarget(a, model)
++			if e != nil {
++				return nil, threadError(e)
++			}
++			targets = append(targets, t)
++		}
++	}
++	allowed, _, e := s.Filter(ctx, scope, targets)
++	if e != nil {
++		return nil, threadError(e)
++	}
++	set := make(map[string]bool, len(allowed))
++	for _, t := range allowed {
++		set[t.AuthID] = true
++	}
++	out := make([]*Auth, 0, len(candidates))
++	for _, a := range candidates {
++		if set[a.ID] || !m.codexThreadApplies(a, model) {
++			out = append(out, a)
++		}
++	}
++	if len(out) == 0 {
++		if m.guarded(model) {
++			return nil, &modelGuardReselect{}
++		}
++		return nil, threadError(fmt.Errorf("no Codex target admitted for this thread"))
++	}
++	return out, nil
++}
++
++// beginCodexThreadDispatch runs after selection/interceptors and before each
++// actual attempt, including refresh retries. Receipts stay in internal metadata.
++func (m *Manager) beginCodexThreadDispatch(ctx context.Context, a *Auth, route string, opts *cliproxyexecutor.Options) error {
++	s := m.codexThread.Load()
++	if s == nil || !m.codexThreadApplies(a, route) {
++		return nil
++	}
++	if m.HomeEnabled() {
++		return threadError(fmt.Errorf("Codex thread cooldown cannot run through Home scheduling"))
++	}
++	current, ok := m.GetByID(a.ID)
++	if !ok || current.Disabled || current.Status == StatusDisabled || current.RegistrationEpoch != a.RegistrationEpoch || current.CredentialVersion != a.CredentialVersion {
++		return threadError(fmt.Errorf("Codex credential changed before dispatch"))
++	}
++	if blocked, _, _ := isAuthBlockedForModel(current, m.selectionModelForAuth(current, route), time.Now()); blocked {
++		return threadError(fmt.Errorf("Codex credential is in native cooldown"))
++	}
++	scope, e := codexThreadScope(route, *opts)
++	if e != nil {
++		return threadError(e)
++	}
++	target, e := m.codexThreadTarget(a, route)
++	if e != nil {
++		return threadError(e)
++	}
++	return s.Check(ctx, scope, target, true)
++}
++
++func codexHeaderValues(h http.Header, name string) []string {
++	var values []string
++	for k, v := range h {
++		if strings.EqualFold(k, name) {
++			values = append(values, v...)
++		}
++	}
++	return values
++}

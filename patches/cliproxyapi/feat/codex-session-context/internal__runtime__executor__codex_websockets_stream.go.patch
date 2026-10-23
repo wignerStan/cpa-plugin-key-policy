@@ -1,0 +1,24 @@
+From d56097a72d79e3620e8c6e6349bf1c2e3d843133 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(codex): preserve execution session and response metadata
+ (internal/runtime/executor/codex_websockets_stream.go)
+
+---
+ internal/runtime/executor/codex_websockets_stream.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index ce199297414f352f6446813508c45e7ac9a29ceb..62b6e24a72b2734904f7f054c7ff50ae4b780358 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -831,6 +831,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+ 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
+ 	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, body, opts.Headers)
+ 	applyModelHeaderOverrides(wsHeaders, baseModel)
++	if !codexThreadTitleSessionEnabled(e.cfg) && (isCodexThreadTitleTurn(opts.Headers) || isCodexThreadTitleTurn(wsHeaders)) {
++		return nil, fmt.Errorf("codex websockets: thread_title session naming is disabled")
++	}
+ 
+ 	return &codexWebsocketPrepared{
+ 		from:                 from,

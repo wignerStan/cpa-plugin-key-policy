@@ -1,0 +1,103 @@
+From 192ec6042e988d5a2275bd14e23aac27e6bb5431 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/codex_model_guard_admission_test.go)
+
+---
+ .../auth/codex_model_guard_admission_test.go  | 86 +++++++++++++++++++
+ 1 file changed, 86 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/codex_model_guard_admission_test.go
+
+diff --git a/sdk/cliproxy/auth/codex_model_guard_admission_test.go b/sdk/cliproxy/auth/codex_model_guard_admission_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7793aa898b1060dddbc94dedba55b9d736190963
+--- /dev/null
++++ b/sdk/cliproxy/auth/codex_model_guard_admission_test.go
+@@ -0,0 +1,86 @@
++package auth
++
++import (
++	"context"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++type admissionSelectionError struct{ code string }
++
++func (e admissionSelectionError) Error() string     { return "scheduler rejected selection" }
++func (e admissionSelectionError) ErrorCode() string { return e.code }
++
++type guardAdmissionScheduler struct {
++	allowed []string
++	known   bool
++	code    string
++	picks   int
++	queries int
++}
++
++func (s *guardAdmissionScheduler) PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
++	s.picks++
++	return pluginapi.SchedulerPickResponse{}, true, admissionSelectionError{s.code}
++}
++
++func (s *guardAdmissionScheduler) AdmitAuth(context.Context, pluginapi.SchedulerPickRequest) ([]string, bool, error) {
++	s.queries++
++	return s.allowed, s.known, nil
++}
++
++func TestGuardFallbackUsesAdmittedPoolAfterSchedulerRejection(t *testing.T) {
++	for _, mode := range []string{"all-admitted-leased", "allowed-target-available", "empty-policy", "unsupported-policy", "foreign-id", "quota-denial"} {
++		t.Run(mode, func(t *testing.T) {
++			m, ids := threadManager(t, &FillFirstSelector{})
++			calls := 0
++			host := guardHostFunc(func(context.Context, string, pluginapi.ModelGuardExchange) (pluginapi.ModelGuardDecision, error) {
++				calls++
++				return pluginapi.ModelGuardDecision{Action: "direct"}, nil
++			})
++			if err := m.ConfigureCodexModelGuard(host, "guard", []string{""}); err != nil {
++				t.Fatal(err)
++			}
++			opts := guardOptions()
++			disableThread(t, m, ids[0], opts)
++			scheduler := &guardAdmissionScheduler{allowed: []string{ids[0]}, known: true, code: "auth_not_found"}
++			switch mode {
++			case "allowed-target-available":
++				scheduler.allowed = ids
++			case "empty-policy":
++				scheduler.allowed = nil
++			case "unsupported-policy":
++				scheduler.known = false
++			case "foreign-id":
++				scheduler.allowed = []string{"not-a-candidate"}
++			case "quota-denial":
++				scheduler.code = "insufficient_quota"
++			}
++			m.SetPluginScheduler(scheduler)
++			// The leased target is removed before Pick. The remaining target belongs
++			// to another group, so the scheduler rejects it through its error contract.
++			_, failure := m.Execute(context.Background(), []string{"codex"}, guardRequest(), opts)
++			if failure == nil || scheduler.picks != 1 {
++				t.Fatal("normal scheduler rejection was not exercised", failure, scheduler.picks)
++			}
++			d, err := m.ModelGuardRouting(context.Background(), guardRequest(), opts, failure)
++			if mode == "foreign-id" {
++				if err == nil || calls != 0 {
++					t.Fatal("invalid admission allowed fallback", d, calls, err)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			if mode == "all-admitted-leased" {
++				if d.Action != "direct" || calls != 1 || scheduler.queries != 1 {
++					t.Fatal("excluded other-group target blocked PAYG", d, calls, scheduler.queries)
++				}
++			} else if d.Action != "continue" || calls != 0 {
++				t.Fatal("non-exhaustion authorized PAYG", d, calls)
++			}
++		})
++	}
++}

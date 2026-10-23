@@ -1,0 +1,36 @@
+From 6ddb2708cb11b3c81bfb02a347cccce8819e0863 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(sdk): expose guarded execution and auth state callbacks
+ (sdk/pluginabi/types.go)
+
+---
+ sdk/pluginabi/types.go | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/sdk/pluginabi/types.go b/sdk/pluginabi/types.go
+index e79fd8c16fe73dbad1ac9f38ec7900167740c455..400c652aca0dbb424f04fbf1f91de97dd29680f7 100644
+--- a/sdk/pluginabi/types.go
++++ b/sdk/pluginabi/types.go
+@@ -53,6 +53,8 @@ const (
+ 
+ 	// MethodSchedulerPick asks a scheduler plugin to select an auth candidate.
+ 	MethodSchedulerPick = "scheduler.pick"
++	// MethodSchedulerAdmit queries stable eligibility without choosing an auth.
++	MethodSchedulerAdmit = "scheduler.admit"
+ 	// MethodModelRoute asks a router plugin to select a plugin executor for a matching request.
+ 	MethodModelRoute = "model.route"
+ 
+@@ -98,6 +100,12 @@ const (
+ 	MethodHostHTTPCancel         = "host.http.cancel"
+ 	MethodHostHTTPStreamRead     = "host.http.stream_read"
+ 	MethodHostHTTPStreamClose    = "host.http.stream_close"
++	MethodHostModelExecuteHold   = "host.model.execute_hold.v1"
++	MethodHostModelValidate      = "host.model.validate"
++	MethodHostAuthStateGet       = "host.auth.state_get"
++	MethodHostAuthStateSet       = "host.auth.state_set"
++	MethodHostIdentityDerive     = "host.identity.derive"
++	MethodCodexModelGuard        = "model_guard.exchange"
+ 	MethodHostModelExecute       = "host.model.execute"
+ 	MethodHostModelExecuteStream = "host.model.execute_stream"
+ 	MethodHostModelStreamRead    = "host.model.stream_read"

@@ -136,16 +136,23 @@ Channels under CPA `openai-compatibility` (e.g. a named proxy) use the **channel
 
 Linux `.so` needs cgo and a matching toolchain:
 
+The plugin directly imports `infra/go/files/notify`. Keep the infra repository
+at `~/infra`, or set `INFRA_GO_DIR=/path/to/infra/go`. `make` writes an ignored
+`go.work` with a direct module replacement for that checkout.
+See [dependency provenance](docs/source-relationships/infra-file-notifications.md)
+for the required infra commit and update steps.
+
 ```bash
 make test
 make build-linux          # builds web UI, then linux amd64/arm64 .so
 # or
-make web-build
-GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared \
+make prepare-workspace web-build
+GOFLAGS=-mod=readonly GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -buildvcs=false -tags cshared \
   -buildmode=c-shared -o dist/cpa-key-policy_linux_amd64.so ./cmd/cpa-key-policy
 ```
 
-On Windows, build the `.so` via WSL/Linux. `go test ./...` uses a non-cgo stub so unit tests run without a shared-library toolchain.
+On Windows, build the `.so` via WSL/Linux. `go test ./cmd/... ./internal/...`
+uses a non-cgo stub, so unit tests run without a shared-library toolchain.
 
 Copy the `.so` into CPA `plugins.dir` and enable the plugin in config.
 
@@ -162,25 +169,35 @@ capture is Linux-only, requires both `codex-dump: true` and `trace: true`, and
 writes exact bytes to separate private artifacts. Application logs contain a
 classified payload view; they never contain the captured raw bytes.
 
-Builds materialize the pinned upstream source, apply the checked-in patches,
-and build the result under the ignored `build/` directory. No generated source
-is stored in `vendor/`, and the host is not maintained as a second editable
-checkout:
+CPA is an upstream product. This repository stores its host and SDK patches,
+not a CPA submodule, subtree or source snapshot. Builds fetch the exact official
+commit into an ignored Git object cache at `build/upstream/cliproxyapi.git`,
+then apply the patches to `build/cliproxyapi`. Later builds reuse that commit
+without network access. The published Go SDK remains a normal module dependency.
+
+The [build relationship](docs/source-relationships/cliproxyapi-materialization.json)
+orders five semantic bundles under `patches/cliproxyapi/` and
+`patches/cliproxyapi-sdk/`. Each target file has one patch. Each bundle owns its
+`apply_order.txt` hashes and `run.py` checks. Both commands below run those checks:
 
 ```bash
 bash scripts/materialize-cliproxyapi.sh
 bash scripts/check-cliproxyapi.sh
 ```
 
-To update the host, review a newer official CLIProxyAPI commit, rebase the
-ordered patches, refresh their checksums in the manifest, then run the focused
-check script on a dedicated branch. The host currently pins official CLIProxyAPI
-v8.0.22 with local patches 0001–0012. Its official interrupt fix replaces local
-patch 0013 and works independently of the response-steering flag. See the
+The materializer serializes builds and runs checks before replacing the output.
+It rejects local source edits and foreign checkouts. Each replacement retains
+the previous source at the reported `build/cliproxyapi-recovery.*` path for recovery.
+
+To update the host, review a newer official CLIProxyAPI commit, replace each
+changed target's existing patch, refresh its bundle digest, and record the new
+source and result trees. Then run the check script. The host pins official
+CLIProxyAPI v8.0.33. Its official interrupt implementation works independently
+of the response-steering flag. See the
 [Codex 0.162 compatibility notes](docs/codex-0162-interrupt.md) for the protocol
 boundaries and verification.
 
-Patch 0004 preserves native Codex metadata and adds a turn-state-only
+The `codex-session-context` bundle preserves native Codex metadata and adds a turn-state-only
 compatibility event when needed. See the
 [metadata compatibility notes](docs/codex-response-metadata.md) for captured
 evidence, event ordering, and the model ETag contract.
@@ -373,12 +390,17 @@ For Pi/Codex clients (`/v1/models?client_version=...`) the plugin preserves the 
 ## Tests
 
 ```bash
-GOFLAGS=-mod=mod go test ./...
+make test
+GOFLAGS=-mod=readonly go test -race ./cmd/... ./internal/...
+GOFLAGS=-mod=readonly go vet ./cmd/... ./internal/...
 cd web && npm test && npm run build
 ```
 
-The diagnostic adapter in patch 0012 reuses a checksummed infra source snapshot;
-see [infra diagnostic source provenance](docs/source-relationships/infra-diagnostics-vendor.md).
+`make test` also checks CPA build replacement in temporary repositories.
+The Go package paths select plugin code and exclude dependencies under `build/`.
+
+The `infra-diagnostics` bundle imports the canonical infra modules directly;
+see [infra diagnostic source provenance](docs/source-relationships/infra-diagnostics-direct.md).
 Raw dumps require explicit opt-in and never perform per-delta file writes or trace
 logging. Capture owners drain on configuration changes and shutdown.
 
@@ -412,6 +434,6 @@ The script backs up both files, moves every plugin setting into JSON, preserves
 usage and key hashes, and leaves only registration fields in YAML. Start CPA
 with the updated plugin. Version 3 is the authoritative JSON format.
 
-The generated OS subscription wrapper is maintained in infra, not in this plugin.
+The public OS subscription module is maintained in infra.
 See [source provenance](docs/source-relationships/infra-file-notifications.md).
 Prefer OS/store notifications; do not substitute polling when the backend supports events.

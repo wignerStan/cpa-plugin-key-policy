@@ -1,6 +1,6 @@
 # Codex response metadata compatibility
 
-Patch 0004 preserves the original `codex.response.metadata` event. If that
+The Codex session-context patch preserves the original `codex.response.metadata` event. If that
 event contains a usable `x-codex-turn-state` header, it also sends a small
 `response.metadata` event immediately afterward. The supplement contains only
 the event type and the turn-state header. It does not copy model catalog,
@@ -56,7 +56,7 @@ These counts describe a retained snapshot, not a durable traffic total.
 - Add no supplemental event or payload copy for delta frames, ETag-only
   metadata, or unrelated events.
 
-Patch 0004 also retains execution-session context and credential WebSocket
+The Codex session-context patch also retains execution-session context and credential WebSocket
 attributes used by the later diagnostic and transport patches. It cannot be
 dropped as one unit solely because the client recognizes `response.metadata`.
 
@@ -69,8 +69,25 @@ incoming bytes, timeline entries, and raw capture for both outgoing frames. The
 supplement helper allocates nothing for the tested delta input.
 
 Metadata SSE frames wait for their delimiter instead of being emitted while
-their data field is incomplete. A narrow guard also prevents line-break repair
-inside an unfinished metadata JSON body. Tests split these bodies at every byte.
+their data field is incomplete. Native executor callbacks can omit newline
+delimiters. A complete private metadata payload followed by another event or
+nonempty data field closes the metadata frame. This prevents a successful
+upstream response from being swallowed and returned as a local 502.
+
+Line-break repair accepts multiple `data:` fields in private metadata while
+preserving byte fragments inside JSON strings. Empty leading and trailing data
+fields remain part of their frame; a new event closes an empty metadata frame.
+Tests cover both native line callbacks and HTTP wire chunks, JSON string escapes,
+`id`/`retry` fields between multiline data fields, trailing empty data followed
+by the next frame in the same chunk, field-colon splits, and retained
+upstream-response replay.
 Existing fragmentation limits inside SSE field names and data-only recovery are
 unchanged; this does not establish arbitrary-fragment correctness for every SSE
 event. The original and supplemental WebSocket frames remain separate messages.
+
+The 2026-10-19 framing correction is folded into the existing handler and test
+owners in `plugin-host-wiring`; the inventory remains 126 patches in five
+bundles. It adds no SDK callback or C ABI field. The final materialization and
+the full OpenAI handler race suite passed with `GOMAXPROCS=1`. The unrelated
+interrupt-diagnostic timing assertion also failed on the pre-fix tree under
+default concurrency, so these results do not establish that assertion is fixed.

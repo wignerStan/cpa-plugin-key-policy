@@ -1,25 +1,39 @@
 # Infra OS file subscriptions
 
-The plugin consumes the OS subscription kit maintained at
-`infra/go/files/notify`. Its generated source is byte-identical to the committed
-infra file pinned in `infra-file-notifications.json`. Maintain the implementation
-in infra, not in this repository. The existing infra licenses are retained under
-`third_party/infra`.
+The plugin directly imports the public module
+`github.com/wignerStan/infra/go/files/notify`. The implementation belongs to
+`https://github.com/wignerStan/infra`. This repository contains no copy of it.
+The module path and canonical infra commit are recorded in
+`infra-file-notifications.json`.
+
+The infra module restores the original implementation from infra commit
+`c1be68e8f818b649e4b66411db76cb8819f6f79b`. Its focused dependency graph includes
+fsnotify without importing the infra root module.
 
 The kit watches the parent directory and filters events for the selected file.
 This preserves subscriptions after atomic replacement. `Read` blocks on OS
 notifications and supports context cancellation; `Close` releases the OS watch.
-The infra `config/dynamic.SubscribeFile` adapter can connect this primitive to
-an external-store cache subscription. Neither layer has a periodic query loop.
+The plugin adapts these notifications to its policy cache. It does not poll.
 
 The plugin retains policy-specific validation, content hashing, error reporting,
 and cache updates. Policy reload reads JSON while holding the policy writer lock
 so an old snapshot cannot overwrite a later committed policy. Usage-only writes
 do not invalidate policy. There is no `poll_interval` worker setting.
 
-Refresh and verify the generated source with:
+For local builds, the module defaults to `$HOME/infra/go/files/notify`.
+Set `INFRA_GO_DIR` to select another infra Go checkout. The build helper writes
+an ignored root `go.work` with a direct module replacement. `go.mod` also has a
+relative replacement for the standard sibling-checkout layout.
+The helper uses the existing checkout without creating a worktree, copying
+source or generating module manifests. Existing user-managed Go workspaces
+are left intact.
 
 ```sh
-python3 scripts/vendor-infra-file-notifications.py --update-from /path/to/infra
-python3 scripts/vendor-infra-file-notifications.py
+make test INFRA_GO_DIR=/path/to/infra/go
 ```
+
+CI checks out the recorded commit at `build/infra-source`, then binds its public
+module directly through `INFRA_GO_DIR=./build/infra-source/go`. The recorded commit
+must be available in the infra remote before CI or release builds can fetch it.
+Changes to the adapter must be made and committed in infra. Then update the
+dependency record and run the plugin notification tests against that commit.

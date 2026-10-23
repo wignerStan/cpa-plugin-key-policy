@@ -1,0 +1,32 @@
+From 0d13b4ec717baf576112d091e719f02247bc486a Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(sdk): expose guarded execution and auth state callbacks
+ (sdk/pluginapi/auth_state.go)
+
+---
+ sdk/pluginapi/auth_state.go | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+ create mode 100644 sdk/pluginapi/auth_state.go
+
+diff --git a/sdk/pluginapi/auth_state.go b/sdk/pluginapi/auth_state.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8cfd731d5a1413e31572407204c6ac33bfc24a9
+--- /dev/null
++++ b/sdk/pluginapi/auth_state.go
+@@ -0,0 +1,15 @@
++package pluginapi
++
++type HostAuthStateRequest struct {
++	AuthID   string `json:"auth_id"`
++	Model    string `json:"model"`
++	Version  string `json:"version,omitempty"`
++	Disabled *bool  `json:"disabled,omitempty"`
++}
++type HostAuthState struct {
++	AuthID   string `json:"auth_id"`
++	Model    string `json:"model"`
++	Revision string `json:"revision"`
++	Version  string `json:"version"`
++	Disabled bool   `json:"disabled"`
++}

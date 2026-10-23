@@ -1,0 +1,20 @@
+From dd052c593ec5003bed04c4ced9fe280e6599481d Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/config/config.go)
+
+---
+ sdk/config/config.go | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/sdk/config/config.go b/sdk/config/config.go
+index 47f477d6bec40a04a517190b8151edb209c5ad70..284ffcab6984cd01d8e430f98abd344e8be13455 100644
+--- a/sdk/config/config.go
++++ b/sdk/config/config.go
+@@ -69,3 +69,5 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
+ func NormalizeCommentIndentation(data []byte) []byte {
+ 	return internalconfig.NormalizeCommentIndentation(data)
+ }
++
++type CodexThreadCooldownConfig = internalconfig.CodexThreadCooldownConfig

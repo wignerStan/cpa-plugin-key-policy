@@ -1,0 +1,300 @@
+From 0dddca92e3227880086a65c7fc84e795f90632dd Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_handlers.go)
+
+---
+ .../openai/openai_responses_handlers.go       | 143 +++++++++++++++++-
+ 1 file changed, 139 insertions(+), 4 deletions(-)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index e32e252396c6bfe67377170a87ef07f2fc4f8d60..2d43889ab603ffb0d46e3266c6cb427fadf23487 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -23,9 +23,11 @@ import (
+ 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ 	"github.com/tidwall/sjson"
+ )
+@@ -71,6 +73,8 @@ type responsesSSEFramer struct {
+ 	terminalError        *interfaces.ErrorMessage
+ 	failureEvent         string
+ 	isCodexClient        bool
++	metadataSupplement   []byte
++	traceSessionID       string
+ 	dataFrames           int
+ 	writeErr             error
+ 	canComplete          func() bool
+@@ -134,6 +138,12 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
+ func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
+ 	if f.writeErr == nil {
+ 		f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(frame))
++		if f.writeErr == nil && len(f.metadataSupplement) > 0 {
++			f.dataFrames++
++			requestlogging.CodexTraceHTTPEvent(f.traceSessionID, "response.metadata", f.metadataSupplement)
++			f.writeErr = writeResponsesSSEChunk(w, responsesSSEFrameWithEventAndData("response.metadata", f.metadataSupplement))
++		}
++		f.metadataSupplement = nil
+ 	}
+ }
+ 
+@@ -152,11 +162,17 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+ 			return true
+ 		}
+ 
+-		// If official Codex client, preserve codex.response.metadata but filter rate limits.
++		// Official Codex client: retain metadata; filter other codex.* private events.
+ 		if f != nil && f.isCodexClient {
+ 			if name == "codex.rate_limits" {
+ 				return true
+ 			}
++			if name == "codex.response.metadata" {
++				return false
++			}
++			if strings.HasPrefix(name, "codex.") {
++				return true
++			}
+ 			return false
+ 		}
+ 
+@@ -172,6 +188,7 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
+ }
+ 
+ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
++	f.metadataSupplement = nil
+ 	payload, ok := responsesSSEDataPayload(frame)
+ 	streamEvent := responsesSSEEventName(frame)
+ 	if streamEvent != "" && f.shouldFilterPrivateEvent(streamEvent, "") {
+@@ -193,6 +210,13 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+ 		return nil
+ 	}
+ 
++	if f != nil && f.isCodexClient && payloadType == "codex.response.metadata" {
++		f.metadataSupplement = codexTurnStateMetadataSupplement(payload)
++		requestlogging.CodexTraceHTTPEvent(f.traceSessionID, payloadType, payload)
++		f.dataFrames++
++		return frame
++	}
++
+ 	f.dataFrames++
+ 
+ 	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
+@@ -223,9 +247,11 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+ 	case "response.completed":
+ 		repaired := f.repairCompletedPayload(payload)
+ 		if !bytes.Equal(repaired, payload) {
++			requestlogging.CodexTraceHTTPEvent(f.traceSessionID, eventType, repaired)
+ 			return responsesSSEFrameWithData(frame, repaired)
+ 		}
+ 	}
++	requestlogging.CodexTraceHTTPEvent(f.traceSessionID, eventType, payload)
+ 	return frame
+ }
+ 
+@@ -334,6 +360,22 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
+ 	return out.Bytes()
+ }
+ 
++func responsesSSEFrameWithEventAndData(eventName string, payload []byte) []byte {
++	var out bytes.Buffer
++	if trimmed := strings.TrimSpace(eventName); trimmed != "" {
++		out.WriteString("event: ")
++		out.WriteString(trimmed)
++		out.WriteByte('\n')
++	}
++	for _, line := range bytes.Split(payload, []byte("\n")) {
++		out.WriteString("data: ")
++		out.Write(line)
++		out.WriteByte('\n')
++	}
++	out.WriteByte('\n')
++	return out.Bytes()
++}
++
+ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
+ 	item := gjson.GetBytes(payload, "item")
+ 	if !item.Exists() || !item.IsObject() || item.Get("type").String() == "" {
+@@ -444,6 +486,10 @@ func responsesSSEHasField(chunk []byte, prefix []byte) bool {
+ }
+ 
+ func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
++	// Keep provider metadata buffered until its delimiter to preserve frame bytes.
++	if bytes.Contains(chunk, []byte("codex.response.metadata")) && responsesSSEEventName(chunk) == "codex.response.metadata" {
++		return false
++	}
+ 	trimmed := bytes.TrimSpace(chunk)
+ 	if len(trimmed) == 0 || responsesSSENeedsMoreData(trimmed) ||
+ 		!responsesSSEHasField(trimmed, []byte("event:")) || !responsesSSEHasField(trimmed, []byte("data:")) {
+@@ -459,11 +505,33 @@ func responsesSSECanFlushWithoutDelimiter(chunk []byte) bool {
+ 
+ func responsesSSEStartsNewDataFrame(pending, chunk []byte) bool {
+ 	trimmedPending := bytes.TrimSpace(pending)
+-	if len(trimmedPending) == 0 || responsesSSEHasField(trimmedPending, []byte("event:")) ||
+-		!responsesSSEHasField(trimmedPending, []byte("data:")) || !responsesSSEDataLinesValid(trimmedPending) {
++	if len(trimmedPending) == 0 || !responsesSSEHasField(trimmedPending, []byte("data:")) ||
++		!responsesSSEDataLinesValid(trimmedPending) {
+ 		return false
+ 	}
+ 	trimmedChunk := bytes.TrimLeft(chunk, " \t\r\n")
++	if responsesSSEEventName(trimmedPending) == "codex.response.metadata" {
++		fieldChunk := bytes.TrimLeft(chunk, " \t")
++		if payload, _ := responsesSSEDataPayload(trimmedPending); len(bytes.TrimSpace(payload)) == 0 {
++			return bytes.HasPrefix(fieldChunk, []byte("event:"))
++		}
++		// Native executors omit blank scanner lines. A complete metadata payload
++		// followed by a new event/data field therefore closes the previous frame.
++		// A wire chunk starting with a line break still owns its original delimiter.
++		if bytes.HasPrefix(fieldChunk, []byte("data:")) {
++			dataLine := fieldChunk[len("data:"):]
++			if end := bytes.IndexByte(dataLine, '\n'); end >= 0 {
++				dataLine = dataLine[:end]
++			}
++			if len(bytes.TrimSpace(dataLine)) == 0 {
++				return false
++			}
++		}
++		return bytes.HasPrefix(fieldChunk, []byte("event:")) || bytes.HasPrefix(fieldChunk, []byte("data:"))
++	}
++	if responsesSSEHasField(trimmedPending, []byte("event:")) {
++		return false
++	}
+ 	return bytes.HasPrefix(trimmedChunk, []byte("data:"))
+ }
+ 
+@@ -487,6 +555,33 @@ func responsesSSEDataLinesValid(chunk []byte) bool {
+ }
+ 
+ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
++	if bytes.Contains(pending, []byte("codex.response.metadata")) && responsesSSEEventName(pending) == "codex.response.metadata" {
++		// A network chunk can split an SSE field immediately before its colon.
++		// Do not mistake that colon for a new scanner comment line.
++		if len(chunk) > 0 && chunk[0] == ':' {
++			lastLine := pending
++			if end := bytes.LastIndexByte(lastLine, '\n'); end >= 0 {
++				lastLine = lastLine[end+1:]
++			}
++			switch string(lastLine) {
++			case "data", "event", "id", "retry":
++				return false
++			}
++		}
++		if payload, found := responsesSSEDataPayload(pending); found && len(bytes.TrimSpace(payload)) > 0 {
++			if !responsesSSEDataLinesValid(pending) {
++				// Scanner lines can split JSON between data fields, with id/retry
++				// fields between them. Field prefixes inside a JSON string are
++				// instead ordinary byte fragments. A bare colon can be JSON syntax.
++				fieldChunk := bytes.TrimLeft(chunk, " \t")
++				if responsesSSEJSONInsideString(payload) ||
++					!(bytes.HasPrefix(fieldChunk, []byte("data:")) || bytes.HasPrefix(fieldChunk, []byte("event:")) ||
++						bytes.HasPrefix(fieldChunk, []byte("id:")) || bytes.HasPrefix(fieldChunk, []byte("retry:"))) {
++					return false
++				}
++			}
++		}
++	}
+ 	if len(pending) == 0 || len(chunk) == 0 {
+ 		return false
+ 	}
+@@ -508,6 +603,22 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
+ 	return false
+ }
+ 
++func responsesSSEJSONInsideString(payload []byte) bool {
++	inString, escaped := false, false
++	for _, b := range payload {
++		if escaped {
++			escaped = false
++			continue
++		}
++		if inString && b == '\\' {
++			escaped = true
++		} else if b == '"' {
++			inString = !inString
++		}
++	}
++	return inString
++}
++
+ // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
+ // It holds a pool of clients to interact with the backend service.
+ type OpenAIResponsesAPIHandler struct {
+@@ -623,6 +734,20 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+ 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
+ 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
+ 
++	sessionID := handlers.ExecutionSessionID(c.Request.Context())
++	requestlogging.CodexDumpHTTPRequest(sessionID, "client_in", c.Request.Method, c.Request.URL.String(), c.Request.Header, rawJSON)
++
++	if isCodexThreadTitleRequest(c.Request.Header, rawJSON) && !codexThreadTitleSessionEnabled(h) {
++		log.Infof("responses: blocked thread_title session-naming sidecar remote=%s", c.ClientIP())
++		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
++			Error: handlers.ErrorDetail{
++				Message: "thread_title session is disabled",
++				Type:    "invalid_request_error",
++			},
++		})
++		return
++	}
++
+ 	// Check if the client requested a streaming response.
+ 	streamResult := gjson.GetBytes(rawJSON, "stream")
+ 	if streamResult.Type == gjson.True {
+@@ -675,6 +800,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
+ 		return
+ 	}
+ 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
++	requestlogging.CodexDumpHTTPResponse(handlers.ExecutionSessionID(c.Request.Context()), "client_out", http.StatusOK, c.Writer.Header(), resp)
+ 	_, _ = c.Writer.Write(resp)
+ 	cliCancel()
+ }
+@@ -763,6 +889,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
+ 		return true
+ 	}
+ 	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
++	if h.AuthManager != nil && h.AuthManager.ModelGuardEnabled() {
++		stopKeepAlive()
++		keepAliveC = nil
++	}
+ 	defer stopKeepAlive()
+ 
+ 	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
+@@ -778,7 +908,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
+ 	if isCodexClient {
+ 		failureEvent = "response.failed"
+ 	}
+-	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
++	framer := &responsesSSEFramer{traceSessionID: handlers.ExecutionSessionID(c.Request.Context()), failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
+ 	var initialOutput bytes.Buffer
+ 
+ 	// Peek at the first complete SSE data frame.
+@@ -1100,6 +1230,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
+ 	if framer == nil {
+ 		framer = &responsesSSEFramer{}
+ 	}
++	framer.traceSessionID = handlers.ExecutionSessionID(c.Request.Context())
+ 	if isCodexResponsesClientRequest(c) {
+ 		framer.failureEvent = "response.failed"
+ 		framer.isCodexClient = true
+@@ -1149,10 +1280,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
+ 		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+ 	}
+ 
++	sessionID := handlers.ExecutionSessionID(c.Request.Context())
++	defer requestlogging.CodexDumpHTTPFinish(sessionID, "client_out")
++	defer requestlogging.CodexDumpHTTPFinish(sessionID, "upstream_in")
+ 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+ 		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
+ 		Flush:                  func() error { return flushResponsesSSE(c.Writer) },
+ 		WriteChunk: func(chunk []byte) {
++			requestlogging.CodexDumpHTTPChunk(handlers.ExecutionSessionID(c.Request.Context()), "client_out", chunk)
+ 			framer.WriteChunk(c.Writer, chunk)
+ 		},
+ 		ChunkDone: func() bool {

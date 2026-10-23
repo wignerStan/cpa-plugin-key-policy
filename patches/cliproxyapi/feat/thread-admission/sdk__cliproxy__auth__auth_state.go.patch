@@ -1,0 +1,124 @@
+From cfd5b289923c88107258c4eb01498e95c9eb8874 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/auth_state.go)
+
+---
+ sdk/cliproxy/auth/auth_state.go | 107 ++++++++++++++++++++++++++++++++
+ 1 file changed, 107 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/auth_state.go
+
+diff --git a/sdk/cliproxy/auth/auth_state.go b/sdk/cliproxy/auth/auth_state.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e06d31b8662fdbe795aad6e3d187af192be52aa
+--- /dev/null
++++ b/sdk/cliproxy/auth/auth_state.go
+@@ -0,0 +1,107 @@
++package auth
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"strings"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func (m *Manager) AuthState(id, model string) (pluginapi.HostAuthState, error) {
++	a, ok := m.GetByID(id)
++	if !ok {
++		return pluginapi.HostAuthState{}, fmt.Errorf("unknown auth")
++	}
++	return m.authState(a, model)
++}
++func (m *Manager) authState(a *Auth, model string) (pluginapi.HostAuthState, error) {
++	t, err := m.codexThreadTarget(a, model)
++	if err != nil {
++		return pluginapi.HostAuthState{}, err
++	}
++	// Runtime counters and OAuth token refreshes do not change model identity.
++	runtime := ""
++	if m.modelGuard != nil {
++		runtime = m.modelGuard.runtime
++	}
++	b, _ := json.Marshal([]any{runtime, a.ID, a.RegistrationEpoch, a.AdmissionVersion, t})
++	sum := sha256.Sum256(b)
++	return pluginapi.HostAuthState{AuthID: a.ID, Model: t.Model, Revision: t.Revision, Version: hex.EncodeToString(sum[:]), Disabled: a.Disabled || a.Status == StatusDisabled}, nil
++}
++
++// SetAuthDisabled compares the target version under its native mutation lock.
++// The config writer only persists; caller reload hooks run after this lock ends.
++func (m *Manager) SetAuthDisabled(ctx context.Context, req pluginapi.HostAuthStateRequest, saveConfig func(*Auth) error) (pluginapi.HostAuthState, error) {
++	release, err := m.lockAuthMutationContext(ctx, req.AuthID)
++	if err != nil {
++		return pluginapi.HostAuthState{}, err
++	}
++	defer release()
++	current, ok := m.GetByID(req.AuthID)
++	if !ok {
++		return pluginapi.HostAuthState{}, fmt.Errorf("unknown auth")
++	}
++	state, err := m.authState(current, req.Model)
++	if err != nil {
++		return state, err
++	}
++	if req.Version == "" || req.Version != state.Version || req.Disabled == nil {
++		return state, fmt.Errorf("auth target version mismatch")
++	}
++	if state.Disabled == *req.Disabled {
++		return state, nil
++	}
++	if !IsConfigAPIKeyAuth(current) {
++		m.mu.RLock()
++		hasStore := m.store != nil
++		m.mu.RUnlock()
++		if !hasStore || IsPluginVirtualAuth(current) || strings.EqualFold(current.Attributes["runtime_only"], "true") || shouldSkipPersist(ctx) {
++			return state, fmt.Errorf("durable native auth persistence unavailable")
++		}
++	}
++	current.Disabled = *req.Disabled
++	current.Status = StatusActive
++	current.StatusMessage = ""
++	if current.Disabled {
++		current.Status = StatusDisabled
++		current.StatusMessage = "disabled by plugin"
++	}
++	if current.Metadata == nil {
++		current.Metadata = map[string]any{}
++	}
++	current.Metadata["disabled"] = current.Disabled
++	if IsConfigAPIKeyAuth(current) {
++		if saveConfig == nil {
++			return state, fmt.Errorf("config persistence unavailable")
++		}
++		err = saveConfig(current)
++	}
++	if err != nil {
++		return state, err
++	}
++	persistCtx := context.WithValue(ctx, requireAuthPersistKey{}, true)
++	if IsConfigAPIKeyAuth(current) {
++		persistCtx = WithSkipPersist(ctx)
++	}
++	committed, changed, cooldown, err := m.updateInternalLocked(persistCtx, nil, current, updateModeReplace)
++	release()
++	if err != nil {
++		return state, err
++	}
++	if !changed || committed == nil {
++		return state, fmt.Errorf("auth status not committed")
++	}
++	m.finishAuthUpdate(ctx, committed, cooldown)
++	return m.authState(committed, req.Model)
++}
++
++type requireAuthPersistKey struct{}
++
++func requiresAuthPersist(ctx context.Context) bool {
++	v, _ := ctx.Value(requireAuthPersistKey{}).(bool)
++	return v
++}

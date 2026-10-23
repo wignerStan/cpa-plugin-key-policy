@@ -1,0 +1,22 @@
+From 14d40269efb431051ff4d456e2583838ae3d0afd Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (internal/api/server_options.go)
+
+---
+ internal/api/server_options.go | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/internal/api/server_options.go b/internal/api/server_options.go
+index f5ea19782ab51a82c7f97642e8711bec3c4a4ec8..c280980cae718d9a610c3473eaa96f7a3310439e 100644
+--- a/internal/api/server_options.go
++++ b/internal/api/server_options.go
+@@ -47,6 +47,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
+ 	sdkCfg := cfg.SDKConfig
+ 	sdkCfg.CodexOrphanDelegationCompatibility = cfg.Codex.OrphanDelegationCompatibility
+ 	sdkCfg.CodexResponseSteering = cfg.Codex.ResponseSteering
++	sdkCfg.CodexThreadTitleSession = cfg.Codex.ThreadTitleSession
+ 	if cfg.CommercialMode {
+ 		sdkCfg.RequestLog = false
+ 	}

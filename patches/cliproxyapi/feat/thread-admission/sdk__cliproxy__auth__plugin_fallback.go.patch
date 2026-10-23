@@ -1,0 +1,144 @@
+From 0258d836840bbef1ebeb2c12d9a10fa22b540992 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(auth): enforce plugin-owned thread admission
+ (sdk/cliproxy/auth/plugin_fallback.go)
+
+---
+ sdk/cliproxy/auth/plugin_fallback.go | 127 +++++++++++++++++++++++++++
+ 1 file changed, 127 insertions(+)
+ create mode 100644 sdk/cliproxy/auth/plugin_fallback.go
+
+diff --git a/sdk/cliproxy/auth/plugin_fallback.go b/sdk/cliproxy/auth/plugin_fallback.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..85b4f76e8376f393910fbf7eac270682d74e39cd
+--- /dev/null
++++ b/sdk/cliproxy/auth/plugin_fallback.go
+@@ -0,0 +1,127 @@
++package auth
++
++import (
++	"context"
++	"fmt"
++	"strings"
++	"time"
++
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++// Host-only metadata: a fallback callback pins one plugin-owned auth and skips
++// both affinity selection and affinity result updates. No HTTP field sets this.
++const pluginFallbackMetadataKey = "plugin_fallback_execution"
++
++type pluginFallbackAdmissionKey struct{}
++
++// Selection is not dispatch. An authenticated interceptor can block after the
++// pinned fallback is selected, so verify both authorizations again afterwards.
++func (m *Manager) beginPluginFallbackDispatch(ctx context.Context, selected *Auth, route string, opts core.Options) error {
++	if !isPluginFallback(opts) {
++		return nil
++	}
++	check, ok := ctx.Value(pluginFallbackAdmissionKey{}).(func(context.Context) error)
++	if !ok {
++		return guardStop(fmt.Errorf("fallback missing request-bound admission"))
++	}
++	if err := check(ctx); err != nil {
++		return guardStop(err)
++	}
++	current, ok := m.GetByID(selected.ID)
++	if !ok || current.RegistrationEpoch != selected.RegistrationEpoch || current.CredentialVersion != selected.CredentialVersion {
++		return guardStop(fmt.Errorf("fallback credential changed before dispatch"))
++	}
++	if _, err := m.authorizedPluginFallbackCandidate(ctx, route, opts, []*Auth{current}); err != nil {
++		return guardStop(err)
++	}
++	if blocked, _, _ := isAuthBlockedForModel(current, m.selectionModelForAuth(current, route), time.Now()); blocked {
++		return guardStop(fmt.Errorf("fallback credential is in native cooldown"))
++	}
++	return nil
++}
++
++func isPluginFallback(opts core.Options) bool {
++	v, _ := opts.Metadata[pluginFallbackMetadataKey].(bool)
++	return v
++}
++
++// This request-scoped capability only dispatches credentials owned by the
++// calling guard plugin. It does not change the original caller or billing scope.
++func (m *Manager) pluginFallbackCallbacks(req core.Request, opts core.Options) *pluginapi.ExecutionCallbacks {
++	prepare := func(ctx context.Context, in pluginapi.HostModelExecutionRequest) (context.Context, *Auth, core.Request, core.Options, error) {
++		ctx = httptransport.WithResponseBodyLimit(ctx, guardBufferLimit)
++		if excluded, err := m.allGuardTargetsThreadExcluded(ctx, authSelectionModelFromOptions(opts, req.Model), opts); err != nil || !excluded {
++			return ctx, nil, req, opts, fmt.Errorf("fallback requires all normal targets to have active thread exclusions: %v", err)
++		}
++		a, ok := m.GetByID(in.AuthID)
++		if !ok || a.Disabled || a.Status == StatusDisabled || a.Attributes["plugin_owner"] != m.modelGuard.id || a.Attributes["plugin_fallback_only"] != "true" || a.Attributes["upstream_protocol"] != "openai-response" || a.Prefix == "" || !strings.HasPrefix(in.Model, a.Prefix+"/") || m.guarded(in.Model) || in.ProxyURL != "" || in.Alt != "" || len(in.Body) > guardBufferLimit {
++			return ctx, nil, req, opts, fmt.Errorf("fallback outside plugin-owned auth")
++		}
++		physical, options := guardPhysical(req, opts, pluginapi.ModelGuardDecision{Request: in.Body, Headers: in.Headers, SessionID: in.Headers.Get("Session-Id")})
++		physical.Model = in.Model
++		options.Stream = in.Stream
++		options.Metadata = cloneRequestMetadata(options.Metadata)
++		options.Metadata[core.PinnedAuthMetadataKey] = a.ID
++		options.Metadata[core.AuthSelectionModelMetadataKey] = in.Model
++		options.Metadata[pluginFallbackMetadataKey] = true
++		ctx = pluginapi.WithCallingPlugin(ctx, m.modelGuard.id)
++		ctx = withPluginFallbackDispatch(ctx, m.modelGuard.id, a.ID)
++		ctx = context.WithValue(ctx, pluginFallbackAdmissionKey{}, func(ctx context.Context) error {
++			excluded, err := m.allGuardTargetsThreadExcluded(ctx, authSelectionModelFromOptions(opts, req.Model), opts)
++			if err != nil || !excluded {
++				return fmt.Errorf("fallback no longer has all normal targets excluded: %v", err)
++			}
++			return nil
++		})
++		return ctx, a, physical, options, nil
++	}
++	callbacks := &pluginapi.ExecutionCallbacks{}
++	callbacks.Execute = func(ctx context.Context, in pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++		ctx, a, physical, options, err := prepare(ctx, in)
++		if err != nil {
++			return pluginapi.HostModelExecutionResponse{}, err
++		}
++		response, err := m.Execute(ctx, []string{a.Provider}, physical, options)
++		if err != nil {
++			return pluginapi.HostModelExecutionResponse{}, err
++		}
++		if len(response.Payload) > guardBufferLimit {
++			return pluginapi.HostModelExecutionResponse{}, fmt.Errorf("fallback exceeds hold bound")
++		}
++		return pluginapi.HostModelExecutionResponse{StatusCode: 200, Body: response.Payload, Headers: response.Headers}, nil
++	}
++	callbacks.Stream = func(ctx context.Context, in pluginapi.HostModelExecutionRequest) (pluginapi.BoundModelStream, error) {
++		ctx, a, physical, options, err := prepare(ctx, in)
++		if err != nil {
++			return pluginapi.BoundModelStream{}, err
++		}
++		response, err := m.ExecuteStream(ctx, []string{a.Provider}, physical, options)
++		if err != nil {
++			return pluginapi.BoundModelStream{}, err
++		}
++		out := make(chan pluginapi.BoundModelChunk)
++		go func() {
++			defer close(out)
++			for {
++				select {
++				case <-ctx.Done():
++					return
++				case chunk, ok := <-response.Chunks:
++					if !ok {
++						return
++					}
++					select {
++					case out <- pluginapi.BoundModelChunk{Payload: chunk.Payload, Err: chunk.Err}:
++					case <-ctx.Done():
++						return
++					}
++				}
++			}
++		}()
++		return pluginapi.BoundModelStream{Response: pluginapi.HostModelStreamResponse{StatusCode: 200, Headers: response.Headers}, Chunks: out}, nil
++	}
++	return callbacks
++}

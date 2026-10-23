@@ -1,0 +1,65 @@
+From ee88fa8da14cdc822c60f8223dfae4babaaf0976 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:04 -0700
+Subject: [PATCH] feat(sdk): expose guarded execution and auth state callbacks
+ (sdk/pluginapi/execution_callbacks.go)
+
+---
+ sdk/pluginapi/execution_callbacks.go | 48 ++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+ create mode 100644 sdk/pluginapi/execution_callbacks.go
+
+diff --git a/sdk/pluginapi/execution_callbacks.go b/sdk/pluginapi/execution_callbacks.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a80d41092f1eb2caadd43fd6cd40b489e290b37
+--- /dev/null
++++ b/sdk/pluginapi/execution_callbacks.go
+@@ -0,0 +1,48 @@
++package pluginapi
++
++import "context"
++
++// ExecutionCallbacks bind model operations to the current authorized dispatch.
++// The host installs them; client headers and plugin JSON cannot create them.
++type ExecutionCallbacks struct {
++	Execute  func(context.Context, HostModelExecutionRequest) (HostModelExecutionResponse, error)
++	Stream   func(context.Context, HostModelExecutionRequest) (BoundModelStream, error)
++	Validate func(context.Context, string) error
++}
++type BoundModelStream struct {
++	Response HostModelStreamResponse
++	Chunks   <-chan BoundModelChunk
++}
++type BoundModelChunk struct {
++	Payload []byte
++	Err     error
++}
++type executionCallbacksKey struct{}
++
++func WithExecutionCallbacks(ctx context.Context, c *ExecutionCallbacks) context.Context {
++	return context.WithValue(ctx, executionCallbacksKey{}, c)
++}
++func ExecutionCallbacksFrom(ctx context.Context) *ExecutionCallbacks {
++	c, _ := ctx.Value(executionCallbacksKey{}).(*ExecutionCallbacks)
++	return c
++}
++
++type callingPluginKey struct{}
++
++func WithCallingPlugin(ctx context.Context, id string) context.Context {
++	return context.WithValue(ctx, callingPluginKey{}, id)
++}
++func CallingPlugin(ctx context.Context) string {
++	id, _ := ctx.Value(callingPluginKey{}).(string)
++	return id
++}
++
++type auxiliaryExecutionKey struct{}
++
++func WithAuxiliaryExecution(ctx context.Context) context.Context {
++	return context.WithValue(ctx, auxiliaryExecutionKey{}, true)
++}
++func AuxiliaryExecution(ctx context.Context) bool {
++	v, _ := ctx.Value(auxiliaryExecutionKey{}).(bool)
++	return v
++}

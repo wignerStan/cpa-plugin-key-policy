@@ -1,0 +1,62 @@
+From 667a04a0fe273619ee1b5463fb17de0658aea55b Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_websocket_forward.go)
+
+---
+ .../openai/openai_responses_websocket_forward.go      | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_forward.go b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+index 1333ebffdcd678bbda8c246e335f58976330a0e4..18858cef14763557e8626cbdf3bbee9b81171ed7 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_forward.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_forward.go
+@@ -80,7 +80,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ 	for {
+ 		select {
+ 		case interruptPayload := <-localFrames:
+-			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
++			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, sessionID, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
+ 		case <-c.Request.Context().Done():
+ 			cancel(c.Request.Context().Err())
+ 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+@@ -232,7 +232,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ 				// 	websocketPayloadEventType(payloads[i]),
+ 				// 	websocketPayloadPreview(payloads[i]),
+ 				// )
+-				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
++				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payloads[i], time.Now()); errWrite != nil {
+ 					log.Warnf(
+ 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+ 						sessionID,
+@@ -250,6 +250,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
+ func completeResponsesWebsocketLocalInterrupt(
+ 	writer *responsesWebsocketWriter,
+ 	wsTimelineLog websocketTimelineAppender,
++	sessionID string,
+ 	cancel handlers.APIHandlerCancelFunc,
+ 	payload []byte,
+ 	outputItemsByIndex map[int64][]byte,
+@@ -270,7 +271,7 @@ func completeResponsesWebsocketLocalInterrupt(
+ 		cancel(errSet)
+ 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
+ 	}
+-	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incomplete, time.Now()); errWrite != nil {
++	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, incomplete, time.Now()); errWrite != nil {
+ 		cancel(errWrite)
+ 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+ 	}
+@@ -699,10 +700,10 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
+ 	return payload, nil
+ }
+ 
+-func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {
++func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, sessionID string, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+ 	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+ 	if errBuild != nil {
+ 		return nil, errBuild
+ 	}
+-	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, payload, time.Now())
++	return payload, writeResponsesWebsocketPayload(writer, wsTimelineLog, sessionID, payload, time.Now())
+ }

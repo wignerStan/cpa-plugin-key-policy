@@ -1,0 +1,148 @@
+From 41651e6a5a3269a30b8fda067d36c20cb0f28b47 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 07:49:05 -0700
+Subject: [PATCH] feat(plugins): bind guarded execution and native auth
+ (sdk/api/handlers/openai/openai_responses_websocket_test.go)
+
+---
+ .../openai/openai_responses_websocket_test.go | 130 ++++++++++++++++++
+ 1 file changed, 130 insertions(+)
+
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_test.go b/sdk/api/handlers/openai/openai_responses_websocket_test.go
+index adc844457c974fdb7520c8c45bb002c4b2bc2b44..164a908be69aafbd4372b0d95f9762b7905b9665 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_test.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_test.go
+@@ -7776,3 +7776,133 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
+ 		t.Fatal("timed out awaiting cancel callback on ping write failure")
+ 	}
+ }
++
++func boolPtr(b bool) *bool { return &b }
++
++func TestIsCodexThreadTitleSession(t *testing.T) {
++	if isCodexThreadTitleSession(nil) {
++		t.Fatal("nil headers treated as thread_title")
++	}
++	headers := http.Header{}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","request_kind":"turn","thread_source":"user"}`)
++	if isCodexThreadTitleSession(headers) {
++		t.Fatal("user thread_source treated as thread_title")
++	}
++	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","request_kind":"turn","thread_source":"thread_title"}`)
++	if !isCodexThreadTitleSession(headers) {
++		t.Fatal("thread_title sidecar not detected")
++	}
++}
++
++func TestResponsesWebsocketBlocksThreadTitleSidecar(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(false)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
++	_, resp, errDial := websocket.DefaultDialer.Dial(wsURL, http.Header{
++		"X-Codex-Turn-Metadata": []string{`{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`},
++	})
++	if errDial == nil {
++		t.Fatal("thread_title sidecar websocket was accepted")
++	}
++	if resp == nil || resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("thread_title sidecar status = %v, want 403", resp)
++	}
++}
++
++func TestResponsesHTTPBlocksThreadTitleSidecar(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(false)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.POST("/v1/responses", h.Responses)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-6-astra","input":[]}`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`)
++	resp, err := http.DefaultClient.Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("thread_title HTTP status = %d, want 403", resp.StatusCode)
++	}
++}
++
++func TestResponsesHTTPBlocksThreadTitleInClientMetadata(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(false)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.POST("/v1/responses", h.Responses)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	body := `{"model":"gpt-6-astra","input":[],"client_metadata":{"thread_source":"thread_title"}}`
++	resp, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusForbidden {
++		t.Fatalf("thread_title HTTP status = %d, want 403", resp.StatusCode)
++	}
++}
++
++func TestResponsesWebsocketAllowsThreadTitleWhenConfigured(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexThreadTitleSession: boolPtr(true)}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
++	conn, resp, errDial := websocket.DefaultDialer.Dial(wsURL, http.Header{
++		"X-Codex-Turn-Metadata": []string{`{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`},
++	})
++	if errDial != nil {
++		t.Fatalf("dial websocket: %v status=%v", errDial, resp)
++	}
++	if errClose := conn.Close(); errClose != nil {
++		t.Errorf("close websocket: %v", errClose)
++	}
++}
++
++func TestResponsesWebsocketAllowsThreadTitleByDefault(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
++	h := NewOpenAIResponsesAPIHandler(base)
++	router := gin.New()
++	router.GET("/v1/responses", h.ResponsesWebsocket)
++	server := httptest.NewServer(router)
++	defer server.Close()
++
++	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
++	conn, resp, errDial := websocket.DefaultDialer.Dial(wsURL, http.Header{
++		"X-Codex-Turn-Metadata": []string{`{"session_id":"s","thread_id":"t","thread_source":"thread_title"}`},
++	})
++	if errDial != nil {
++		t.Fatalf("dial websocket by default: %v status=%v", errDial, resp)
++	}
++	if errClose := conn.Close(); errClose != nil {
++		t.Errorf("close websocket: %v", errClose)
++	}
++}

@@ -1,0 +1,38 @@
+From 2a7e5828e6af6098f4a2cf6418a74d93e715db41 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Mon, 19 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): bound held execution
+ (internal/pluginhost/client_guard.go)
+
+---
+ internal/pluginhost/client_guard.go | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/internal/pluginhost/client_guard.go b/internal/pluginhost/client_guard.go
+index 3b6533d3f0d707195c2b478923fcc719573c58a3..3f1e14bcf2f95ea4256d84967c99fe1bb4a9db22 100644
+--- a/internal/pluginhost/client_guard.go
++++ b/internal/pluginhost/client_guard.go
+@@ -44,6 +44,10 @@ func pluginCallbackInstance(client pluginClient) *hostCallbackInstance {
+ }
+ 
+ func (c *guardedPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
++	return c.callWithLease(ctx, method, request, nil)
++}
++
++func (c *guardedPluginClient) callWithLease(ctx context.Context, method string, request []byte, lease *guardCallLease) ([]byte, error) {
+ 	inner, errAcquire := c.acquire()
+ 	if errAcquire != nil {
+ 		return nil, errAcquire
+@@ -52,8 +56,12 @@ func (c *guardedPluginClient) Call(ctx context.Context, method string, request [
+ 		ctx = context.Background()
+ 	}
+ 	result := make(chan guardedPluginCallResult, 1)
++	lease.retain()
+ 	go func() {
+ 		defer c.release()
++		// Cancellation can return to the caller before native code finishes.
++		// Keep its admission until the actual call releases all borrowed buffers.
++		defer lease.release()
+ 		defer func() {
+ 			if recovered := recover(); recovered != nil {
+ 				result <- guardedPluginCallResult{recovered: recovered}

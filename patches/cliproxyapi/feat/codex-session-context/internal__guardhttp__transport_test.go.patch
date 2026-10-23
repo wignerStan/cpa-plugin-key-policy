@@ -1,0 +1,144 @@
+From 36f3265b1c2fff1a2fbd4b5cc1769a896d2a8f27 Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Tue, 20 Oct 2026 05:00:00 -0700
+Subject: [PATCH] feat(guard): isolate verification HTTP sockets (internal/guardhttp/transport_test.go)
+
+---
+diff --git a/internal/guardhttp/transport_test.go b/internal/guardhttp/transport_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b33dcb452ee2073234926ab77388c309f18bfcd
+--- /dev/null
++++ b/internal/guardhttp/transport_test.go
+@@ -0,0 +1,132 @@
++package guardhttp
++
++import (
++	"context"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestSeparateHTTP1SideAndClosedParentSockets(t *testing.T) {
++	var mu sync.Mutex
++	var peers, protocols []string
++	closed := make(map[string]bool)
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		mu.Lock()
++		peers, protocols = append(peers, r.RemoteAddr), append(protocols, r.Proto)
++		mu.Unlock()
++		_, _ = w.Write([]byte("ok"))
++	}))
++	server.EnableHTTP2 = true
++	server.Config.ConnState = func(c net.Conn, s http.ConnState) {
++		if s == http.StateClosed {
++			mu.Lock()
++			closed[c.RemoteAddr().String()] = true
++			mu.Unlock()
++		}
++	}
++	server.StartTLS()
++	defer server.Close()
++	base := server.Client().Transport.(*http.Transport)
++	base.ForceAttemptHTTP2 = true
++	for _, policy := range []string{Isolated, HTTP1, Isolated} {
++		client := &http.Client{Transport: Standard(base, policy), Timeout: time.Second * 5}
++		response, err := client.Get(server.URL)
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, _ = io.Copy(io.Discard, response.Body)
++		if err := response.Body.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	deadline := time.Now().Add(3 * time.Second)
++	for time.Now().Before(deadline) {
++		mu.Lock()
++		all := len(closed) == 3
++		mu.Unlock()
++		if all {
++			break
++		}
++		time.Sleep(time.Millisecond)
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	if len(peers) != 3 || peers[0] == peers[1] || peers[0] == peers[2] || peers[1] == peers[2] {
++		t.Fatal("guard calls reused a socket", peers)
++	}
++	if protocols[0] != "HTTP/2.0" || protocols[1] != "HTTP/1.1" || protocols[2] != "HTTP/2.0" {
++		t.Fatal("wrong parent/side protocol", protocols)
++	}
++	if len(closed) != 3 {
++		t.Fatal("old connection survived completion", closed)
++	}
++	if base.DisableKeepAlives || !base.ForceAttemptHTTP2 {
++		t.Fatal("shared transport mutated")
++	}
++}
++
++func TestGuardHTTPIsolationRejectsOpaqueTransport(t *testing.T) {
++	if _, err := WithPolicy(context.Background(), "guess"); err == nil {
++		t.Fatal("unknown policy accepted")
++	}
++	rt := Standard(failedTransport{}, HTTP1)
++	if _, err := rt.RoundTrip(nil); err != ErrIsolation {
++		t.Fatal("custom transport silently reused", err)
++	}
++}
++
++func TestSessionRotationClosesOnlyItsOwnedParentPool(t *testing.T) {
++	closed := make(chan string, 4)
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.RemoteAddr) }))
++	server.EnableHTTP2 = true
++	server.Config.ConnState = func(c net.Conn, s http.ConnState) {
++		if s == http.StateClosed {
++			closed <- c.RemoteAddr().String()
++		}
++	}
++	server.StartTLS()
++	defer server.Close()
++	scope := &Scope{}
++	defer scope.Close()
++	base := server.Client().Transport
++	get := func(rt http.RoundTripper) string {
++		t.Helper()
++		res, err := (&http.Client{Transport: rt, Timeout: 5 * time.Second}).Get(server.URL)
++		if err != nil {
++			t.Fatal(err)
++		}
++		raw, err := io.ReadAll(res.Body)
++		_ = res.Body.Close()
++		if err != nil {
++			t.Fatal(err)
++		}
++		return string(raw)
++	}
++	shared := get(base)
++	ctx, _ := WithPolicy(context.Background(), Session)
++	first := Select(WithScope(ctx, scope, "first"), base, "same-route")
++	peer := get(first)
++	if get(Select(WithScope(ctx, scope, "first"), base, "same-route")) != peer {
++		t.Fatal("same session lost its parent connection")
++	}
++	next := Select(WithScope(ctx, scope, "second"), base, "same-route")
++	select {
++	case actual := <-closed:
++		if actual != peer {
++			t.Fatal("rotation closed another connection", actual, peer)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("rotation did not close old parent")
++	}
++	if get(next) == peer {
++		t.Fatal("new session reused old socket")
++	}
++	if get(base) != shared {
++		t.Fatal("rotation disrupted shared native pool")
++	}
++}

@@ -1,0 +1,79 @@
+diff --git a/config.example.yaml b/config.example.yaml
+index 9a40226..8e035f2 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -109,6 +109,8 @@ access:
+     - "your-api-key-1"
+     - "your-api-key-2"
+     - "your-api-key-3"
++  # Native API keys cannot access the global model list unless explicitly allowed.
++  allow-origin-models-endpoint: false
+ 
+ # Optional credential concurrency and observation contracts.
+ 
+@@ -205,6 +207,20 @@ routing:
+     max-retry-interval: 30
+ 
+   cooldown:
++    # Optional ModelTrace guard; local HTTPS Codex Responses only, restart required.
++    codex-thread:
++      enabled: false
++      cache-dir: ""
++      guard-plugin: ""
++      guard-prefixes: []
++      # Only Codex API-key credentials are eligible; OAuth/SIWC always bypass.
++      # Omitted targets cover all API-key credentials in the prefixes above.
++      # Rules are ORed; populated fields within each rule must all match exactly.
++      guard-targets: []
++      # - auth-ids: ["codex:apikey:target-a", "codex:apikey:target-b"]
++      #   base-urls: ["https://proxy.example/v1"]
++      #   models: ["lab/gpt-6.1-sol", "lab/gpt-6-astra"]
++
+     # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
+     # A credential/provider disable-cooling value, when present, overrides this global value.
+     disable-cooling: false
+@@ -332,6 +348,9 @@ upstream:
+     # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+     # Keeps one upstream account/model per socket; accepted input is never replayed.
+     response-steering: false
++    # Allow Codex thread_source=thread_title websocket upgrades and HTTP /v1/responses naming calls.
++    # Default is true (allowed). Set to false to disable both WS and HTTPS session naming.
++    thread-title-session: true
+     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
+     disable-codex-cloaking: false
+     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+@@ -378,6 +397,11 @@ upstream:
+     # conductor instead, which waits on the same context - but a client-side request timeout, not
+     # proxy_read_timeout, is what bounds them.
+     # Default: false
++    # Hold native Lite compact results until the original tools can be restored.
++    # Failed checks regenerate the original compact request on the same session/socket.
++    compact-tool-check: true
++    # Total compact attempts, including the first (1-16; zero uses 5).
++    compact-max-attempts: 5
+     stream-bootstrap-buffering: false
+     # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
+     # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
+@@ -1151,6 +1175,9 @@ observability:
+     # Enable debug logging
+     debug: false
+ 
++    # Enable trace logging (most verbose, includes full WS/HTTPS payloads)
++    trace: false
++
+     # When true, write application logs to rotating files instead of stdout
+     logging-to-file: false
+ 
+@@ -1165,6 +1192,12 @@ observability:
+     # Record proxy request/response logs. Management requests are excluded.
+     request-log: false
+ 
++    # Explicitly capture exact Codex WS/HTTPS bytes into separate private files (Linux only).
++    # Explicit best-effort raw capture, independent of trace verbosity. Individual
++    # artifacts are limited to 8 MiB, queued/buffered bytes to 32 MiB, and retained
++    # artifacts to 64 MiB total. Queue/budget loss withdraws pending capture. Default is false.
++    codex-dump: false
++
+   usage:
+     # When false, disable in-memory usage statistics aggregation
+     usage-statistics-enabled: false

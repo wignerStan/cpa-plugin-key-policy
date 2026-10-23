@@ -1,0 +1,229 @@
+From 1f41792fa48c4cbbea8f54919f4fa5b2325315ea Mon Sep 17 00:00:00 2001
+From: CPA patch maintainer <cpa-patches@localhost>
+Date: Wed, 21 Oct 2026 08:00:00 -0700
+Subject: [PATCH] fix(guard): preserve caller cancellation
+ (internal/pluginhost/model_guard_cancellation_test.go)
+
+---
+diff --git a/internal/pluginhost/model_guard_cancellation_test.go b/internal/pluginhost/model_guard_cancellation_test.go
+new file mode 100644
+index 0000000..db18849
+--- /dev/null
++++ b/internal/pluginhost/model_guard_cancellation_test.go
+@@ -0,0 +1,216 @@
++package pluginhost
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"testing"
++	"testing/synctest"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++)
++
++func TestBoundModelCancellationWinsCallbackResult(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		for _, failure := range []bool{false, true} {
++			t.Run(fmt.Sprintf("stream=%t/failure=%t", stream, failure), func(t *testing.T) {
++				host := New()
++				parent, cancel := context.WithCancel(context.Background())
++				defer cancel()
++				callbacks := &pluginapi.ExecutionCallbacks{
++					Execute: func(context.Context, pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++						cancel()
++						if failure {
++							return pluginapi.HostModelExecutionResponse{Error: "upstream_failed"}, nil
++						}
++						return pluginapi.HostModelExecutionResponse{Body: []byte("held")}, nil
++					},
++					Stream: func(context.Context, pluginapi.HostModelExecutionRequest) (pluginapi.BoundModelStream, error) {
++						cancel()
++						response := pluginapi.HostModelStreamResponse{StatusCode: 200}
++						if failure {
++							response.Error = "upstream_failed"
++						}
++						return pluginapi.BoundModelStream{Response: response, Chunks: make(chan pluginapi.BoundModelChunk)}, nil
++					},
++				}
++				id, closeCallback := host.openCallbackContext(pluginapi.WithExecutionCallbacks(parent, callbacks))
++				defer closeCallback()
++				req, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: id, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Stream: stream}})
++				call := host.callHostModelExecute
++				if stream {
++					call = host.callHostModelExecuteStream
++				}
++				result, err := call(context.Background(), req)
++				if !errors.Is(err, context.Canceled) || len(result) != 0 {
++					t.Fatalf("cancellation became upstream evidence: result=%q err=%v", result, err)
++				}
++				if len(host.modelStreams.streams) != 0 {
++					t.Fatal("canceled opening leaked a stream")
++				}
++			})
++		}
++	}
++}
++
++func TestBoundModelCanceledReadWinsQueuedErrorAndEOF(t *testing.T) {
++	for _, failure := range []bool{false, true} {
++		for i := 0; i < 100; i++ {
++			host := New()
++			parent, cancel := context.WithCancel(context.Background())
++			id, closeCallback := host.openCallbackContext(pluginapi.WithExecutionCallbacks(parent, &pluginapi.ExecutionCallbacks{}))
++			chunks := make(chan handlers.ModelExecutionChunk, 1)
++			if failure {
++				chunks <- handlers.ModelExecutionChunk{Err: &handlers.ModelExecutionStreamError{Message: "context canceled"}}
++			}
++			close(chunks)
++			closed := 0
++			stream := host.modelStreams.open(id, chunks, func() { closed++ })
++			req, _ := json.Marshal(map[string]string{"host_callback_id": id, "stream_id": stream})
++			cancel()
++			result, err := host.callHostModelStreamRead(context.Background(), req)
++			closeCallback()
++			if !errors.Is(err, context.Canceled) || len(result) != 0 || closed != 1 {
++				t.Fatalf("canceled read leaked result: %q %v closes=%d", result, err, closed)
++			}
++		}
++	}
++}
++
++func TestBoundAuxiliaryDeadlineStopsEndlessResponse(t *testing.T) {
++	for _, callerDeadline := range []bool{false, true} {
++		t.Run(fmt.Sprint(callerDeadline), func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				host := New()
++				parent := context.Background()
++				if callerDeadline {
++					var cancel context.CancelFunc
++					parent, cancel = context.WithTimeout(parent, time.Second)
++					defer cancel()
++				}
++				callbacks := &pluginapi.ExecutionCallbacks{Execute: func(ctx context.Context, _ pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++					<-ctx.Done()
++					return pluginapi.HostModelExecutionResponse{Error: "upstream_failed"}, nil
++				}}
++				id, cleanup := host.openCallbackContext(pluginapi.WithExecutionCallbacks(parent, callbacks))
++				defer cleanup()
++				req, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: id, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Auxiliary: true}})
++				start := time.Now()
++				result, err := host.callHostModelExecute(context.Background(), req)
++				if callerDeadline {
++					if !errors.Is(err, context.DeadlineExceeded) || len(result) != 0 || time.Since(start) != time.Second {
++						t.Fatalf("caller deadline became model failure: %q %v", result, err)
++					}
++					return
++				}
++				if err != nil {
++					t.Fatal(err)
++				}
++				response, err := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](result)
++				if err != nil || response.Error != "auxiliary_timeout" || time.Since(start) != hostAuxiliaryExecutionTimeout {
++					t.Fatalf("private execution escaped timeout: %+v %v elapsed=%v", response, err, time.Since(start))
++				}
++			})
++		})
++	}
++}
++
++func TestBoundMainExecutionHasNoAuxiliaryDeadline(t *testing.T) {
++	host := New()
++	callbacks := &pluginapi.ExecutionCallbacks{Execute: func(ctx context.Context, _ pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++		if _, present := ctx.Deadline(); present {
++			t.Fatal("private probe timeout leaked into main execution")
++		}
++		return pluginapi.HostModelExecutionResponse{}, nil
++	}}
++	id, cleanup := host.openCallbackContext(pluginapi.WithExecutionCallbacks(context.Background(), callbacks))
++	defer cleanup()
++	req, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: id})
++	if _, err := host.callHostModelExecute(context.Background(), req); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestBoundAuxiliaryAllowsHighEffortResponse(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		host := New()
++		callbacks := &pluginapi.ExecutionCallbacks{Execute: func(ctx context.Context, _ pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++			select {
++			case <-time.After(2 * time.Minute):
++				return pluginapi.HostModelExecutionResponse{Body: []byte(`{"status":"completed"}`)}, nil
++			case <-ctx.Done():
++				return pluginapi.HostModelExecutionResponse{Error: "upstream_failed"}, nil
++			}
++		}}
++		id, cleanup := host.openCallbackContext(pluginapi.WithExecutionCallbacks(context.Background(), callbacks))
++		defer cleanup()
++		req, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: id, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Auxiliary: true}})
++		result, err := host.callHostModelExecute(context.Background(), req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		response, err := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](result)
++		if err != nil || response.Error != "" || string(response.Body) != `{"status":"completed"}` {
++			t.Fatal("valid high-effort response was truncated", response.Error, err)
++		}
++	})
++}
++
++type compactValidationTestError struct{}
++
++func (compactValidationTestError) Error() string { return "private compact validation detail" }
++func (compactValidationTestError) ModelGuardRetryReason() string {
++	return "upstream_compact_validation_failed"
++}
++
++func TestBoundCompactFailureIsStructuredAndCancellationWins(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		for _, canceled := range []bool{false, true} {
++			h := New()
++			parent, cancel := context.WithCancel(context.Background())
++			failure := fmt.Errorf("wrapped: %w", compactValidationTestError{})
++			callbacks := &pluginapi.ExecutionCallbacks{
++				Execute: func(context.Context, pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
++					if canceled {
++						cancel()
++					}
++					return pluginapi.HostModelExecutionResponse{}, failure
++				},
++				Stream: func(context.Context, pluginapi.HostModelExecutionRequest) (pluginapi.BoundModelStream, error) {
++					if canceled {
++						cancel()
++					}
++					return pluginapi.BoundModelStream{}, failure
++				},
++			}
++			id, cleanup := h.openCallbackContext(pluginapi.WithExecutionCallbacks(parent, callbacks))
++			req, _ := json.Marshal(rpcHostModelExecutionRequest{HostCallbackID: id, HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{Stream: stream}})
++			call := h.callHostModelExecute
++			if stream {
++				call = h.callHostModelExecuteStream
++			}
++			raw, err := call(context.Background(), req)
++			if canceled {
++				if !errors.Is(err, context.Canceled) {
++					t.Fatal(err)
++				}
++			} else {
++				if err != nil {
++					t.Fatal(err)
++				}
++				response, err := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](raw)
++				if err != nil || response.Error != "upstream_compact_validation_failed" || response.StatusCode != 502 {
++					t.Fatal(response, err)
++				}
++			}
++			cleanup()
++			cancel()
++		}
++	}
++	if _, ok := modelGuardValidationFailure(errors.New("upstream_compact_validation_failed")); ok {
++		t.Fatal("untyped message became a retry marker")
++	}
++}
